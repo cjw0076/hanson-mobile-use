@@ -54,6 +54,43 @@ data class ToolSpec(
             put("parameters", schema)
         }
     }
+
+    /**
+     * 2026 Interactions API (`/v1beta/interactions`) flat function tool schema:
+     * `{"type": "function", "name": "...", "description": "...", "parameters": {"type": "object", ...}}`
+     */
+    fun toGeminiInteractionsToolDeclaration(): JSONObject {
+        val properties = JSONObject()
+        val requiredArr = JSONArray()
+
+        for (param in parameters) {
+            properties.put(
+                param.name,
+                JSONObject().apply {
+                    put("type", param.type.lowercase())
+                    put("description", param.description)
+                }
+            )
+            if (param.required) {
+                requiredArr.put(param.name)
+            }
+        }
+
+        val schema = JSONObject().apply {
+            put("type", "object")
+            put("properties", properties)
+            if (requiredArr.length() > 0) {
+                put("required", requiredArr)
+            }
+        }
+
+        return JSONObject().apply {
+            put("type", "function")
+            put("name", name)
+            put("description", description)
+            put("parameters", schema)
+        }
+    }
 }
 
 /**
@@ -392,5 +429,13 @@ object ToolSpecRegistry {
                 put("functionDeclarations", declarations)
             }
         )
+    }
+
+    fun toGeminiInteractionsToolsJson(): JSONArray {
+        val tools = JSONArray()
+        for (spec in allSpecs) {
+            tools.put(spec.toGeminiInteractionsToolDeclaration())
+        }
+        return tools
     }
 }

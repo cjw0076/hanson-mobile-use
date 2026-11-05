@@ -68,11 +68,16 @@ object RemoteInputSessionCache {
         return sessions.values
             .sortedByDescending { it.timestampMs }
             .firstOrNull { item ->
+                val sLower = item.sender.lowercase()
+                val rLower = item.roomOrTitle.lowercase()
+                val aLower = item.appLabel.lowercase()
+                val pLower = item.packageName.lowercase()
+
                 item.sessionId.lowercase() == q ||
-                    item.sender.lowercase().contains(q) ||
-                    item.roomOrTitle.lowercase().contains(q) ||
-                    item.appLabel.lowercase().contains(q) ||
-                    item.packageName.lowercase().contains(q)
+                    sLower == q || (sLower.isNotEmpty() && (sLower.contains(q) || q.contains(sLower))) ||
+                    rLower == q || (rLower.isNotEmpty() && (rLower.contains(q) || q.contains(rLower))) ||
+                    aLower == q || (aLower.isNotEmpty() && (aLower.contains(q) || q.contains(aLower))) ||
+                    pLower == q || (pLower.isNotEmpty() && (pLower.contains(q) || q.contains(pLower)))
             }
     }
 

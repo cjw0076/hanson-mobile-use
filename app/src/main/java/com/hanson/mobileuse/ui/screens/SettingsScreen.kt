@@ -46,6 +46,7 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.hanson.mobileuse.agent.AgentEngineConfig
+import com.hanson.mobileuse.agent.GeminiMultimodalClient
 import com.hanson.mobileuse.agent.ToolSpecRegistry
 import com.hanson.mobileuse.ui.components.CodeBadge
 import com.hanson.mobileuse.ui.components.GlassCard
@@ -60,19 +61,14 @@ fun SettingsScreen(
     onToggleDaemon: (Boolean) -> Unit
 ) {
     var apiKey by remember(config.apiKey) { mutableStateOf(config.apiKey) }
-    var modelName by remember(config.modelName) { mutableStateOf(config.modelName) }
+    var modelName by remember(config.modelName) {
+        mutableStateOf(GeminiMultimodalClient.normalize2026ModelName(config.modelName))
+    }
     var maxIter by remember(config.maxIterations) { mutableFloatStateOf(config.maxIterations.toFloat()) }
     var autoHud by remember(config.autoShowFloatingHud) { mutableStateOf(config.autoShowFloatingHud) }
     var showKey by remember { mutableStateOf(false) }
 
-    val modelPresets = listOf(
-        "gemini-3.8-flash" to "2026 기본 1M 멀티모달 에이전트 (thinking_level 지원 · 권장)",
-        "gemini-4-argon" to "2026 플래그십 1M 초고난도 추론 · 앱 역분석 · Gen-UI 합성",
-        "gemini-3.5-flash-lite" to "초저지연 0.2초 GUI 리플렉스 오퍼레이터",
-        "gemini-3.8-live-extended-thinking" to "풀듀플렉스 Live Voice + 실시간 화면 스트리밍 + 비동기 도구",
-        "cli-subscription-bridge" to "노트북 CLI 구독 직결 (Gemini CLI / Codex / Claude / Agy · API 키 불필요)",
-        "gemma-4-26b-a4b-it" to "온디바이스 LiteRT-LM / AICore 로컬 추론 (무과금 오프라인)"
-    )
+    val modelPresets = GeminiMultimodalClient.AISTUDIO_OFFICIAL_MODELS
 
     LazyColumn(
         modifier = Modifier

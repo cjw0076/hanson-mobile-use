@@ -6,8 +6,14 @@ import com.hanson.mobileuse.accessibility.AtomicSnapshot
 import com.hanson.mobileuse.accessibility.HansonAccessibilityService
 import com.hanson.mobileuse.accessibility.HierarchyDumper
 import com.hanson.mobileuse.notification.InterceptedNotification
+import com.hanson.mobileuse.paradigm.CompositeExecutionMode
 import com.hanson.mobileuse.paradigm.HabitOrganonRuntime
 import com.hanson.mobileuse.paradigm.LiquidUiSynthesizer
+import com.hanson.mobileuse.paradigm.ModeTurnResult
+import com.hanson.mobileuse.paradigm.ParadigmExecutionModeController
+import com.hanson.mobileuse.paradigm.SemanticTeleportCandidate
+import com.hanson.mobileuse.paradigm.SemanticTeleportRouter
+import com.hanson.mobileuse.paradigm.TeleportResult
 import com.hanson.mobileuse.paradigm.WorldModelGraph
 import com.hanson.mobileuse.service.FloatingHudService
 import com.hanson.mobileuse.service.HansonForegroundService
@@ -60,6 +66,8 @@ class MobileUseAgentEngine(
     private val trajectoryVerifier = ActionTrajectoryVerifierAndHealer(context)
     val worldModelGraph = WorldModelGraph(context)
     val habitOrganonRuntime = HabitOrganonRuntime(context, worldModelGraph)
+    val executionModeController = ParadigmExecutionModeController(worldModelGraph, habitOrganonRuntime)
+    val semanticTeleportRouter = SemanticTeleportRouter(context)
 
     private var activeJob: Job? = null
     private var approvalDeferred: CompletableDeferred<Boolean>? = null
@@ -109,10 +117,15 @@ class MobileUseAgentEngine(
     }
 
     private fun loadConfig(): AgentEngineConfig {
+        val rawSavedModel = prefs.getString(KEY_MODEL, GeminiMultimodalClient.DEFAULT_MODEL)
+            ?: GeminiMultimodalClient.DEFAULT_MODEL
+        val normalizedModel = GeminiMultimodalClient.normalize2026ModelName(rawSavedModel)
+        if (normalizedModel != rawSavedModel) {
+            prefs.edit().putString(KEY_MODEL, normalizedModel).apply()
+        }
         return AgentEngineConfig(
             apiKey = prefs.getString(KEY_API_KEY, "").orEmpty(),
-            modelName = prefs.getString(KEY_MODEL, GeminiMultimodalClient.DEFAULT_MODEL)
-                ?: GeminiMultimodalClient.DEFAULT_MODEL,
+            modelName = normalizedModel,
             maxIterations = prefs.getInt(KEY_MAX_ITER, 15).coerceIn(3, 40),
             autoShowFloatingHud = prefs.getBoolean(KEY_AUTO_HUD, true),
             ttsVoiceReply = prefs.getBoolean(KEY_TTS_VOICE, false)
@@ -127,9 +140,10 @@ class MobileUseAgentEngine(
         ttsVoiceReply: Boolean? = null
     ) {
         val current = _config.value
+        val resolvedModel = GeminiMultimodalClient.normalize2026ModelName(modelName ?: current.modelName)
         val next = current.copy(
             apiKey = apiKey ?: current.apiKey,
-            modelName = modelName ?: current.modelName,
+            modelName = resolvedModel,
             maxIterations = (maxIterations ?: current.maxIterations).coerceIn(3, 40),
             autoShowFloatingHud = autoShowFloatingHud ?: current.autoShowFloatingHud,
             ttsVoiceReply = ttsVoiceReply ?: current.ttsVoiceReply
@@ -343,7 +357,98 @@ class MobileUseAgentEngine(
     private suspend fun runLoop(goal: String, cfg: AgentEngineConfig) {
         val (fallbackW, fallbackH) = HierarchyDumper.getScreenDimensions(context)
 
-        for (iter in 1..cfg.maxIterations) {
+        // Layer 1: Check for Fast-Lane Semantic Teleport before executing kinetic steps
+        val teleportCandidate = semanticTeleportRouter.findFastLaneCandidate(goal)
+        var hadInitialTeleportStep = false
+        if (teleportCandidate != null) {
+            when (val teleportResult = semanticTeleportRouter.executeTeleport(teleportCandidate)) {
+                is TeleportResult.Success -> {
+                    val summary = teleportResult.messageKo
+                    val isCompound = semanticTeleportRouter.isCompoundGoal(goal)
+
+                    // For an app launch Intent with compound instructions (e.g. search, click, navigate):
+                    // do NOT terminate with COMPLETED. Instead, launch the app and hand off to Layer 2 in-app kinetic control!
+                    if (teleportCandidate is SemanticTeleportCandidate.IntentCandidate && isCompound) {
+                        val stepLog = AgentStepLog(
+                            stepNumber = 1,
+                            observation = "[Layer 1 Semantic Teleport] 앱 빠른 진입 성공: $summary. 인앱 키네틱 제어로 전환합니다.",
+                            planLedger = listOf(
+                                SubGoalItem("Semantic Teleport 앱 실행", SubGoalStatus.COMPLETED),
+                                SubGoalItem("인앱 연속 물리 제어 (Layer 2)", SubGoalStatus.IN_PROGRESS)
+                            ),
+                            toolName = "semantic_teleport",
+                            toolArgsJson = "{\"targetPackage\": \"${teleportCandidate.packageName}\"}",
+                            resultSummary = summary,
+                            succeeded = true,
+                            activePackage = teleportCandidate.packageName,
+                            elementCount = 0
+                        )
+                        _currentSession.update { prev ->
+                            prev.copy(
+                                status = AgentRunStatus.ACTING,
+                                subGoals = listOf(
+                                    SubGoalItem("Semantic Teleport 앱 실행", SubGoalStatus.COMPLETED),
+                                    SubGoalItem("인앱 연속 물리 제어 (Layer 2)", SubGoalStatus.IN_PROGRESS)
+                                ),
+                                steps = prev.steps + stepLog
+                            )
+                        }
+                        appendChatMessage(
+                            LiveChatMessage(
+                                sender = ChatSender.AGENT,
+                                text = "$summary (인앱 키네틱 조작 계속)",
+                                subtitle = "[Layer 1 Teleport] 앱 실행 후 Layer 2 키네틱 루프로 인계",
+                                toolBadge = "TELEPORT -> KINETIC"
+                            )
+                        )
+                        FloatingHudService.updateHudStatus("앱 실행 완료 · 화면 분석 중", goal.take(30), true)
+                        hadInitialTeleportStep = true
+                        // Fall through to kinetic loop
+                    } else {
+                        // Pure terminal teleport (e.g. RemoteInput reply, pure OS setting, or solo app launch)
+                        val stepLog = AgentStepLog(
+                            stepNumber = 1,
+                            observation = "[Layer 1 Semantic Teleport] Fast-Lane 단축 경로 실행 완료",
+                            planLedger = listOf(SubGoalItem("Semantic Teleport 실행", SubGoalStatus.COMPLETED)),
+                            toolName = "semantic_teleport",
+                            toolArgsJson = "{}",
+                            resultSummary = summary,
+                            succeeded = true,
+                            activePackage = context.packageName,
+                            elementCount = 0
+                        )
+                        _currentSession.update { prev ->
+                            val completed = prev.copy(
+                                status = AgentRunStatus.COMPLETED,
+                                subGoals = listOf(SubGoalItem("Semantic Teleport 실행", SubGoalStatus.COMPLETED)),
+                                steps = prev.steps + stepLog,
+                                finalSummary = summary,
+                                finishedAtMs = System.currentTimeMillis()
+                            )
+                            archiveSession(completed)
+                            completed
+                        }
+                        appendChatMessage(
+                            LiveChatMessage(
+                                sender = ChatSender.AGENT,
+                                text = summary,
+                                subtitle = "[Layer 1 Teleport] 화면 조작 없이 서브-100ms 완료",
+                                toolBadge = "TELEPORT OK"
+                            )
+                        )
+                        speakIfEnabled(summary)
+                        FloatingHudService.updateHudStatus("라이브 채팅 대기 중", summary.take(32), false)
+                        return
+                    }
+                }
+                is TeleportResult.FallbackToKinetic -> {
+                    // Fall back to Layer 2 / Layer 3 kinetic navigation
+                }
+            }
+        }
+
+        val startIter = if (hadInitialTeleportStep) 2 else 1
+        for (iter in startIter..cfg.maxIterations) {
             _currentSession.update {
                 it.copy(
                     currentIteration = iter,
@@ -364,16 +469,46 @@ class MobileUseAgentEngine(
             _currentSession.update { it.copy(status = AgentRunStatus.THINKING) }
             FloatingHudService.updateHudStatus("Step $iter · AI 추론 중", "화면 요소 ${snapshot.indexedElements.size}개 분석", true)
 
-            val decision = multimodalClient.decideNextAction(
-                apiKey = cfg.apiKey,
-                modelName = cfg.modelName,
-                goal = goal,
-                iteration = iter,
+            // Evaluate turn using ParadigmExecutionModeController (BOCPD Change-Point Gate + 3 Composite Modes)
+            val recentFailed = _currentSession.value.steps.lastOrNull()?.succeeded == false
+            val modeTurnResult = executionModeController.evaluateTurn(
                 snapshot = snapshot,
-                historySteps = _currentSession.value.steps,
-                previousPlan = _currentSession.value.subGoals,
-                chatHistory = _chatMessages.value
+                goal = goal,
+                mode = CompositeExecutionMode.RECURSIVE_EVOLUTION_3PHASE,
+                recentStepFailed = recentFailed
             )
+
+            val (decision, currentActorTier) = when (modeTurnResult) {
+                is ModeTurnResult.DirectAction -> {
+                    val s1 = modeTurnResult.decision
+                    val tier = if (modeTurnResult.rationaleKo.contains("Rollout") || modeTurnResult.mode == CompositeExecutionMode.PRE_SIMULATION_ROLLOUT) {
+                        "S1_ROLLOUT"
+                    } else {
+                        "S1_HABIT_PROTOTYPE"
+                    }
+                    FloatingHudService.updateHudStatus("Step $iter · 0-LLM S1 반사 실행", modeTurnResult.rationaleKo.take(30), true)
+                    s1 to tier
+                }
+                is ModeTurnResult.SpeculativeDispatched -> {
+                    val s1 = modeTurnResult.speculativeDecision
+                    FloatingHudService.updateHudStatus("Step $iter · 병렬 투기적 S1 디스패치", "투기적 실행 중", true)
+                    s1 to "S1_SPECULATIVE"
+                }
+                is ModeTurnResult.EscalateToSystem2 -> {
+                    FloatingHudService.updateHudStatus("Step $iter · S2 심판 추론", modeTurnResult.reasonKo.take(30), true)
+                    val s2 = multimodalClient.decideNextAction(
+                        apiKey = cfg.apiKey,
+                        modelName = cfg.modelName,
+                        goal = goal,
+                        iteration = iter,
+                        snapshot = snapshot,
+                        historySteps = _currentSession.value.steps,
+                        previousPlan = _currentSession.value.subGoals,
+                        chatHistory = _chatMessages.value
+                    )
+                    s2 to "S2_DELIBERATIVE"
+                }
+            }
 
             _currentSession.update {
                 it.copy(subGoals = decision.subGoals)
@@ -534,7 +669,7 @@ class MobileUseAgentEngine(
                 stepNumber = iter,
                 preSnapshot = snapshot,
                 postSnapshot = verification.finalSnapshot,
-                actorTier = if (verification.recoveryAttempted) "SELF_HEALER" else "S2_DELIBERATIVE",
+                actorTier = if (verification.recoveryAttempted) "SELF_HEALER" else currentActorTier,
                 toolName = decision.toolName,
                 toolArgsJson = decision.toolArgs.toString(),
                 verifiedSuccess = verification.verifiedSuccess,

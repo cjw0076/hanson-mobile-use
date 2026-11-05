@@ -275,4 +275,35 @@ class MobileUseHarnessTest {
         assertEquals("input_text", step3.toolName)
         assertEquals("아이유", step3.toolArgs.getString("text"))
     }
+
+    @Test
+    fun aiStudioOfficialModelsAndInteractionsSchema_alignWith2026Docs() {
+        // Official Dec 1, 2026 routing per https://aistudio.google.com/docs/models
+        assertEquals("gemini-3.5-flash-lite", GeminiMultimodalClient.normalize2026ModelName("gemini-2.5-flash"))
+        assertEquals("gemini-3.8-flash", GeminiMultimodalClient.normalize2026ModelName("gemini-2.5-pro"))
+        assertEquals("gemini-2.5-flash-lite", GeminiMultimodalClient.normalize2026ModelName("gemini-2.5-flash-lite"))
+        assertEquals("gemini-3.1-flash-lite", GeminiMultimodalClient.normalize2026ModelName("gemini-3.1-flash-lite-preview"))
+        assertEquals("gemini-robotics-er-2-preview", GeminiMultimodalClient.normalize2026ModelName("gemini-robotics-er-1.6-preview"))
+        assertEquals("gemini-3.8-live", GeminiMultimodalClient.normalize2026ModelName("gemini-3.1-flash-live-preview"))
+        assertEquals("gemini-3.8-flash-tts", GeminiMultimodalClient.normalize2026ModelName("gemini-3.1-flash-tts-preview"))
+        assertEquals("gemini-nano-banana-2.1", GeminiMultimodalClient.normalize2026ModelName("gemini-2.5-flash-image"))
+        assertEquals("gemini-4-argon", GeminiMultimodalClient.normalize2026ModelName("gemini-4-argon"))
+
+        val officialIds = GeminiMultimodalClient.AISTUDIO_OFFICIAL_MODELS.map { it.first }.toSet()
+        assertTrue(officialIds.contains("gemini-4-argon"))
+        assertTrue(officialIds.contains("gemini-3.8-flash"))
+        assertTrue(officialIds.contains("gemini-3.6-flash"))
+        assertTrue(officialIds.contains("gemini-3.5-flash-lite"))
+        assertTrue(officialIds.contains("gemini-3.1-flash-lite"))
+        assertTrue(officialIds.contains("gemini-robotics-er-2-preview"))
+        assertTrue(officialIds.contains("antigravity-preview-09-2026"))
+        assertTrue(officialIds.contains("gemini-3.8-live"))
+        assertTrue(officialIds.contains("gemini-3.8-live-extended-thinking"))
+
+        val interactionsTools = ToolSpecRegistry.toGeminiInteractionsToolsJson()
+        assertEquals(27, interactionsTools.length())
+        val firstTool = interactionsTools.getJSONObject(0)
+        assertEquals("function", firstTool.getString("type"))
+        assertEquals("object", firstTool.getJSONObject("parameters").getString("type"))
+    }
 }
