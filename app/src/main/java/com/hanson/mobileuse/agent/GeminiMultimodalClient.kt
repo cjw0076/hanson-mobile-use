@@ -88,8 +88,28 @@ Critical Mobile-Use Rules:
         iteration: Int,
         snapshot: AtomicSnapshot,
         historySteps: List<AgentStepLog>,
-        previousPlan: List<SubGoalItem>
+        previousPlan: List<SubGoalItem>,
+        chatHistory: List<LiveChatMessage> = emptyList(),
+        preferLaptopCliBridge: Boolean = true,
+        laptopBridgeUrl: String = "http://127.0.0.1:18889/decide"
     ): ModelTurnDecision {
+        // 1. Try Laptop CLI Bridge first (adb reverse tcp:18889 tcp:18889) if enabled
+        if (preferLaptopCliBridge) {
+            val bridgeDecision = tryCallLaptopCliBridge(
+                bridgeUrl = laptopBridgeUrl,
+                goal = goal,
+                iteration = iteration,
+                snapshot = snapshot,
+                historySteps = historySteps,
+                previousPlan = previousPlan,
+                chatHistory = chatHistory
+            )
+            if (bridgeDecision != null) {
+                return bridgeDecision
+            }
+        }
+
+        // 2. Try Direct Gemini API if API key is configured
         val cleanKey = apiKey.trim()
         if (cleanKey.isEmpty()) {
             return inferLocalOnDeviceAction(goal, iteration, snapshot, historySteps, previousPlan)
@@ -103,7 +123,8 @@ Critical Mobile-Use Rules:
                 iteration = iteration,
                 snapshot = snapshot,
                 historySteps = historySteps,
-                previousPlan = previousPlan
+                previousPlan = previousPlan,
+                chatHistory = chatHistory
             )
         } catch (e: Exception) {
             ModelTurnDecision(
@@ -115,6 +136,81 @@ Critical Mobile-Use Rules:
         }
     }
 
+    private fun tryCallLaptopCliBridge(
+        bridgeUrl: String,
+        goal: String,
+        iteration: Int,
+        snapshot: AtomicSnapshot,
+        historySteps: List<AgentStepLog>,
+        previousPlan: List<SubGoalItem>,
+        chatHistory: List<LiveChatMessage>
+    ): ModelTurnDecision? {
+        return try {
+            val payload = JSONObject().apply {
+                put("goal", goal)
+                put("iteration", iteration)
+                put("activePackage", snapshot.activePackage)
+                put("screenWidth", snapshot.screenWidth)
+                put("screenHeight", snapshot.screenHeight)
+                put("promptContext", snapshot.toPromptContext(maxElements = 80))
+                val chatArr = JSONArray()
+                chatHistory.takeLast(10).forEach { chatArr.put(it.toJson()) }
+                put("chatHistory", chatArr)
+                val stepArr = JSONArray()
+                historySteps.takeLast(5).forEach { s ->
+                    stepArr.put(
+                        JSONObject().apply {
+                            put("step", s.stepNumber)
+                            put("tool", s.toolName)
+                            put("args", s.toolArgsJson)
+                            put("succeeded", s.succeeded)
+                            put("result", s.resultSummary)
+                        }
+                    )
+                }
+                put("historySteps", stepArr)
+            }
+
+            val req = Request.Builder()
+                .url(bridgeUrl)
+                .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+                .build()
+
+            val fastClient = httpClient.newBuilder()
+                .connectTimeout(1500, TimeUnit.MILLISECONDS)
+                .readTimeout(25, TimeUnit.SECONDS)
+                .build()
+
+            fastClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return null
+                val bodyStr = resp.body?.string().orEmpty()
+                val json = JSONObject(bodyStr)
+                val obs = json.optString("observation", "[노트북 CLI 브리지] 화면 및 명령 분석 완료")
+                val toolName = json.optString("toolName", "complete_task")
+                val toolArgs = json.optJSONObject("toolArgs") ?: JSONObject()
+                val planArr = json.optJSONArray("subGoals")
+                val parsedPlan = mutableListOf<SubGoalItem>()
+                if (planArr != null) {
+                    for (i in 0 until planArr.length()) {
+                        val item = planArr.optJSONObject(i) ?: continue
+                        val statusStr = item.optString("status", "IN_PROGRESS")
+                        val status = runCatching { SubGoalStatus.valueOf(statusStr) }
+                            .getOrDefault(SubGoalStatus.IN_PROGRESS)
+                        parsedPlan.add(SubGoalItem(item.optString("title", "서브골"), status))
+                    }
+                }
+                ModelTurnDecision(
+                    observation = obs,
+                    subGoals = if (parsedPlan.isNotEmpty()) parsedPlan else previousPlan,
+                    toolName = toolName,
+                    toolArgs = toolArgs
+                )
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     private fun callGeminiMultimodalApi(
         apiKey: String,
         modelName: String,
@@ -122,9 +218,18 @@ Critical Mobile-Use Rules:
         iteration: Int,
         snapshot: AtomicSnapshot,
         historySteps: List<AgentStepLog>,
-        previousPlan: List<SubGoalItem>
+        previousPlan: List<SubGoalItem>,
+        chatHistory: List<LiveChatMessage>
     ): ModelTurnDecision {
         val url = "https://generativelanguage.googleapis.com/v1beta/models/$modelName:generateContent?key=$apiKey"
+
+        val chatSummary = if (chatHistory.isEmpty()) {
+            "(No prior live chat messages)"
+        } else {
+            chatHistory.takeLast(12).joinToString("\n") { msg ->
+                "[${msg.sender.name}] ${msg.text}"
+            }
+        }
 
         val historySummary = if (historySteps.isEmpty()) {
             "(First turn - no prior actions executed yet)"
@@ -141,7 +246,10 @@ Critical Mobile-Use Rules:
         }
 
         val promptText = buildString {
-            appendLine("User Goal: $goal")
+            appendLine("Continuous Live Chat Context:")
+            appendLine(chatSummary)
+            appendLine()
+            appendLine("Current User Message / Goal: $goal")
             appendLine("Current Turn: $iteration")
             appendLine()
             appendLine("Previous Plan Ledger:")
@@ -278,6 +386,34 @@ Critical Mobile-Use Rules:
                     "summary",
                     "[온디바이스 실행 완료] ${last.resultSummary}\n(설정 탭에서 Gemini API Key를 입력하면 멀티스텝 비전 GUI 추론이 활성화됩니다.)"
                 )
+            )
+        }
+
+        // 0. Native Mobile OS CLI (`hanson ...`, `/cli ...`, `/sh ...`, `dumpsys`, `애니메이션`, `강제 종료`, `self-heal`)
+        if (
+            gLower.startsWith("hanson ") ||
+            gLower.startsWith("/cli ") ||
+            gLower.startsWith("/sh ") ||
+            gLower.contains("dumpsys") ||
+            gLower.contains("액티비티 스택") ||
+            gLower.contains("애니메이션 배속") ||
+            gLower.contains("자가 치유") ||
+            gLower.contains("self-heal")
+        ) {
+            val cliCmd = when {
+                gLower.contains("액티비티 스택") -> "top"
+                gLower.contains("애니메이션 배속") -> {
+                    val scale = Regex("[0-9.]+").find(g)?.value ?: "0.5"
+                    "setting put global animator_duration_scale $scale"
+                }
+                gLower.contains("자가 치유") || gLower.contains("self-heal") -> "self-heal"
+                else -> g.removePrefix("hanson ").removePrefix("/cli ").removePrefix("/sh ").trim()
+            }
+            return ModelTurnDecision(
+                observation = "[Hanson Mobile OS CLI] 네이티브 OS CLI 명령('$cliCmd')을 실행합니다.",
+                subGoals = listOf(SubGoalItem("모바일 OS CLI ($cliCmd) 실행", SubGoalStatus.IN_PROGRESS)),
+                toolName = "os_cli_exec",
+                toolArgs = JSONObject().put("command", cliCmd)
             )
         }
 

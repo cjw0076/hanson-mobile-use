@@ -2,6 +2,9 @@ package com.hanson.mobileuse.accessibility
 
 import android.accessibilityservice.AccessibilityService
 import android.util.Log
+import com.hanson.mobileuse.agent.ChatSender
+import com.hanson.mobileuse.agent.HansonRuntimeHolder
+import com.hanson.mobileuse.agent.LiveChatMessage
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
@@ -18,8 +21,8 @@ import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Google Artemis Loopback Bridge (`127.0.0.1:18888`)
- * Compatible with `packages/artemis-accessibility-helper` HTTP & raw JSON-RPC protocol,
- * plus extended `/elements` and `/action` endpoints for local MCP/ADB/Termux agents.
+ * Supports `/ping`, `/snapshot`, `/dump`, `/dump_xml`, `/elements`, `/action`, `/rpc`,
+ * AND `/chat` for continuous runtime Live Chat synchronization with the Laptop CLI (Antigravity / Codex / Artemis).
  */
 class ArtemisCommandServer(
     private val service: AccessibilityService,
@@ -138,14 +141,45 @@ class ArtemisCommandServer(
 
         when (path) {
             "/ping", "/health" -> {
+                val engine = HansonRuntimeHolder.getAgentEngine(service.applicationContext)
                 val resp = JSONObject().apply {
                     put("status", "ok")
                     put("engine", "Hanson-Artemis-Hybrid-v1")
                     put("port", port)
                     put("requests", totalRequests.get())
+                    put("agentStatus", engine.currentSession.value.status.name)
+                    put("chatMessageCount", engine.chatMessages.value.size)
                 }
                 onBridgeEvent?.invoke(path, "200 OK")
                 sendHttpResponse(out, 200, "application/json", resp.toString())
+            }
+            "/chat" -> {
+                val engine = HansonRuntimeHolder.getAgentEngine(service.applicationContext)
+                if ("GET".equals(method, ignoreCase = true)) {
+                    val arr = JSONArray()
+                    engine.chatMessages.value.forEach { arr.put(it.toJson()) }
+                    val resp = JSONObject().apply {
+                        put("status", "ok")
+                        put("agentStatus", engine.currentSession.value.status.name)
+                        put("messages", arr)
+                    }
+                    onBridgeEvent?.invoke("GET /chat", "200 OK (${arr.length()} msgs)")
+                    sendHttpResponse(out, 200, "application/json", resp.toString())
+                } else {
+                    val req = runCatching { JSONObject(body) }.getOrDefault(JSONObject())
+                    val text = req.optString("text", req.optString("message", "")).trim()
+                    val role = req.optString("role", "assistant").lowercase()
+                    val badge = req.optString("badge", "LAPTOP CLI")
+                    if (text.isNotEmpty()) {
+                        if (role == "user" || req.optBoolean("executeGoal", false)) {
+                            engine.sendChatMessage(text)
+                        } else {
+                            engine.injectExternalReply(text, badge)
+                        }
+                    }
+                    onBridgeEvent?.invoke("POST /chat", "200 OK ($role)")
+                    sendHttpResponse(out, 200, "application/json", """{"status":"ok"}""")
+                }
             }
             "/snapshot" -> {
                 val includeScreenshot = queryParams["screenshot"] != "false"

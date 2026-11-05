@@ -98,6 +98,7 @@ class AgentToolExecutionHarness(private val context: Context) {
                 "set_alarm" -> executeSetAlarm(args)
                 "save_note" -> executeSaveNote(args)
                 "read_note" -> executeReadNote(args)
+                "os_cli_exec" -> executeOsCli(args)
                 "ask_user" -> ToolExecutionOutcome(
                     succeeded = true,
                     outputText = "사용자에게 질문 전달: ${args.optString("question")}"
@@ -875,6 +876,110 @@ class AgentToolExecutionHarness(private val context: Context) {
             }
         }
         return null
+    }
+
+    private fun executeOsCli(args: JSONObject): ToolExecutionOutcome {
+        val rawCmd = args.optString("command", "status").trim()
+            .removePrefix("hanson ")
+            .removePrefix("/cli ")
+            .removePrefix("/sh ")
+            .trim()
+        val tokens = rawCmd.split(Regex("\\s+")).filter { it.isNotBlank() }
+        val action = tokens.firstOrNull()?.lowercase() ?: "status"
+        val rest = tokens.drop(1)
+
+        // 1. Direct Settings.Secure / Settings.Global / Settings.System via permanent WRITE_SECURE_SETTINGS
+        if (action == "setting" || action == "settings") {
+            val op = rest.getOrNull(0)?.lowercase() ?: "get"
+            val ns = rest.getOrNull(1)?.lowercase() ?: "system"
+            val key = rest.getOrNull(2).orEmpty()
+            val value = rest.drop(3).joinToString(" ")
+            if (key.isNotBlank()) {
+                try {
+                    val cr = context.contentResolver
+                    if (op == "put") {
+                        val ok = when (ns) {
+                            "secure" -> Settings.Secure.putString(cr, key, value)
+                            "global" -> Settings.Global.putString(cr, key, value)
+                            else -> Settings.System.putString(cr, key, value)
+                        }
+                        if (ok) {
+                            return ToolExecutionOutcome(
+                                succeeded = true,
+                                outputText = "[Hanson OS CLI · WRITE_SECURE_SETTINGS] $ns.$key = '$value' 설정 완료",
+                                receipt = ActionReceipt(
+                                    toolName = "os_cli_exec",
+                                    summaryKo = "OS CLI 설정 변경 ($ns.$key)",
+                                    detailKo = "값 '$value' 직접 기록 (WRITE_SECURE_SETTINGS)",
+                                    undoHintKo = "hanson setting put $ns $key <이전값> 으로 복구 가능"
+                                )
+                            )
+                        }
+                    } else if (op == "get") {
+                        val current = when (ns) {
+                            "secure" -> Settings.Secure.getString(cr, key)
+                            "global" -> Settings.Global.getString(cr, key)
+                            else -> Settings.System.getString(cr, key)
+                        }
+                        return ToolExecutionOutcome(
+                            succeeded = true,
+                            outputText = "[Hanson OS CLI] $ns.$key = ${current ?: "(null)"}"
+                        )
+                    }
+                } catch (_: Throwable) {
+                    // Fall through to UID-2000 daemon
+                }
+            }
+        }
+
+        // 2. Try UID-2000 On-Device OS CLI Daemon (127.0.0.1:18890)
+        try {
+            val url = java.net.URL("http://127.0.0.1:${com.hanson.mobileuse.oscli.HansonOsCliMain.DAEMON_PORT}/exec")
+            val conn = (url.openConnection() as java.net.HttpURLConnection).apply {
+                requestMethod = "POST"
+                connectTimeout = 1500
+                readTimeout = 8000
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json; charset=utf-8")
+            }
+            val reqJson = JSONObject().apply {
+                put("action", action)
+                put("args", org.json.JSONArray(rest))
+            }
+            conn.outputStream.use { it.write(reqJson.toString().toByteArray(Charsets.UTF_8)) }
+            if (conn.responseCode in 200..299) {
+                val respStr = conn.inputStream.bufferedReader().use { it.readText() }
+                val json = JSONObject(respStr)
+                val out = json.optString("stdout").ifBlank { json.toString(2) }
+                return ToolExecutionOutcome(
+                    succeeded = true,
+                    outputText = "[Hanson OS CLI · UID 2000 Daemon]\n$out",
+                    receipt = ActionReceipt(
+                        toolName = "os_cli_exec",
+                        summaryKo = "OS CLI (UID 2000 :18890): $rawCmd",
+                        detailKo = out.take(160),
+                        undoHintKo = "모바일 OS CLI(hanson)에서 상태 복원 가능"
+                    )
+                )
+            }
+        } catch (_: Throwable) {
+            // Daemon not active on :18890; run via in-process HansonOsCliMain
+        }
+
+        // 3. Fallback: Execute via in-process HansonOsCliMain + Hidden Binder / Shell
+        val resJson = com.hanson.mobileuse.oscli.HansonOsCliMain.executeCommandJson(action, rest)
+        val stdout = resJson.optString("stdout").ifBlank { resJson.toString(2) }
+        val ok = resJson.optString("status") == "ok" || resJson.optInt("exitCode", 0) == 0
+        return ToolExecutionOutcome(
+            succeeded = ok,
+            outputText = "[Hanson OS CLI]\n$stdout",
+            receipt = ActionReceipt(
+                toolName = "os_cli_exec",
+                summaryKo = "OS CLI 실행: $rawCmd",
+                detailKo = stdout.take(160),
+                undoHintKo = "시스템 설정 또는 hanson CLI로 되돌릴 수 있습니다."
+            )
+        )
     }
 
     private fun a11yNotConnectedOutcome(toolName: String) = ToolExecutionOutcome(
