@@ -124,6 +124,34 @@ object ToolSpecRegistry {
             )
         ),
         ToolSpec(
+            name = "drag_and_drop",
+            description = "True Haptic Drag-and-Drop Trajectory: holds at the source element/coordinate for `hold_ms` (pickup haptic), smoothly drags along a curve to the destination element/coordinate over `duration_ms`, and releases.",
+            riskTier = ToolRiskTier.STATEFUL,
+            capability = AgentCapability.GUI_AUTOMATION,
+            parameters = listOf(
+                ToolParamSpec("from_element_index", "INTEGER", "Source UI element index [n] to pick up"),
+                ToolParamSpec("to_element_index", "INTEGER", "Destination UI element index [n] to drop onto"),
+                ToolParamSpec("start_norm_x", "INTEGER", "Or normalized start X (0..1000)"),
+                ToolParamSpec("start_norm_y", "INTEGER", "Or normalized start Y (0..1000)"),
+                ToolParamSpec("end_norm_x", "INTEGER", "Or normalized end X (0..1000)"),
+                ToolParamSpec("end_norm_y", "INTEGER", "Or normalized end Y (0..1000)"),
+                ToolParamSpec("hold_ms", "INTEGER", "Long-press hold duration before drag in ms (default 480)"),
+                ToolParamSpec("duration_ms", "INTEGER", "Drag movement duration in ms (default 680)"),
+                ToolParamSpec("description", "STRING", "Description of what is being dragged and dropped", required = true)
+            )
+        ),
+        ToolSpec(
+            name = "haptic_trajectory",
+            description = "Execute a multi-waypoint continuous finger trajectory path (e.g. slider control, drawing/pattern, map pan, or curved gesture) defined by semicolon-separated normalized coordinates 'x1,y1;x2,y2;x3,y3'.",
+            riskTier = ToolRiskTier.STATEFUL,
+            capability = AgentCapability.GUI_AUTOMATION,
+            parameters = listOf(
+                ToolParamSpec("waypoints_csv", "STRING", "Semicolon-separated normalized coordinates (0..1000), e.g. '200,500;500,450;850,500'", required = true),
+                ToolParamSpec("duration_ms", "INTEGER", "Total trajectory duration in ms (default 650)"),
+                ToolParamSpec("description", "STRING", "Description of the haptic trajectory", required = true)
+            )
+        ),
+        ToolSpec(
             name = "click_sequence",
             description = "Google Artemis Fast-Action Burst: rapidly tap multiple element indices or normalized coordinates in sequence (e.g. keypad digits, transient popup menus, multi-select).",
             riskTier = ToolRiskTier.STATEFUL,
@@ -313,6 +341,17 @@ object ToolSpecRegistry {
             parameters = listOf(
                 ToolParamSpec("app_query", "STRING", "Target app name or package name", required = true),
                 ToolParamSpec("recipe", "STRING", "Step-by-step protocol, deep-link URI, or UI anchor rule learned during interaction", required = true)
+            )
+        ),
+        ToolSpec(
+            name = "render_generative_ui",
+            description = "Dynamically synthesize and render an interactive HTML5/CSS/Canvas/JS Generative UI micro-app directly inside the Hanson Spatial Glass Command Center, wired to `window.HansonOS.runCommand(prompt)`, `window.HansonOS.openDeepLink(uri)`, and `window.HansonOS.speak(text)`.",
+            riskTier = ToolRiskTier.SAFE,
+            capability = null,
+            parameters = listOf(
+                ToolParamSpec("title", "STRING", "Title of the bespoke Generative UI widget", required = true),
+                ToolParamSpec("subtitle", "STRING", "Short description of what this interactive widget controls"),
+                ToolParamSpec("html_content", "STRING", "Self-contained HTML5/CSS/JS string calling window.HansonOS methods", required = true)
             )
         ),
 

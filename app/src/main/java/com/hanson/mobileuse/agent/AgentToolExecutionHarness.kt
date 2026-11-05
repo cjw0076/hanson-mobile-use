@@ -83,6 +83,8 @@ class AgentToolExecutionHarness(private val context: Context) {
                 "long_press" -> executeLongPress(args, latestSnapshot)
                 "input_text" -> executeInputText(args, latestSnapshot)
                 "swipe" -> executeSwipe(args, latestSnapshot)
+                "drag_and_drop" -> executeDragAndDrop(args, latestSnapshot)
+                "haptic_trajectory" -> executeHapticTrajectory(args, latestSnapshot)
                 "click_sequence" -> executeClickSequence(args, latestSnapshot)
                 "press_key" -> executePressKey(args)
                 "manage_app" -> executeManageApp(args)
@@ -101,6 +103,7 @@ class AgentToolExecutionHarness(private val context: Context) {
                 "os_cli_exec" -> executeOsCli(args)
                 "reverse_engineer_app" -> executeReverseEngineerApp(args, latestSnapshot)
                 "learn_app_skill" -> executeLearnAppSkill(args, latestSnapshot)
+                "render_generative_ui" -> executeRenderGenerativeUi(args)
                 "ask_user" -> ToolExecutionOutcome(
                     succeeded = true,
                     outputText = "사용자에게 질문 전달: ${args.optString("question")}"
@@ -290,6 +293,118 @@ class AgentToolExecutionHarness(private val context: Context) {
             } else {
                 "스와이프 실행 실패"
             }
+        )
+    }
+
+    private fun executeDragAndDrop(args: JSONObject, snapshot: AtomicSnapshot?): ToolExecutionOutcome {
+        val service = HansonAccessibilityService.instance
+            ?: return a11yNotConnectedOutcome("drag_and_drop")
+        val (screenW, screenH) = if (snapshot != null) {
+            snapshot.screenWidth to snapshot.screenHeight
+        } else {
+            HierarchyDumper.getScreenDimensions(context)
+        }
+
+        val fromEl = if (args.has("from_element_index")) {
+            snapshot?.indexedElements?.firstOrNull { it.index == args.optInt("from_element_index", -1) }
+        } else null
+        val toEl = if (args.has("to_element_index")) {
+            snapshot?.indexedElements?.firstOrNull { it.index == args.optInt("to_element_index", -1) }
+        } else null
+
+        val (startX, startY) = if (fromEl != null) {
+            fromEl.centerX to fromEl.centerY
+        } else {
+            CoordinateNormalizer.normalizedToPixel(
+                args.optInt("start_norm_x", 300),
+                args.optInt("start_norm_y", 600),
+                screenW,
+                screenH
+            )
+        }
+
+        val (endX, endY) = if (toEl != null) {
+            toEl.centerX to toEl.centerY
+        } else {
+            CoordinateNormalizer.normalizedToPixel(
+                args.optInt("end_norm_x", 700),
+                args.optInt("end_norm_y", 400),
+                screenW,
+                screenH
+            )
+        }
+
+        val holdMs = args.optLong("hold_ms", 480L)
+        val durationMs = args.optLong("duration_ms", 680L)
+        val desc = args.optString("description", "드래그 앤 드롭")
+
+        val ok = GestureController.dragAndDrop(
+            service = service,
+            startX = startX.toFloat(),
+            startY = startY.toFloat(),
+            endX = endX.toFloat(),
+            endY = endY.toFloat(),
+            holdMs = holdMs,
+            dragDurationMs = durationMs
+        )
+
+        return ToolExecutionOutcome(
+            succeeded = ok,
+            outputText = if (ok) {
+                "햅틱 드래그 앤 드롭('$desc') 완료: ($startX,$startY) [홀드 ${holdMs}ms] -> ($endX,$endY) [이동 ${durationMs}ms]"
+            } else {
+                "햅틱 드래그 앤 드롭 실패: $desc"
+            },
+            receipt = if (ok) ActionReceipt(
+                toolName = "drag_and_drop",
+                summaryKo = "드래그 앤 드롭: $desc",
+                detailKo = "($startX,$startY) -> ($endX,$endY) · 홀드 ${holdMs}ms",
+                undoHintKo = "반대 방향 드래그로 원복할 수 있습니다."
+            ) else null
+        )
+    }
+
+    private fun executeHapticTrajectory(args: JSONObject, snapshot: AtomicSnapshot?): ToolExecutionOutcome {
+        val service = HansonAccessibilityService.instance
+            ?: return a11yNotConnectedOutcome("haptic_trajectory")
+        val (screenW, screenH) = if (snapshot != null) {
+            snapshot.screenWidth to snapshot.screenHeight
+        } else {
+            HierarchyDumper.getScreenDimensions(context)
+        }
+
+        val rawCsv = args.optString("waypoints_csv", "")
+        val waypoints = rawCsv.split(";").mapNotNull { token ->
+            val parts = token.split(",")
+            if (parts.size >= 2) {
+                val nx = parts[0].trim().toIntOrNull() ?: return@mapNotNull null
+                val ny = parts[1].trim().toIntOrNull() ?: return@mapNotNull null
+                val (px, py) = CoordinateNormalizer.normalizedToPixel(nx, ny, screenW, screenH)
+                px.toFloat() to py.toFloat()
+            } else null
+        }
+
+        if (waypoints.size < 2) {
+            return ToolExecutionOutcome(false, "haptic_trajectory에는 최소 2개 이상의 웨이포인트가 필요합니다.")
+        }
+
+        val durationMs = args.optLong("duration_ms", 650L)
+        val desc = args.optString("description", "연속 햅틱 궤적")
+        val ok = GestureController.executeWaypointTrajectory(service, waypoints, durationMs)
+
+        return ToolExecutionOutcome(
+            succeeded = ok,
+            outputText = if (ok) {
+                "연속 햅틱 궤적('$desc', ${waypoints.size}개 경유점, ${durationMs}ms) 실행 완료"
+            } else {
+                "연속 햅틱 궤적 실행 실패"
+            },
+            receipt = if (ok) ActionReceipt(
+                toolName = "haptic_trajectory",
+                summaryKo = "햅틱 궤적: $desc (${waypoints.size}점)",
+                detailKo = "경유점 ${waypoints.size}개 · ${durationMs}ms 연속 이동",
+                undoHintKo = "BACK 또는 역방향 제스처로 복귀 가능합니다."
+            ) else null
         )
     }
 
@@ -1035,6 +1150,36 @@ class AgentToolExecutionHarness(private val context: Context) {
                 summaryKo = "앱 스킬 학습: ${protocol.appLabel}",
                 detailKo = recipe,
                 undoHintKo = "[스킬 & 감사] 탭에서 영구 재사용됩니다."
+            )
+        )
+    }
+
+    private fun executeRenderGenerativeUi(args: JSONObject): ToolExecutionOutcome {
+        val title = args.optString("title", "Generative UI 커스텀 위젯").ifBlank { "Generative UI 커스텀 위젯" }
+        val subtitle = args.optString("subtitle", "window.HansonOS 실시간 브리지 연동")
+        val htmlContent = args.optString("html_content", "").trim()
+        if (htmlContent.isBlank()) {
+            com.hanson.mobileuse.ui.components.GenerativeUiStateHolder.restoreDefaultCockpit()
+            return ToolExecutionOutcome(
+                succeeded = true,
+                outputText = "[Generative UI] 기본 슈퍼앱 조종석 캔버스를 렌더링했습니다."
+            )
+        }
+        com.hanson.mobileuse.ui.components.GenerativeUiStateHolder.publishSpec(
+            com.hanson.mobileuse.ui.components.GenerativeUiSpec(
+                title = title,
+                subtitle = subtitle,
+                htmlContent = htmlContent
+            )
+        )
+        return ToolExecutionOutcome(
+            succeeded = true,
+            outputText = "[Generative UI 렌더링 완료] '$title' 인터랙티브 마이크로 앱이 커맨드 센터 상단에 동적 합성되었습니다.",
+            receipt = ActionReceipt(
+                toolName = "render_generative_ui",
+                summaryKo = "Generative UI 합성: $title",
+                detailKo = subtitle,
+                undoHintKo = "우측 상단 새로고침/닫기 아이콘으로 기본 조종석으로 복원할 수 있습니다."
             )
         )
     }

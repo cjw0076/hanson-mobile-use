@@ -69,9 +69,13 @@ import com.hanson.mobileuse.agent.AppReverseEngineeringEngine
 import com.hanson.mobileuse.agent.ChatSender
 import com.hanson.mobileuse.agent.LearnedAppProtocol
 import com.hanson.mobileuse.agent.LiveChatMessage
+import com.hanson.mobileuse.agent.LiveVoicePhase
+import com.hanson.mobileuse.agent.LiveVoiceSessionManager
 import com.hanson.mobileuse.agent.UserDemonstrationRecorder
 import com.hanson.mobileuse.notification.InterceptedNotification
 import com.hanson.mobileuse.notification.RemoteInputSessionCache
+import com.hanson.mobileuse.ui.components.GenerativeUiStateHolder
+import com.hanson.mobileuse.ui.components.GenerativeUiSurfaceCard
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -126,9 +130,17 @@ fun CommandCenterScreen(
     var overlayActive by remember { mutableStateOf(false) }
     var expandedStream by remember { mutableStateOf(false) }
     var ghostModeActive by remember { mutableStateOf(false) }
+    var showGenerativeUiCanvas by remember { mutableStateOf(true) }
 
     val isRecordingDemo by UserDemonstrationRecorder.isRecording.collectAsState()
     val recordedDemoSteps by UserDemonstrationRecorder.recordedSteps.collectAsState()
+    val liveVoiceState by LiveVoiceSessionManager.state.collectAsState()
+
+    LaunchedEffect(Unit) {
+        LiveVoiceSessionManager.init(context) { spokenCommand ->
+            onSendChatMessage(spokenCommand)
+        }
+    }
 
     val isRunning = session.status in setOf(
         AgentRunStatus.OBSERVING,
@@ -274,7 +286,7 @@ fun CommandCenterScreen(
             Spacer(modifier = Modifier.height(8.dp))
 
             // =================================================================
-            // 1-B. HUMAN KILLER SCENARIOS STRIP (Show-Me-Once / Ghost / Briefing / Teleport)
+            // 1-B. HUMAN KILLER SCENARIOS STRIP (Live Voice / Gen-UI / Show-Me-Once / Ghost / Briefing)
             // =================================================================
             Row(
                 modifier = Modifier
@@ -282,6 +294,65 @@ fun CommandCenterScreen(
                     .horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
+                // 0-A) Live Voice Full-Duplex Toggle (S25 NPU + Gemini 3.8 Live)
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(
+                            if (liveVoiceState.isActive) Color(0x4410B981) else Color(0x281E293B)
+                        )
+                        .border(
+                            1.dp,
+                            if (liveVoiceState.isActive) Color(0xFF10B981) else SpatialCyan.copy(alpha = 0.65f),
+                            RoundedCornerShape(16.dp)
+                        )
+                        .clickable {
+                            LiveVoiceSessionManager.toggleLiveVoiceSession(context) { spokenCmd ->
+                                onSendChatMessage(spokenCmd)
+                            }
+                        }
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        text = if (liveVoiceState.isActive) {
+                            "🎙️ 라이브 보이스 ON (${liveVoiceState.phase.labelKo.take(6)})"
+                        } else {
+                            "🎙️ 라이브 보이스 채팅"
+                        },
+                        color = if (liveVoiceState.isActive) Color(0xFF34D399) else SpatialCyan,
+                        fontSize = 11.5.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                // 0-B) Generative UI Dynamic Micro-App Toggle
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(
+                            if (showGenerativeUiCanvas) SpatialCyanGlow else Color(0x221E293B)
+                        )
+                        .border(
+                            1.dp,
+                            if (showGenerativeUiCanvas) SpatialCyan else SpatialBorder,
+                            RoundedCornerShape(16.dp)
+                        )
+                        .clickable {
+                            showGenerativeUiCanvas = !showGenerativeUiCanvas
+                            if (showGenerativeUiCanvas) {
+                                GenerativeUiStateHolder.restoreDefaultCockpit()
+                            }
+                        }
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        text = if (showGenerativeUiCanvas) "✨ Gen-UI 조종석 ON" else "✨ Gen-UI 렌더링",
+                        color = if (showGenerativeUiCanvas) SpatialCyan else SpatialTextPrimary,
+                        fontSize = 11.5.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+
                 // 1) Show-Me-Once (시연으로 가르치기)
                 Box(
                     modifier = Modifier
@@ -394,16 +465,65 @@ fun CommandCenterScreen(
                 }
             }
 
+            if (liveVoiceState.isActive) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(Color(0xD906281E))
+                        .border(1.dp, Color(0xFF10B981), RoundedCornerShape(16.dp))
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "🎙️ ${liveVoiceState.phase.labelKo} · S25 NPU/TTS + Gemini 3.8 Live",
+                            color = Color(0xFF34D399),
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = liveVoiceState.partialTranscript.ifBlank {
+                                liveVoiceState.lastSpokenResponse.ifBlank { "핸즈프리로 무엇이든 말씀하세요 (끼어들기 지원)" }
+                            },
+                            color = SpatialTextPrimary,
+                            fontSize = 12.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Text(
+                        text = "종료",
+                        color = Color(0xFFF87171),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color(0x33EF4444))
+                            .clickable { LiveVoiceSessionManager.stopLiveVoiceSession() }
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
+                }
+            }
+
             Spacer(modifier = Modifier.height(8.dp))
 
             // =================================================================
-            // 2. SPATIAL WORKSPACE: UARP VECTOR NODE GRAPH + FLOATING STREAM CARD
+            // 2. SPATIAL WORKSPACE: GENERATIVE UI MICRO-APP OR UARP VECTOR NODE GRAPH + FLOATING STREAM CARD
             // =================================================================
             Box(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
             ) {
+                if (showGenerativeUiCanvas) {
+                    GenerativeUiSurfaceCard(
+                        onRunCommand = onSendChatMessage,
+                        modifier = Modifier.align(Alignment.TopCenter)
+                    )
+                } else {
                 // 2-A. Reverse-Engineered App Protocol Hero Card (Concept B)
                 val proto = selectedProtocol
                 Column(
@@ -548,6 +668,7 @@ fun CommandCenterScreen(
                             }
                         }
                     )
+                }
                 }
 
                 // 2-B. Floating Spatial Conversation Card ("Hanson OS" stream card in Concept B)

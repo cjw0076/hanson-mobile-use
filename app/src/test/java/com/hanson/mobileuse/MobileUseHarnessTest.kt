@@ -3,13 +3,17 @@ package com.hanson.mobileuse
 import com.hanson.mobileuse.accessibility.AtomicSnapshot
 import com.hanson.mobileuse.accessibility.CoordinateNormalizer
 import com.hanson.mobileuse.accessibility.IndexedUiElement
+import com.hanson.mobileuse.agent.ActionTrajectoryVerifierAndHealer
+import com.hanson.mobileuse.agent.AgentStepLog
 import com.hanson.mobileuse.agent.GeminiMultimodalClient
 import com.hanson.mobileuse.agent.SkillCatalog
 import com.hanson.mobileuse.agent.SubGoalStatus
 import com.hanson.mobileuse.agent.ToolSpecRegistry
 import com.hanson.mobileuse.notification.InterceptedNotification
 import com.hanson.mobileuse.notification.RemoteInputSessionCache
+import com.hanson.mobileuse.paradigm.WorldModelGraph
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -50,20 +54,23 @@ class MobileUseHarnessTest {
     @Test
     fun toolSpecRegistry_exposesAll24MobileUseToolsAndValidGeminiSchema() {
         val specs = ToolSpecRegistry.allSpecs
-        assertEquals(24, specs.size)
+        assertEquals(27, specs.size)
         assertNotNull(ToolSpecRegistry.find("click"))
         assertNotNull(ToolSpecRegistry.find("click_sequence"))
+        assertNotNull(ToolSpecRegistry.find("drag_and_drop"))
+        assertNotNull(ToolSpecRegistry.find("haptic_trajectory"))
         assertNotNull(ToolSpecRegistry.find("reply_notification"))
         assertNotNull(ToolSpecRegistry.find("control_device_setting"))
         assertNotNull(ToolSpecRegistry.find("manage_app"))
         assertNotNull(ToolSpecRegistry.find("os_cli_exec"))
         assertNotNull(ToolSpecRegistry.find("reverse_engineer_app"))
         assertNotNull(ToolSpecRegistry.find("learn_app_skill"))
+        assertNotNull(ToolSpecRegistry.find("render_generative_ui"))
 
         val geminiJson = ToolSpecRegistry.toGeminiToolsJson()
         assertEquals(1, geminiJson.length())
         val declarations = geminiJson.getJSONObject(0).getJSONArray("functionDeclarations")
-        assertEquals(24, declarations.length())
+        assertEquals(27, declarations.length())
     }
 
     @Test
@@ -175,5 +182,97 @@ class MobileUseHarnessTest {
     fun skillCatalog_hasValidPresetRoutines() {
         assertTrue(SkillCatalog.defaultSkills.size >= 6)
         assertTrue(SkillCatalog.defaultSkills.all { it.goalPrompt.isNotBlank() })
+    }
+
+    @Test
+    fun trajectoryVerifierAndWorldModel_detectsStaleVsTransitionAndPlansMultiStepGoal() {
+        val elSearchBtn = IndexedUiElement(
+            index = 0,
+            shortClass = "ImageButton",
+            className = "android.widget.ImageButton",
+            packageName = "com.google.android.youtube",
+            text = "",
+            contentDesc = "검색",
+            resourceId = "com.google.android.youtube:id/menu_item_1",
+            left = 900,
+            top = 90,
+            right = 1020,
+            bottom = 210,
+            centerX = 960,
+            centerY = 150,
+            normX = 889,
+            normY = 62,
+            clickable = true,
+            longClickable = false,
+            scrollable = false,
+            editable = false,
+            checkable = false,
+            checked = false,
+            focused = false,
+            enabled = true,
+            windowType = "APPLICATION",
+            windowLayer = 0
+        )
+
+        val elEditBox = elSearchBtn.copy(
+            index = 1,
+            shortClass = "EditText",
+            className = "android.widget.EditText",
+            text = "YouTube 검색",
+            editable = true,
+            focused = true
+        )
+
+        val snapHome = AtomicSnapshot(
+            screenWidth = 1080,
+            screenHeight = 2400,
+            activePackage = "com.sec.android.app.launcher",
+            indexedElements = emptyList()
+        )
+        val snapYoutubeMain = AtomicSnapshot(
+            screenWidth = 1080,
+            screenHeight = 2400,
+            activePackage = "com.google.android.youtube",
+            indexedElements = listOf(elSearchBtn)
+        )
+        val snapYoutubeSearchOpen = AtomicSnapshot(
+            screenWidth = 1080,
+            screenHeight = 2400,
+            activePackage = "com.google.android.youtube",
+            indexedElements = listOf(elEditBox)
+        )
+
+        // 1. Identical snapshot produces 0.0f delta (Stale Click detection)
+        val staleDelta = ActionTrajectoryVerifierAndHealer.computeUiTreeDeltaRatio(snapYoutubeMain, snapYoutubeMain)
+        assertEquals(0.0f, staleDelta, 0.001f)
+
+        // 2. Changed UI tree produces > 0.5f delta (Verified Transition)
+        val validDelta = ActionTrajectoryVerifierAndHealer.computeUiTreeDeltaRatio(snapYoutubeMain, snapYoutubeSearchOpen)
+        assertTrue(validDelta > 0.5f)
+
+        // 3. WorldModelGraph produces distinct perceptual hashes for distinct states
+        val hashMain = WorldModelGraph.computeStateHash(snapYoutubeMain)
+        val hashSearch = WorldModelGraph.computeStateHash(snapYoutubeSearchOpen)
+        assertNotEquals(hashMain, hashSearch)
+
+        // 4. Multi-step trajectory planner progresses: Step 1 (manage_app) -> Step 2 (click search) -> Step 3 (input_text)
+        val client = GeminiMultimodalClient()
+        val goal = "유튜브 열어서 아이유 검색하고 클릭해줘"
+
+        val step1 = client.inferLocalOnDeviceAction(goal, 1, snapHome, emptyList(), emptyList())
+        assertEquals("manage_app", step1.toolName)
+
+        val historyAfterStep1 = listOf(
+            AgentStepLog(1, "앱 실행", emptyList(), "manage_app", "{}", "유튜브 실행 완료", true, "com.google.android.youtube", 1)
+        )
+        val step2 = client.inferLocalOnDeviceAction(goal, 2, snapYoutubeMain, historyAfterStep1, step1.subGoals)
+        assertEquals("click", step2.toolName)
+
+        val historyAfterStep2 = historyAfterStep1 + AgentStepLog(
+            2, "검색창 탭", emptyList(), "click", "{}", "검색 버튼 탭 완료", true, "com.google.android.youtube", 1
+        )
+        val step3 = client.inferLocalOnDeviceAction(goal, 3, snapYoutubeSearchOpen, historyAfterStep2, step2.subGoals)
+        assertEquals("input_text", step3.toolName)
+        assertEquals("아이유", step3.toolArgs.getString("text"))
     }
 }
