@@ -163,6 +163,21 @@ case "$cmd" in
         dumpsys $SVC | head -n 60
         ;;
 
+    uarp|reverse)
+        PKG="$1"
+        echo "=================================================================="
+        echo " [UARP] Universal App Reverse-Engineering Protocol: $PKG"
+        echo "=================================================================="
+        APK_PATH=$(pm path "$PKG" 2>/dev/null | head -n 1 | sed 's/package://g')
+        echo " [APK Path] $APK_PATH"
+        echo "--- [1. Exported Activities & Entry Points] ---"
+        dumpsys package "$PKG" 2>/dev/null | grep -E " filter |Activity|Action: \"|Category: \"" | head -n 35
+        echo "--- [2. Custom Deep-Link URI Schemes & Hosts] ---"
+        dumpsys package "$PKG" 2>/dev/null | grep -E "Scheme: \"|Authority: \"|Path: \"" | head -n 35
+        echo "--- [3. Exported ContentProviders] ---"
+        dumpsys package "$PKG" 2>/dev/null | grep -E "Provider\{|authority=" | head -n 15
+        ;;
+
     self-heal)
         # Re-grants all privileged permissions, AppOps, Accessibility & Notification listeners from inside UID 2000!
         PKG="com.hanson.mobileuse"

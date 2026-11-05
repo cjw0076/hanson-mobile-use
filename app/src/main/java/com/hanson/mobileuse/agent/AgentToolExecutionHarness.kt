@@ -99,6 +99,8 @@ class AgentToolExecutionHarness(private val context: Context) {
                 "save_note" -> executeSaveNote(args)
                 "read_note" -> executeReadNote(args)
                 "os_cli_exec" -> executeOsCli(args)
+                "reverse_engineer_app" -> executeReverseEngineerApp(args, latestSnapshot)
+                "learn_app_skill" -> executeLearnAppSkill(args, latestSnapshot)
                 "ask_user" -> ToolExecutionOutcome(
                     succeeded = true,
                     outputText = "사용자에게 질문 전달: ${args.optString("question")}"
@@ -978,6 +980,61 @@ class AgentToolExecutionHarness(private val context: Context) {
                 summaryKo = "OS CLI 실행: $rawCmd",
                 detailKo = stdout.take(160),
                 undoHintKo = "시스템 설정 또는 hanson CLI로 되돌릴 수 있습니다."
+            )
+        )
+    }
+
+    private fun executeReverseEngineerApp(
+        args: JSONObject,
+        latestSnapshot: AtomicSnapshot?
+    ): ToolExecutionOutcome {
+        val appQuery = args.optString("app_query", "현재앱").ifBlank { "현재앱" }
+        val customRecipe = args.optString("custom_recipe", "").takeIf { it.isNotBlank() }
+        val uarp = AppReverseEngineeringEngine(context)
+        val protocol = uarp.reverseEngineerAndLearn(appQuery, latestSnapshot, customRecipe)
+            ?: return ToolExecutionOutcome(
+                succeeded = false,
+                outputText = "'$appQuery'에 해당하는 설치된 앱을 찾지 못했습니다. 앱 이름이나 패키지명을 확인해 주세요."
+            )
+
+        return ToolExecutionOutcome(
+            succeeded = true,
+            outputText = buildString {
+                appendLine("[UARP 앱 리버스 엔지니어링 & 스킬 합성 완료]")
+                append(protocol.toPromptContext())
+            },
+            receipt = ActionReceipt(
+                toolName = "reverse_engineer_app",
+                summaryKo = "UARP 리버스 엔지니어링: ${protocol.appLabel} (${protocol.uiFramework})",
+                detailKo = "딥링크 ${protocol.deepLinkSchemes.size}개, Activity ${protocol.exportedActivities.size}개, 앵커 ${protocol.uiAnchors.size}개 학습 완료",
+                undoHintKo = "[스킬 & 감사] 탭에서 학습된 앱 프로토콜을 확인/재실행할 수 있습니다."
+            )
+        )
+    }
+
+    private fun executeLearnAppSkill(
+        args: JSONObject,
+        latestSnapshot: AtomicSnapshot?
+    ): ToolExecutionOutcome {
+        val appQuery = args.optString("app_query", "현재앱").ifBlank { "현재앱" }
+        val recipe = args.optString("recipe", "").trim()
+        if (recipe.isBlank()) {
+            return ToolExecutionOutcome(succeeded = false, outputText = "저장할 프로토콜/레시피 내용이 비어 있습니다.")
+        }
+        val uarp = AppReverseEngineeringEngine(context)
+        val protocol = uarp.reverseEngineerAndLearn(appQuery, latestSnapshot, recipe)
+            ?: return ToolExecutionOutcome(
+                succeeded = false,
+                outputText = "'$appQuery' 앱을 찾지 못해 스킬을 저장하지 못했습니다."
+            )
+        return ToolExecutionOutcome(
+            succeeded = true,
+            outputText = "[UARP 스킬 학습 완료] ${protocol.appLabel} (${protocol.packageName})에 새로운 실행 프로토콜을 영구 등록했습니다:\n- $recipe",
+            receipt = ActionReceipt(
+                toolName = "learn_app_skill",
+                summaryKo = "앱 스킬 학습: ${protocol.appLabel}",
+                detailKo = recipe,
+                undoHintKo = "[스킬 & 감사] 탭에서 영구 재사용됩니다."
             )
         )
     }
