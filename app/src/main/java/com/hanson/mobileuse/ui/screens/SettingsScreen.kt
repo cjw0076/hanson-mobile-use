@@ -66,9 +66,12 @@ fun SettingsScreen(
     var showKey by remember { mutableStateOf(false) }
 
     val modelPresets = listOf(
-        "gemini-2.5-flash" to "고속 멀티모달 비전 오퍼레이터 (권장)",
-        "gemini-2.5-pro" to "고난도 멀티스텝 플래닝 & 정밀 추론",
-        "gemini-2.0-flash" to "경량 초저지연 GUI 반응"
+        "gemini-3.8-flash" to "2026 기본 1M 멀티모달 에이전트 (thinking_level 지원 · 권장)",
+        "gemini-4-argon" to "2026 플래그십 1M 초고난도 추론 · 앱 역분석 · Gen-UI 합성",
+        "gemini-3.5-flash-lite" to "초저지연 0.2초 GUI 리플렉스 오퍼레이터",
+        "gemini-3.8-live-extended-thinking" to "풀듀플렉스 Live Voice + 실시간 화면 스트리밍 + 비동기 도구",
+        "cli-subscription-bridge" to "노트북 CLI 구독 직결 (Gemini CLI / Codex / Claude / Agy · API 키 불필요)",
+        "gemma-4-26b-a4b-it" to "온디바이스 LiteRT-LM / AICore 로컬 추론 (무과금 오프라인)"
     )
 
     LazyColumn(

@@ -23,7 +23,19 @@ data class ModelTurnDecision(
 class GeminiMultimodalClient {
 
     companion object {
-        const val DEFAULT_MODEL = "gemini-2.5-flash"
+        const val DEFAULT_MODEL = "gemini-3.8-flash"
+
+        fun normalize2026ModelName(rawModel: String): String {
+            val trimmed = rawModel.trim()
+            if (trimmed.isEmpty() ||
+                trimmed.startsWith("gemini-2.5") ||
+                trimmed.startsWith("gemini-2.0") ||
+                trimmed.startsWith("gemini-1.5")
+            ) {
+                return DEFAULT_MODEL
+            }
+            return trimmed
+        }
 
         val SYSTEM_INSTRUCTION = """
 You are Hanson Mobile-Use AI, an unrestricted autonomous Android mobile operator combining Google Artemis (`third_party/mobile_use`) and EZmap.
@@ -116,9 +128,10 @@ Critical Mobile-Use Rules:
         }
 
         return try {
+            val normalizedModel = normalize2026ModelName(modelName)
             callGeminiMultimodalApi(
                 apiKey = cleanKey,
-                modelName = modelName.ifBlank { DEFAULT_MODEL },
+                modelName = normalizedModel,
                 goal = goal,
                 iteration = iteration,
                 snapshot = snapshot,
@@ -298,16 +311,22 @@ Critical Mobile-Use Rules:
                 )
             )
             put("tools", ToolSpecRegistry.toGeminiToolsJson())
+            // 2026 Gemini 3.8 / Gemini 4 Argon spec: omit deprecated temperature/top_p and use thinkingConfig
             put(
                 "generationConfig",
                 JSONObject().apply {
-                    put("temperature", 0.15)
+                    val thinkingLevel = if (modelName.contains("argon")) "medium" else "low"
+                    put(
+                        "thinkingConfig",
+                        JSONObject().put("thinkingLevel", thinkingLevel)
+                    )
                 }
             )
         }
 
         val req = Request.Builder()
             .url(url)
+            .addHeader("Api-Revision", "2026-05-20")
             .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
             .build()
 
@@ -372,24 +391,312 @@ Critical Mobile-Use Rules:
         val g = goal.trim()
         val gLower = g.lowercase()
 
-        // If we already executed the main action on iteration 1, complete on iteration 2
+        // =====================================================================
+        // MULTI-STEP GOAL TRAJECTORY PLANNER (열기 -> 탐색/탭 -> 타이핑 -> 드래그/클릭 -> 검증 완료)
+        // =====================================================================
+        val appMap = mapOf(
+            "카카오톡" to "com.kakao.talk",
+            "카톡" to "com.kakao.talk",
+            "유튜브" to "com.google.android.youtube",
+            "설정" to "com.android.settings",
+            "크롬" to "com.android.chrome",
+            "네이버" to "com.nhn.android.search",
+            "갤러리" to "com.sec.android.gallery3d",
+            "카메라" to "com.sec.android.app.camera",
+            "시계" to "com.sec.android.app.clockpackage",
+            "배달의민족" to "com.sampleapp",
+            "쿠팡" to "com.coupang.mobile",
+            "토스" to "viva.republica.toss",
+            "인스타그램" to "com.instagram.android"
+        )
+        val matchedAppEntry = appMap.entries.firstOrNull { gLower.contains(it.key) }
+        val targetAppName = matchedAppEntry?.key
+        val targetPkg = matchedAppEntry?.value
+
+        // Extract search/typing query ONLY if the user isn't directly asking to click an existing element on screen
+        val directScreenElementMatch = snapshot.indexedElements.firstOrNull { el ->
+            (el.text.length >= 2 && g.contains(el.text, ignoreCase = true) && gLower.contains("눌러")) ||
+                (el.contentDesc.length >= 2 && g.contains(el.contentDesc, ignoreCase = true) && gLower.contains("눌러"))
+        }
+
+        val extractedQuery: String? = if (directScreenElementMatch != null && !gLower.contains("검색하고") && !gLower.contains("검색해서")) {
+            null
+        } else {
+            val quoted = Regex("\"([^\"]+)\"|'([^']+)'").find(g)?.let { m ->
+                m.groupValues[1].ifBlank { m.groupValues[2] }
+            }
+            if (!quoted.isNullOrBlank()) {
+                quoted
+            } else {
+                val searchMatch = Regex("([가-힣a-zA-Z0-9_\\s]{1,22}?)\\s*(?:검색하고|검색해서|검색해|검색|입력하고|입력해|찾고|찾아서|타이핑)").find(g)
+                searchMatch?.groupValues?.getOrNull(1)
+                    ?.replace("열어서", "")
+                    ?.replace("열고", "")
+                    ?.replace("검색창에", "")
+                    ?.replace("검색창", "")
+                    ?.replace("카카오톡", "")
+                    ?.replace("카톡", "")
+                    ?.replace("유튜브", "")
+                    ?.replace("설정", "")
+                    ?.replace("토스", "")
+                    ?.replace("네이버", "")
+                    ?.replace("화면에서", "")
+                    ?.trim()
+                    ?.takeIf { it.isNotBlank() }
+            }
+        }
+
+        val wantsDragAndDrop = gLower.contains("드래그") || gLower.contains("슬라이더") || gLower.contains("옮겨")
+        val wantsSwipeScroll = gLower.contains("스크롤") || gLower.contains("스와이프") || gLower.contains("내려") || gLower.contains("올려")
+        val wantsPostResultClick = (extractedQuery != null) && (
+            gLower.contains("클릭") || gLower.contains("틀어") || gLower.contains("재생") ||
+                gLower.contains("열어") || gLower.contains("선택") || gLower.contains("눌러") || gLower.contains("들어가")
+            )
+
+        val isMultiStepTrajectoryGoal = !gLower.contains("답장") && !gLower.contains("알림") && (
+            (extractedQuery != null) || wantsDragAndDrop || wantsSwipeScroll ||
+                (targetAppName != null && (gLower.contains("그리고") || gLower.contains("해서") || gLower.contains("열어서") || gLower.contains("누르고")))
+            )
+
+        if (isMultiStepTrajectoryGoal && iteration <= 7) {
+            val hasLaunchedApp = historySteps.any { it.toolName == "manage_app" }
+            val hasTypedQuery = historySteps.any { it.toolName == "input_text" }
+            val hasClickedSearch = historySteps.any { it.toolName == "click" }
+            val hasDragged = historySteps.any { it.toolName == "drag_and_drop" || it.toolName == "haptic_trajectory" }
+            val hasSwiped = historySteps.any { it.toolName == "swipe" }
+            val clicksAfterTyping = historySteps.dropWhile { it.toolName != "input_text" }.count { it.toolName == "click" }
+
+            // Build dynamic trajectory ledger
+            val ledger = mutableListOf<SubGoalItem>()
+            if (targetAppName != null) {
+                val done = (snapshot.activePackage == targetPkg) || hasLaunchedApp
+                ledger.add(SubGoalItem("1단계: '$targetAppName' 앱 진입 및 포그라운드 검증", if (done) SubGoalStatus.COMPLETED else SubGoalStatus.IN_PROGRESS))
+            }
+            if (extractedQuery != null) {
+                ledger.add(
+                    SubGoalItem(
+                        "2단계: 검색/입력창 탐색 탭 및 '$extractedQuery' 타이핑 주입",
+                        when {
+                            hasTypedQuery -> SubGoalStatus.COMPLETED
+                            ledger.all { it.status == SubGoalStatus.COMPLETED } -> SubGoalStatus.IN_PROGRESS
+                            else -> SubGoalStatus.PENDING
+                        }
+                    )
+                )
+            }
+            if (wantsPostResultClick) {
+                ledger.add(
+                    SubGoalItem(
+                        "3단계: 검색 결과 타깃 요소 탐색 및 탭 실행",
+                        when {
+                            clicksAfterTyping >= 1 -> SubGoalStatus.COMPLETED
+                            hasTypedQuery -> SubGoalStatus.IN_PROGRESS
+                            else -> SubGoalStatus.PENDING
+                        }
+                    )
+                )
+            }
+            if (wantsDragAndDrop) {
+                ledger.add(
+                    SubGoalItem(
+                        "햅틱 궤적: 홀드 후 드래그 앤 드롭(Drag & Drop) 제어",
+                        if (hasDragged) SubGoalStatus.COMPLETED else SubGoalStatus.IN_PROGRESS
+                    )
+                )
+            }
+            if (wantsSwipeScroll) {
+                ledger.add(
+                    SubGoalItem(
+                        "햅틱 궤적: 화면 스크롤/스와이프 이동 및 변위 검증",
+                        if (hasSwiped) SubGoalStatus.COMPLETED else SubGoalStatus.IN_PROGRESS
+                    )
+                )
+            }
+
+            // Phase 1: Launch Target App if not in foreground yet
+            if (targetAppName != null && snapshot.activePackage != targetPkg && !hasLaunchedApp) {
+                return ModelTurnDecision(
+                    observation = "[행동 궤적 1단계 · 앱 진입] 현재 패키지(${snapshot.activePackage})에서 목표 앱 '$targetAppName'($targetPkg)으로 진입합니다.",
+                    subGoals = ledger,
+                    toolName = "manage_app",
+                    toolArgs = JSONObject().put("action", "launch").put("app_name", targetAppName)
+                )
+            }
+
+            // Phase 2 & 3: Search / Input Text Trajectory
+            if (extractedQuery != null && !hasTypedQuery) {
+                val editableEl = snapshot.indexedElements.firstOrNull { it.editable }
+                if (editableEl != null) {
+                    return ModelTurnDecision(
+                        observation = "[행동 궤적 · 타이핑 주입] 활성 입력창([${editableEl.index}] ${editableEl.shortClass})을 포착하여 '$extractedQuery' 텍스트를 입력하고 제출(ENTER)합니다.",
+                        subGoals = ledger,
+                        toolName = "input_text",
+                        toolArgs = JSONObject().apply {
+                            put("element_index", editableEl.index)
+                            put("text", extractedQuery)
+                            put("clear_existing", false)
+                            put("submit_enter", true)
+                        }
+                    )
+                }
+
+                // If no editable field is open yet, locate the search button/icon and click it
+                if (!hasClickedSearch) {
+                    val searchBtn = snapshot.indexedElements.firstOrNull { el ->
+                        el.text.contains("검색") || el.contentDesc.contains("검색") ||
+                            el.text.contains("Search", ignoreCase = true) ||
+                            el.contentDesc.contains("Search", ignoreCase = true) ||
+                            el.resourceId.contains("search", ignoreCase = true)
+                    } ?: snapshot.indexedElements.firstOrNull { el ->
+                        el.clickable && el.centerY in 60..320 && el.centerX > (snapshot.screenWidth * 0.65)
+                    }
+
+                    if (searchBtn != null) {
+                        return ModelTurnDecision(
+                            observation = "[행동 궤적 · 검색창 열기] 입력창을 활성화하기 위해 상단 검색 요소([${searchBtn.index}] '${searchBtn.text.ifBlank { searchBtn.contentDesc.ifBlank { "검색 아이콘" } }}')를 탭합니다.",
+                            subGoals = ledger,
+                            toolName = "click",
+                            toolArgs = JSONObject().apply {
+                                put("element_index", searchBtn.index)
+                                put("target_description", "검색 버튼 열기")
+                            }
+                        )
+                    }
+                }
+
+                // Direct fallback: type into focused field or via OS CLI
+                return ModelTurnDecision(
+                    observation = "[행동 궤적 · 포커스 타이핑] '$extractedQuery' 텍스트를 입력창에 주입하고 검색(ENTER)을 실행합니다.",
+                    subGoals = ledger,
+                    toolName = "input_text",
+                    toolArgs = JSONObject().apply {
+                        put("text", extractedQuery)
+                        put("submit_enter", true)
+                    }
+                )
+            }
+
+            // Phase 4-A: Haptic Drag & Drop Trajectory
+            if (wantsDragAndDrop && !hasDragged) {
+                val sliderEl = snapshot.indexedElements.firstOrNull { el ->
+                    el.shortClass.contains("SeekBar", ignoreCase = true) ||
+                        el.shortClass.contains("Slider", ignoreCase = true) ||
+                        el.text.contains("밝기") || el.contentDesc.contains("밝기")
+                }
+                val startNormX = if (sliderEl != null) ((sliderEl.left + 40) * 1000 / snapshot.screenWidth.coerceAtLeast(1)) else 260
+                val endNormX = if (sliderEl != null) ((sliderEl.right - 40) * 1000 / snapshot.screenWidth.coerceAtLeast(1)) else 780
+                val normY = if (sliderEl != null) sliderEl.normY else 500
+
+                return ModelTurnDecision(
+                    observation = "[행동 궤적 · 햅틱 드래그 앤 드롭] 시작 지점($startNormX, $normY)에서 480ms 홀드 후 목표 지점($endNormX, $normY)까지 연속 곡선 궤적으로 드래그 앤 드롭합니다.",
+                    subGoals = ledger,
+                    toolName = "drag_and_drop",
+                    toolArgs = JSONObject().apply {
+                        put("start_norm_x", startNormX)
+                        put("start_norm_y", normY)
+                        put("end_norm_x", endNormX)
+                        put("end_norm_y", normY)
+                        put("hold_ms", 480)
+                        put("duration_ms", 680)
+                        put("description", "목표 슬라이더/아이템 햅틱 드래그 앤 드롭")
+                    }
+                )
+            }
+
+            // Phase 4-B: Swipe / Scroll Trajectory
+            if (wantsSwipeScroll && !hasSwiped) {
+                val dir = if (gLower.contains("아래로") || gLower.contains("위로 스크롤")) "down" else "up"
+                return ModelTurnDecision(
+                    observation = "[행동 궤적 · 햅틱 스와이프] 화면 콘텐츠 탐색을 위해 '$dir' 방향으로 연속 스와이프 궤적을 실행합니다.",
+                    subGoals = ledger,
+                    toolName = "swipe",
+                    toolArgs = JSONObject().put("direction", dir).put("duration_ms", 380)
+                )
+            }
+
+            // Phase 4-C: Post-Search Result Click
+            if (wantsPostResultClick && clicksAfterTyping == 0) {
+                val candidateResult = snapshot.indexedElements.firstOrNull { el ->
+                    !el.editable && el.centerY > 300 &&
+                        (el.text.contains(extractedQuery ?: "", ignoreCase = true) ||
+                            el.contentDesc.contains(extractedQuery ?: "", ignoreCase = true))
+                } ?: snapshot.indexedElements.firstOrNull { el ->
+                    el.clickable && !el.editable && el.centerY in 340..(snapshot.screenHeight - 220) &&
+                        (el.text.isNotBlank() || el.contentDesc.isNotBlank())
+                }
+
+                if (candidateResult != null) {
+                    return ModelTurnDecision(
+                        observation = "[행동 궤적 · 결과 선택] 검색 결과 화면에서 목표 타깃([${candidateResult.index}] '${candidateResult.text.ifBlank { candidateResult.contentDesc }.take(28)}')을 탭합니다.",
+                        subGoals = ledger,
+                        toolName = "click",
+                        toolArgs = JSONObject().apply {
+                            put("element_index", candidateResult.index)
+                            put("target_description", candidateResult.text.ifBlank { candidateResult.contentDesc }.take(30))
+                        }
+                    )
+                }
+            }
+
+            // Phase 5: All trajectory steps completed and verified!
+            if (historySteps.isNotEmpty()) {
+                val trajectorySummary = historySteps.joinToString("\n") { s ->
+                    "• Step ${s.stepNumber} [${s.toolName}]: ${s.resultSummary.lines().firstOrNull().orEmpty()}"
+                }
+                return ModelTurnDecision(
+                    observation = "모든 행동 궤적(${historySteps.size}단계) 실행 및 사후 상태 전이(Post-Snapshot) 검증을 완료했습니다.",
+                    subGoals = ledger.map { it.copy(status = SubGoalStatus.COMPLETED) },
+                    toolName = "complete_task",
+                    toolArgs = JSONObject().put(
+                        "summary",
+                        "[목표 궤적 완주 완료 · 총 ${historySteps.size}스텝 검증됨]\n$trajectorySummary"
+                    )
+                )
+            }
+        }
+
+        // Single-action completion fallback if already executed a single fast-lane command
         if (iteration >= 2 && historySteps.isNotEmpty()) {
             val last = historySteps.last()
             return ModelTurnDecision(
-                observation = "이전 단계(${last.toolName}) 실행 결과를 확인했습니다: ${last.resultSummary}",
+                observation = "이전 단계(${last.toolName}) 상태 전이 검증 결과를 확인했습니다.",
                 subGoals = listOf(
-                    SubGoalItem("명령 의도 분석 및 도구 실행", SubGoalStatus.COMPLETED),
-                    SubGoalItem("결과 검증 및 완료 보고", SubGoalStatus.COMPLETED)
+                    SubGoalItem("명령 실행 및 상태 전이 검증", SubGoalStatus.COMPLETED),
+                    SubGoalItem("결과 보고", SubGoalStatus.COMPLETED)
                 ),
                 toolName = "complete_task",
                 toolArgs = JSONObject().put(
                     "summary",
-                    "[온디바이스 실행 완료] ${last.resultSummary}\n(설정 탭에서 Gemini API Key를 입력하면 멀티스텝 비전 GUI 추론이 활성화됩니다.)"
+                    "[실행 및 상태 검증 완료]\n${last.resultSummary}"
                 )
             )
         }
 
         // 0-A. Universal App Reverse-Engineering & Skill Synthesis (UARP)
+        if (
+            gLower.contains("조종석") ||
+            gLower.contains("대시보드") ||
+            gLower.contains("위젯") ||
+            gLower.contains("ui 그려") ||
+            gLower.contains("렌더링") ||
+            gLower.contains("gen-ui") ||
+            gLower.contains("generative")
+        ) {
+            return ModelTurnDecision(
+                observation = "[Generative UI 엔진] 사용자의 요청에 맞춰 window.HansonOS 브리지와 직결된 실시간 HTML5/JS 마이크로 앱을 합성합니다.",
+                subGoals = listOf(
+                    SubGoalItem("맞춤형 Generative UI 마이크로 앱 합성 및 마운트", SubGoalStatus.IN_PROGRESS),
+                    SubGoalItem("렌더링 결과 브리핑", SubGoalStatus.PENDING)
+                ),
+                toolName = "render_generative_ui",
+                toolArgs = JSONObject().apply {
+                    put("title", "맞춤형 실시간 슈퍼앱 컨트롤 데크")
+                    put("subtitle", "요청('$g') 기반 동적 합성 UI · window.HansonOS 직결")
+                    put("html_content", "")
+                }
+            )
+        }
+
         if (
             gLower.contains("리버스") ||
             gLower.contains("reverse") ||

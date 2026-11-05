@@ -6,6 +6,9 @@ import com.hanson.mobileuse.accessibility.AtomicSnapshot
 import com.hanson.mobileuse.accessibility.HansonAccessibilityService
 import com.hanson.mobileuse.accessibility.HierarchyDumper
 import com.hanson.mobileuse.notification.InterceptedNotification
+import com.hanson.mobileuse.paradigm.HabitOrganonRuntime
+import com.hanson.mobileuse.paradigm.LiquidUiSynthesizer
+import com.hanson.mobileuse.paradigm.WorldModelGraph
 import com.hanson.mobileuse.service.FloatingHudService
 import com.hanson.mobileuse.service.HansonForegroundService
 import kotlinx.coroutines.CompletableDeferred
@@ -54,6 +57,9 @@ class MobileUseAgentEngine(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val multimodalClient = GeminiMultimodalClient()
     private val toolHarness = AgentToolExecutionHarness(context)
+    private val trajectoryVerifier = ActionTrajectoryVerifierAndHealer(context)
+    val worldModelGraph = WorldModelGraph(context)
+    val habitOrganonRuntime = HabitOrganonRuntime(context, worldModelGraph)
 
     private var activeJob: Job? = null
     private var approvalDeferred: CompletableDeferred<Boolean>? = null
@@ -374,7 +380,16 @@ class MobileUseAgentEngine(
             }
 
             if (decision.toolName == "complete_task") {
-                val summary = decision.toolArgs.optString("summary", "작업을 성공적으로 완료했습니다.")
+                val consolidatedTrace = habitOrganonRuntime.finalizeEpisodeAndAssignDelayedCredit(
+                    goal = goal,
+                    activePackage = snapshot.activePackage,
+                    episodeGoalReached = true
+                )
+                val rawSummary = decision.toolArgs.optString("summary", "작업을 성공적으로 완료했습니다.")
+                val creditFooter = if (consolidatedTrace.isNotEmpty()) {
+                    "\n[Habit-Organon 지연 신용 할당 완료: ${consolidatedTrace.size}개 순수 궤적 간선 승격 · S1=${habitOrganonRuntime.totalS1Calls}/S2=${habitOrganonRuntime.totalS2Deferrals}]"
+                } else ""
+                val summary = rawSummary + creditFooter
                 val finalStep = AgentStepLog(
                     stepNumber = iter,
                     observation = decision.observation,
@@ -489,26 +504,75 @@ class MobileUseAgentEngine(
                 latestSnapshot = snapshot
             )
 
+            // Wait for UI animation/state transition settle, then capture Post-Snapshot S_{t+1}
+            delay(480L)
+            val postSnapshot: AtomicSnapshot = HansonAccessibilityService.instance?.captureSnapshotNow(
+                includeScreenshot = false
+            ) ?: snapshot
+
+            // Closed-Loop Ground-Truth Verification & 3-Stage Self-Healing (인지 -> 복구 -> 재실행)
+            val verification = trajectoryVerifier.verifyAndSelfHeal(
+                toolName = decision.toolName,
+                args = decision.toolArgs,
+                initialOutcomeSucceeded = outcome.succeeded,
+                preSnapshot = snapshot,
+                postSnapshot = postSnapshot
+            )
+
+            // Record transition S_t -> S_{t+1} into the Paradigm World-Model State Graph
+            worldModelGraph.recordTransition(
+                preSnapshot = snapshot,
+                postSnapshot = verification.finalSnapshot,
+                toolName = decision.toolName,
+                toolArgsJson = decision.toolArgs.toString(),
+                verifiedSuccess = verification.verifiedSuccess,
+                uiDeltaRatio = verification.treeDeltaRatio,
+                selfHealRecipe = verification.recoveryActionKo
+            )
+
+            habitOrganonRuntime.recordStepProvenance(
+                stepNumber = iter,
+                preSnapshot = snapshot,
+                postSnapshot = verification.finalSnapshot,
+                actorTier = if (verification.recoveryAttempted) "SELF_HEALER" else "S2_DELIBERATIVE",
+                toolName = decision.toolName,
+                toolArgsJson = decision.toolArgs.toString(),
+                verifiedSuccess = verification.verifiedSuccess,
+                uiDeltaRatio = verification.treeDeltaRatio,
+                recoveryAttempted = verification.recoveryAttempted,
+                latencyMs = 480L
+            )
+
+            val verifiedResultText = buildString {
+                append(outcome.outputText)
+                append("\n")
+                append(verification.toFormattedBadgeAndLog())
+            }
+
             val stepLog = AgentStepLog(
                 stepNumber = iter,
                 observation = decision.observation,
                 planLedger = decision.subGoals,
                 toolName = decision.toolName,
                 toolArgsJson = decision.toolArgs.toString(),
-                resultSummary = outcome.outputText,
-                succeeded = outcome.succeeded,
-                activePackage = snapshot.activePackage,
-                elementCount = snapshot.indexedElements.size,
+                resultSummary = verifiedResultText,
+                succeeded = verification.verifiedSuccess,
+                activePackage = verification.finalSnapshot.activePackage,
+                elementCount = verification.finalSnapshot.indexedElements.size,
                 screenshotBase64 = snapshot.screenshotBase64Jpeg
             )
 
             appendChatMessage(
                 LiveChatMessage(
                     sender = ChatSender.ACTION,
-                    text = outcome.outputText,
-                    subtitle = "관찰: ${decision.observation}",
-                    toolBadge = "STEP $iter · ${decision.toolName}",
-                    succeeded = outcome.succeeded
+                    text = verifiedResultText,
+                    subtitle = "궤적 관찰: ${decision.observation}",
+                    toolBadge = if (verification.recoveryAttempted) {
+                        "STEP $iter · ${decision.toolName} (SELF-HEALED)"
+                    } else {
+                        "STEP $iter · ${decision.toolName}"
+                    },
+                    succeeded = verification.verifiedSuccess
                 )
             )
 
@@ -522,6 +586,13 @@ class MobileUseAgentEngine(
                     receipts = if (outcome.receipt != null) prev.receipts + outcome.receipt else prev.receipts
                 )
             }
+
+            // Live-update the Liquid UI Trajectory & World-Model HUD
+            LiquidUiSynthesizer.updateLiveTrajectoryHud(
+                goal = goal,
+                steps = _currentSession.value.steps,
+                worldGraph = worldModelGraph
+            )
 
             if (decision.toolName == "ask_user") {
                 val question = decision.toolArgs.optString("question", "추후 진행 방향을 알려주세요.")

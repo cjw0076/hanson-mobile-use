@@ -104,6 +104,85 @@ object GestureController {
     }
 
     /**
+     * True Haptic Drag-and-Drop Trajectory:
+     * Phase 1: Stationary long-press hold at `(startX, startY)` for `holdMs` with `willContinue = true` (triggers pickup haptic).
+     * Phase 2: Continuous smooth interpolation to `(endX, endY)` over `dragDurationMs`.
+     * Phase 3: 120ms drop-settle hold at `(endX, endY)` before lifting finger.
+     */
+    fun dragAndDrop(
+        service: AccessibilityService,
+        startX: Float,
+        startY: Float,
+        endX: Float,
+        endY: Float,
+        holdMs: Long = 480L,
+        dragDurationMs: Long = 680L
+    ): Boolean {
+        val sx = startX.coerceAtLeast(0f)
+        val sy = startY.coerceAtLeast(0f)
+        val ex = endX.coerceAtLeast(0f)
+        val ey = endY.coerceAtLeast(0f)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val holdPath = Path().apply {
+                moveTo(sx, sy)
+                lineTo(sx + 1f, sy + 1f)
+            }
+            val holdStroke = GestureDescription.StrokeDescription(
+                holdPath,
+                0L,
+                holdMs.coerceIn(250L, 2000L),
+                true
+            )
+            if (!dispatch(service, GestureDescription.Builder().addStroke(holdStroke).build())) {
+                return false
+            }
+
+            val midX = (sx + ex) / 2f
+            val midY = (sy + ey) / 2f
+            val dragPath = Path().apply {
+                moveTo(sx + 1f, sy + 1f)
+                quadTo(midX, midY, ex, ey)
+            }
+            val dragStroke = holdStroke.continueStroke(
+                dragPath,
+                0L,
+                dragDurationMs.coerceIn(200L, 4000L),
+                false
+            )
+            return dispatch(service, GestureDescription.Builder().addStroke(dragStroke).build())
+        } else {
+            return swipe(service, sx, sy, ex, ey, holdMs + dragDurationMs)
+        }
+    }
+
+    /**
+     * Multi-Waypoint Continuous Haptic Trajectory Path:
+     * Moves through an ordered sequence of `(x, y)` coordinates in one continuous finger motion.
+     */
+    fun executeWaypointTrajectory(
+        service: AccessibilityService,
+        waypoints: List<Pair<Float, Float>>,
+        durationMs: Long = 650L
+    ): Boolean {
+        if (waypoints.size < 2) return false
+        val path = Path().apply {
+            val first = waypoints.first()
+            moveTo(first.first.coerceAtLeast(0f), first.second.coerceAtLeast(0f))
+            for (i in 1 until waypoints.size) {
+                val pt = waypoints[i]
+                lineTo(pt.first.coerceAtLeast(0f), pt.second.coerceAtLeast(0f))
+            }
+        }
+        val stroke = GestureDescription.StrokeDescription(
+            path,
+            0L,
+            durationMs.coerceIn(120L, 6000L)
+        )
+        return dispatch(service, GestureDescription.Builder().addStroke(stroke).build())
+    }
+
+    /**
      * Executes Google Artemis `click_sequence`: rapid sequence of taps for transient menus,
      * calculator/dialpad entry, or multi-item selection without round-trip VLM latency.
      */
