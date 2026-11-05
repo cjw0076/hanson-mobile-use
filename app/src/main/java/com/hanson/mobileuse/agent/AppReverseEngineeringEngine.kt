@@ -305,17 +305,13 @@ class AppReverseEngineeringEngine(private val context: Context) {
                 if (manifestEntry != null) {
                     val bytes = zip.getInputStream(manifestEntry).use { it.readBytes() }
                     extractStringsFromBinaryManifest(bytes).forEach { str ->
-                        val s = str.trim()
-                        // Identify URI schemes or deep-link patterns inside manifest string pool
-                        if (s.matches(Regex("^[a-z][a-z0-9+.-]{2,24}$")) &&
-                            !s.contains(".") &&
-                            s !in IGNORED_SCHEMES &&
-                            (s.endsWith("talk") || s.endsWith("map") || s.endsWith("pay") ||
-                                s.endsWith("app") || s.endsWith("link") || s.length in 4..14)
+                        val s = str.trim().trimStart('*', '"', '\'', '(', '[')
+                        if (s.contains("://") &&
+                            !s.contains("schemas.android.com") &&
+                            !s.contains("play.google.com") &&
+                            !s.contains("w3.org") &&
+                            !s.contains("apache.org")
                         ) {
-                            // Keep high-signal scheme candidates paired with `://`
-                        }
-                        if (s.contains("://") && !s.startsWith("http://schemas.android.com")) {
                             extractedSchemes.add(s.take(80))
                         }
                     }

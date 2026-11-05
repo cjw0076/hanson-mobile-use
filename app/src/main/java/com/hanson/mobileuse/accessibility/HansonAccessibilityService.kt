@@ -86,16 +86,50 @@ class HansonAccessibilityService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
+        val pkg = event.packageName?.toString().orEmpty()
+        val cls = event.className?.toString().orEmpty()
+
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
             event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED
         ) {
-            val pkg = event.packageName?.toString().orEmpty()
-            val cls = event.className?.toString().orEmpty()
             if (pkg.isNotBlank()) {
                 _engineState.update {
                     it.copy(
                         activePackage = pkg,
                         activeClassName = cls
+                    )
+                }
+            }
+        }
+
+        // "Show-Me-Once" (시연으로 가르치기) Live Demonstration Capture
+        if (com.hanson.mobileuse.agent.UserDemonstrationRecorder.isRecording.value && pkg.isNotBlank()) {
+            when (event.eventType) {
+                AccessibilityEvent.TYPE_VIEW_CLICKED,
+                AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> {
+                    val src = event.source
+                    val rect = android.graphics.Rect()
+                    src?.getBoundsInScreen(rect)
+                    val (screenW, screenH) = HierarchyDumper.getScreenDimensions(this)
+                    val (normX, normY) = CoordinateNormalizer.pixelToNormalized(
+                        rect.centerX().coerceAtLeast(0),
+                        rect.centerY().coerceAtLeast(0),
+                        screenW,
+                        screenH
+                    )
+                    val label = event.text.joinToString(" ").ifBlank {
+                        event.contentDescription?.toString().orEmpty().ifBlank {
+                            src?.text?.toString().orEmpty()
+                        }
+                    }
+                    val resId = src?.viewIdResourceName.orEmpty()
+                    com.hanson.mobileuse.agent.UserDemonstrationRecorder.recordStep(
+                        packageName = pkg,
+                        eventType = if (event.eventType == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED) "TEXT" else "CLICK",
+                        targetLabel = label,
+                        resourceId = resId,
+                        normX = normX,
+                        normY = normY
                     )
                 }
             }
