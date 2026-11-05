@@ -197,6 +197,28 @@ class ActionTrajectoryVerifierAndHealer(private val context: Context) {
             }
 
             "click", "long_press", "click_sequence" -> {
+                // Check if a modal/popup is blocking FIRST (e.g. permissioncontroller, packageinstaller, or modal buttons)
+                val isPermissionOrSystemDialog = post.activePackage.contains("permissioncontroller", ignoreCase = true) ||
+                    post.activePackage.contains("packageinstaller", ignoreCase = true)
+                val hasModal = isPermissionOrSystemDialog || post.indexedElements.any { el ->
+                    MODAL_DISMISS_KEYWORDS.any { kw ->
+                        (el.text.isNotBlank() && el.text.contains(kw, ignoreCase = true)) ||
+                            (el.contentDesc.isNotBlank() && el.contentDesc.contains(kw, ignoreCase = true))
+                    }
+                }
+                if (hasModal && (isPermissionOrSystemDialog || !pkgChanged || delta < 0.15f)) {
+                    return TransitionVerificationReport(
+                        verifiedSuccess = false,
+                        treeDeltaRatio = delta,
+                        packageChanged = pkgChanged,
+                        windowChanged = winChanged,
+                        focusOrTextChanged = false,
+                        failureCategory = FailureCategory.MODAL_POPUP_BLOCKING,
+                        diagnosisKo = if (isPermissionOrSystemDialog) "권한 요청 팝업 다이얼로그 감지" else "팝업/모달 창이 클릭을 가로막음",
+                        finalSnapshot = post
+                    )
+                }
+
                 val ok = pkgChanged || winChanged || delta >= 0.05f || focusOrTextChanged
                 if (ok) {
                     return TransitionVerificationReport(
@@ -213,10 +235,6 @@ class ActionTrajectoryVerifierAndHealer(private val context: Context) {
                         },
                         finalSnapshot = post
                     )
-                }
-                // Check if a modal/popup is blocking
-                val hasModal = post.indexedElements.any { el ->
-                    MODAL_DISMISS_KEYWORDS.any { kw -> el.text == kw || el.contentDesc == kw }
                 }
                 return TransitionVerificationReport(
                     verifiedSuccess = false,
@@ -312,9 +330,9 @@ class ActionTrajectoryVerifierAndHealer(private val context: Context) {
                 if (coords != null) {
                     val px = coords.first
                     val py = coords.second
-                    // 1. Try spatial jitter (+12, -8) with longer 125ms press duration
-                    val jitterX = (px + 12).coerceAtMost(failedPostSnapshot.screenWidth - 10)
-                    val jitterY = (py - 8).coerceAtLeast(10)
+                    // 1. Try spatial jitter (+12, -8) with longer 125ms press duration and symmetric coordinate clamping
+                    val jitterX = (px + 12).coerceIn(10, failedPostSnapshot.screenWidth - 10)
+                    val jitterY = (py - 8).coerceIn(10, failedPostSnapshot.screenHeight - 10)
                     if (svc != null) {
                         GestureController.tap(svc, jitterX.toFloat(), jitterY.toFloat(), 125L)
                     }
@@ -367,16 +385,29 @@ class ActionTrajectoryVerifierAndHealer(private val context: Context) {
             }
 
             FailureCategory.TRAJECTORY_NO_DISPLACEMENT -> {
-                val dir = args.optString("direction", "up")
-                val swipeCoords = CoordinateNormalizer.computeDirectionalSwipe(
-                    dir,
-                    failedPostSnapshot.screenWidth,
-                    failedPostSnapshot.screenHeight
-                )
-                execOsCliFallback(
-                    "swipe ${swipeCoords.startX} ${swipeCoords.startY} ${swipeCoords.endX} ${swipeCoords.endY} 480"
-                )
-                "UID-2000 커널 레벨 광폭 스와이프(${swipeCoords.startX},${swipeCoords.startY} -> ${swipeCoords.endX},${swipeCoords.endY}) 재실행"
+                val toolName = args.optString("toolName", "")
+                if (toolName == "drag_and_drop" || args.has("start_x")) {
+                    val sx = args.optInt("start_x", 0)
+                    val sy = args.optInt("start_y", 0)
+                    val ex = args.optInt("end_x", 0)
+                    val ey = args.optInt("end_y", 0)
+                    if (svc != null) {
+                        GestureController.dragAndDrop(svc, sx.toFloat(), sy.toFloat(), ex.toFloat(), ey.toFloat(), 700L, 800L)
+                    }
+                    execOsCliFallback("swipe $sx $sy $ex $ey 800")
+                    "드래그앤드롭 홀드 시간(700ms) 연장 및 슬라이드 재시도"
+                } else {
+                    val dir = args.optString("direction", "up")
+                    val swipeCoords = CoordinateNormalizer.computeDirectionalSwipe(
+                        dir,
+                        failedPostSnapshot.screenWidth,
+                        failedPostSnapshot.screenHeight
+                    )
+                    execOsCliFallback(
+                        "swipe ${swipeCoords.startX} ${swipeCoords.startY} ${swipeCoords.endX} ${swipeCoords.endY} 480"
+                    )
+                    "UID-2000 커널 레벨 광폭 스와이프(${swipeCoords.startX},${swipeCoords.startY} -> ${swipeCoords.endX},${swipeCoords.endY}) 재실행"
+                }
             }
 
             FailureCategory.APP_LAUNCH_STALLED -> {
