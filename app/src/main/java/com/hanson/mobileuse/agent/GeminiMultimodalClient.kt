@@ -389,6 +389,37 @@ Critical Mobile-Use Rules:
             )
         }
 
+        // 0-A. Universal App Reverse-Engineering & Skill Synthesis (UARP)
+        if (
+            gLower.contains("리버스") ||
+            gLower.contains("reverse") ||
+            gLower.contains("분석해서 스킬") ||
+            gLower.contains("스킬로 만들") ||
+            gLower.contains("프로토콜 학습") ||
+            gLower.contains("앱 분석") ||
+            gLower.contains("동작방식 학습")
+        ) {
+            val cleaned = g
+                .replace("리버스 엔지니어링", "")
+                .replace("리버스", "")
+                .replace("분석해서 스킬로 만들어줘", "")
+                .replace("스킬로 만들어줘", "")
+                .replace("프로토콜 학습해줘", "")
+                .replace("앱 분석해줘", "")
+                .replace("해줘", "")
+                .trim()
+                .ifBlank { "현재앱" }
+            return ModelTurnDecision(
+                observation = "[UARP 리버스 엔지니어링] '$cleaned'의 APK 바이너리(base.apk), 매니페스트 딥링크, Exported Activity 및 UI 프레임워크를 역분석하여 재사용 가능한 스킬로 합성합니다.",
+                subGoals = listOf(
+                    SubGoalItem("APK 바이너리 및 매니페스트 딥링크/Activity 역분석", SubGoalStatus.IN_PROGRESS),
+                    SubGoalItem("영구 앱 제어 스킬 합성 및 등록", SubGoalStatus.PENDING)
+                ),
+                toolName = "reverse_engineer_app",
+                toolArgs = JSONObject().put("app_query", cleaned)
+            )
+        }
+
         // 0. Native Mobile OS CLI (`hanson ...`, `/cli ...`, `/sh ...`, `dumpsys`, `애니메이션`, `강제 종료`, `self-heal`)
         if (
             gLower.startsWith("hanson ") ||

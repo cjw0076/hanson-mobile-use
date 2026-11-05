@@ -295,6 +295,26 @@ object ToolSpecRegistry {
                 ToolParamSpec("command", "STRING", "Hanson CLI subcommand or raw shell pipeline, e.g. 'status', 'top', 'setting put global window_animation_scale 0.5', 'app stop com.google.android.youtube', 'dump activity top'", required = true)
             )
         ),
+        ToolSpec(
+            name = "reverse_engineer_app",
+            description = "Universal App Reverse-Engineering Protocol (UARP): Inspects any installed app's binary APK (`base.apk`), `AndroidManifest.xml`, `PackageManager`, and `dumpsys package` + live UI tree to extract its UI engine (Flutter/RN/Unity/Compose/Native), custom Deep-Link URI schemes, exported Activities, ContentProviders, and UI anchors, then compiles and saves a permanent reusable App Skill.",
+            riskTier = ToolRiskTier.SAFE,
+            capability = AgentCapability.APP_LAUNCH,
+            parameters = listOf(
+                ToolParamSpec("app_query", "STRING", "App name (e.g. '카카오톡', '쿠팡', '토스', '현재앱') or package name to reverse-engineer and synthesize into a skill", required = true),
+                ToolParamSpec("custom_recipe", "STRING", "Optional learned workflow recipe or tip to attach to the synthesized skill")
+            )
+        ),
+        ToolSpec(
+            name = "learn_app_skill",
+            description = "Save or append a newly discovered workflow recipe, deep-link shortcut, or UI interaction rule into the persistent UARP App Protocol store for a target app so future runs can execute it in 1 step.",
+            riskTier = ToolRiskTier.STATEFUL,
+            capability = AgentCapability.APP_LAUNCH,
+            parameters = listOf(
+                ToolParamSpec("app_query", "STRING", "Target app name or package name", required = true),
+                ToolParamSpec("recipe", "STRING", "Step-by-step protocol, deep-link URI, or UI anchor rule learned during interaction", required = true)
+            )
+        ),
 
         // =====================================================================
         // 5. Task Lifecycle & Human-in-the-Loop Control
