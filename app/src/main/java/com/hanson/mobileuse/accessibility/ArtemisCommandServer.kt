@@ -76,13 +76,13 @@ class ArtemisCommandServer(
         client.use { sock ->
             try {
                 sock.soTimeout = 10_000
-                val reader = BufferedReader(InputStreamReader(sock.getInputStream(), StandardCharsets.UTF_8))
+                val rawIn = sock.getInputStream()
                 val out = sock.getOutputStream()
-                val firstLine = reader.readLine() ?: return
+                val firstLine = readAsciiLine(rawIn) ?: return
                 totalRequests.incrementAndGet()
 
                 if (firstLine.startsWith("GET ") || firstLine.startsWith("POST ")) {
-                    handleHttp(firstLine, reader, out)
+                    handleHttp(firstLine, rawIn, out)
                 } else {
                     handleJsonRpc(firstLine, out)
                 }
@@ -92,7 +92,21 @@ class ArtemisCommandServer(
         }
     }
 
-    private fun handleHttp(requestLine: String, reader: BufferedReader, out: OutputStream) {
+    private fun readAsciiLine(input: java.io.InputStream): String? {
+        val sb = java.io.ByteArrayOutputStream()
+        var foundAny = false
+        while (true) {
+            val b = input.read()
+            if (b == -1) break
+            foundAny = true
+            if (b == '\n'.code) break
+            if (b != '\r'.code) sb.write(b)
+        }
+        if (!foundAny && sb.size() == 0) return null
+        return sb.toString("UTF-8")
+    }
+
+    private fun handleHttp(requestLine: String, rawIn: java.io.InputStream, out: OutputStream) {
         val parts = requestLine.split(" ")
         if (parts.size < 2) return
         val method = parts[0]
@@ -111,26 +125,26 @@ class ArtemisCommandServer(
         }
 
         var contentLength = 0
-        var headerLine = reader.readLine()
+        var headerLine = readAsciiLine(rawIn)
         while (!headerLine.isNullOrEmpty()) {
             if (headerLine.lowercase().startsWith("content-length:")) {
                 contentLength = headerLine.substringAfter(":").trim().toIntOrNull() ?: 0
             } else if (headerLine.lowercase().startsWith("x-artemis-token:")) {
                 queryParams["token"] = headerLine.substringAfter(":").trim()
             }
-            headerLine = reader.readLine()
+            headerLine = readAsciiLine(rawIn)
         }
 
         var body = ""
         if ("POST".equals(method, ignoreCase = true) && contentLength > 0) {
-            val buf = CharArray(contentLength)
+            val buf = ByteArray(contentLength)
             var read = 0
             while (read < contentLength) {
-                val r = reader.read(buf, read, contentLength - read)
+                val r = rawIn.read(buf, read, contentLength - read)
                 if (r == -1) break
                 read += r
             }
-            body = String(buf, 0, read)
+            body = String(buf, 0, read, StandardCharsets.UTF_8)
         }
 
         if (requireTokenAuth && queryParams["token"] != sessionToken) {

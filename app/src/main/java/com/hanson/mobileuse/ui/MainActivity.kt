@@ -161,30 +161,19 @@ class MainActivity : ComponentActivity() {
                     ) {
                         when (NavTab.entries[selectedTab]) {
                             NavTab.COMMAND -> CommandCenterScreen(
-                                a11yState = a11yState,
-                                permState = permState,
                                 session = session,
                                 chatMessages = chatMessages,
-                                recentNotifications = recentNotifications,
-                                isHudShowing = isHudShowing,
                                 ttsEnabled = config.ttsVoiceReply,
+                                a11yState = a11yState,
+                                notifications = recentNotifications,
                                 onSendChatMessage = { msg -> agentEngine.sendChatMessage(msg) },
-                                onStopGoal = { agentEngine.stopRun() },
+                                onStopAgent = { agentEngine.stopRun() },
                                 onClearChat = { agentEngine.clearLiveChat() },
-                                onApprovePending = { approved, alwaysAllow ->
-                                    agentEngine.resolvePendingApproval(approved, alwaysAllow)
+                                onToggleTts = {
+                                    agentEngine.updateConfig(ttsVoiceReply = !config.ttsVoiceReply)
                                 },
-                                onQuickReplyNotification = { sessionId, msg ->
-                                    val (_, resultMsg) = RemoteInputSessionCache.sendQuickReply(
-                                        this@MainActivity,
-                                        sessionId,
-                                        msg
-                                    )
-                                    agentEngine.injectExternalReply(resultMsg, "QUICK REPLY")
-                                    Toast.makeText(this@MainActivity, resultMsg, Toast.LENGTH_SHORT).show()
-                                },
-                                onToggleFloatingHud = {
-                                    if (isHudShowing) {
+                                onToggleOverlayHud = { enable ->
+                                    if (!enable || isHudShowing) {
                                         FloatingHudService.stop(this@MainActivity)
                                     } else {
                                         if (!FloatingHudService.startIfPermitted(this@MainActivity)) {
@@ -197,13 +186,7 @@ class MainActivity : ComponentActivity() {
                                         }
                                     }
                                 },
-                                onToggleTts = {
-                                    agentEngine.updateConfig(ttsVoiceReply = !config.ttsVoiceReply)
-                                },
-                                onLaunchVoiceInput = { callback ->
-                                    launchVoiceRecognizer(callback)
-                                },
-                                onNavigateToPermissions = {
+                                onOpenPermissionsTab = {
                                     permissionHub.refreshStatus()
                                     selectedTab = NavTab.PERMISSIONS.ordinal
                                 }

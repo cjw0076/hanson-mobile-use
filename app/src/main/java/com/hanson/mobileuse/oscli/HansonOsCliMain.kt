@@ -340,32 +340,47 @@ object HansonOsCliMain {
         }
     }
 
+    private fun readAsciiLine(input: java.io.InputStream): String? {
+        val sb = java.io.ByteArrayOutputStream()
+        var foundAny = false
+        while (true) {
+            val b = input.read()
+            if (b == -1) break
+            foundAny = true
+            if (b == '\n'.code) break
+            if (b != '\r'.code) sb.write(b)
+        }
+        if (!foundAny && sb.size() == 0) return null
+        return sb.toString("UTF-8")
+    }
+
     private fun handleDaemonClient(socket: Socket) {
         socket.use { s ->
             s.soTimeout = 12_000
-            val reader = BufferedReader(InputStreamReader(s.getInputStream(), Charsets.UTF_8))
-            val requestLine = reader.readLine() ?: return
+            val rawIn = s.getInputStream()
+            val requestLine = readAsciiLine(rawIn) ?: return
             val parts = requestLine.split(" ")
             val method = parts.getOrNull(0) ?: "GET"
             val path = parts.getOrNull(1) ?: "/"
 
             var contentLength = 0
-            var line: String?
-            while (reader.readLine().also { line = it } != null && line!!.isNotEmpty()) {
-                if (line!!.lowercase().startsWith("content-length:")) {
-                    contentLength = line!!.substringAfter(":").trim().toIntOrNull() ?: 0
+            var line = readAsciiLine(rawIn)
+            while (!line.isNullOrEmpty()) {
+                if (line.lowercase().startsWith("content-length:")) {
+                    contentLength = line.substringAfter(":").trim().toIntOrNull() ?: 0
                 }
+                line = readAsciiLine(rawIn)
             }
 
             val bodyStr = if (contentLength > 0) {
-                val buf = CharArray(contentLength)
+                val buf = ByteArray(contentLength)
                 var read = 0
                 while (read < contentLength) {
-                    val r = reader.read(buf, read, contentLength - read)
+                    val r = rawIn.read(buf, read, contentLength - read)
                     if (r == -1) break
                     read += r
                 }
-                String(buf, 0, read)
+                String(buf, 0, read, Charsets.UTF_8)
             } else ""
 
             requestCounter.incrementAndGet()
