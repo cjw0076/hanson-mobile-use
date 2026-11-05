@@ -38,6 +38,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 import com.hanson.mobileuse.accessibility.GestureController
 import com.hanson.mobileuse.accessibility.HansonAccessibilityService
+import com.hanson.mobileuse.agent.HansonRuntimeHolder
 import com.hanson.mobileuse.agent.MobileUseAgentEngine
 import com.hanson.mobileuse.agent.PermissionHubManager
 import com.hanson.mobileuse.agent.PermissionStatusItem
@@ -54,7 +55,7 @@ import com.hanson.mobileuse.ui.theme.ObsidianColors
 import java.util.Locale
 
 private enum class NavTab(val labelKo: String, val icon: ImageVector) {
-    COMMAND("커맨드", Icons.Default.Bolt),
+    COMMAND("라이브 채팅", Icons.Default.Bolt),
     PERMISSIONS("권한 허브", Icons.Default.Security),
     INSPECTOR("인스펙터", Icons.Default.AccountTree),
     SKILLS("스킬·영수증", Icons.Default.AutoAwesome),
@@ -89,11 +90,14 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        permissionHub = PermissionHubManager(applicationContext)
-        agentEngine = MobileUseAgentEngine(applicationContext, permissionHub)
+        permissionHub = HansonRuntimeHolder.getPermissionHub(applicationContext)
+        agentEngine = HansonRuntimeHolder.getAgentEngine(applicationContext)
 
-        // Start foreground watchdog daemon
+        // Start foreground watchdog daemon & auto-show floating live chat HUD if permitted
         HansonForegroundService.start(applicationContext)
+        if (agentEngine.config.value.autoShowFloatingHud) {
+            FloatingHudService.startIfPermitted(applicationContext)
+        }
 
         setContent {
             HansonObsidianTheme {
@@ -102,6 +106,7 @@ class MainActivity : ComponentActivity() {
                 val a11yState by HansonAccessibilityService.engineState.collectAsState()
                 val permState by permissionHub.state.collectAsState()
                 val session by agentEngine.currentSession.collectAsState()
+                val chatMessages by agentEngine.chatMessages.collectAsState()
                 val receipts by agentEngine.allReceipts.collectAsState()
                 val config by agentEngine.config.collectAsState()
                 val recentNotifications by RemoteInputSessionCache.recentNotifications.collectAsState()
@@ -159,10 +164,13 @@ class MainActivity : ComponentActivity() {
                                 a11yState = a11yState,
                                 permState = permState,
                                 session = session,
+                                chatMessages = chatMessages,
                                 recentNotifications = recentNotifications,
                                 isHudShowing = isHudShowing,
-                                onStartGoal = { goal -> agentEngine.startRun(goal) },
+                                ttsEnabled = config.ttsVoiceReply,
+                                onSendChatMessage = { msg -> agentEngine.sendChatMessage(msg) },
                                 onStopGoal = { agentEngine.stopRun() },
+                                onClearChat = { agentEngine.clearLiveChat() },
                                 onApprovePending = { approved, alwaysAllow ->
                                     agentEngine.resolvePendingApproval(approved, alwaysAllow)
                                 },
@@ -172,6 +180,7 @@ class MainActivity : ComponentActivity() {
                                         sessionId,
                                         msg
                                     )
+                                    agentEngine.injectExternalReply(resultMsg, "QUICK REPLY")
                                     Toast.makeText(this@MainActivity, resultMsg, Toast.LENGTH_SHORT).show()
                                 },
                                 onToggleFloatingHud = {
@@ -187,6 +196,9 @@ class MainActivity : ComponentActivity() {
                                             ).show()
                                         }
                                     }
+                                },
+                                onToggleTts = {
+                                    agentEngine.updateConfig(ttsVoiceReply = !config.ttsVoiceReply)
                                 },
                                 onLaunchVoiceInput = { callback ->
                                     launchVoiceRecognizer(callback)
@@ -271,7 +283,7 @@ class MainActivity : ComponentActivity() {
                                 receipts = receipts,
                                 onRunSkill = { skill ->
                                     selectedTab = NavTab.COMMAND.ordinal
-                                    agentEngine.startRun(skill.goalPrompt)
+                                    agentEngine.sendChatMessage(skill.goalPrompt)
                                 },
                                 onClearReceipts = {
                                     agentEngine.clearReceipts()

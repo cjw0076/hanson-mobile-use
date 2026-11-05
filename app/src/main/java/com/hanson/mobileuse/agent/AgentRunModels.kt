@@ -27,6 +27,38 @@ data class AgentStepLog(
     val timestampMs: Long = System.currentTimeMillis()
 )
 
+enum class ChatSender {
+    USER,
+    AGENT,
+    ACTION,
+    NOTIFICATION
+}
+
+/**
+ * Continuous Runtime Live Chat Message
+ */
+data class LiveChatMessage(
+    val id: String = "msg_${System.nanoTime()}",
+    val sender: ChatSender,
+    val text: String,
+    val subtitle: String = "",
+    val toolBadge: String? = null,
+    val succeeded: Boolean = true,
+    val replySessionId: String? = null,
+    val timestampMs: Long = System.currentTimeMillis()
+) {
+    fun toJson(): JSONObject = JSONObject().apply {
+        put("id", id)
+        put("sender", sender.name)
+        put("text", text)
+        put("subtitle", subtitle)
+        if (toolBadge != null) put("toolBadge", toolBadge)
+        put("succeeded", succeeded)
+        if (replySessionId != null) put("replySessionId", replySessionId)
+        put("timestampMs", timestampMs)
+    }
+}
+
 /**
  * EZmap Reversibility Receipt ('에이전트가 수행한 작업')
  */
@@ -46,12 +78,12 @@ data class PendingApprovalRequest(
 )
 
 enum class AgentRunStatus(val labelKo: String) {
-    IDLE("대기 중"),
+    IDLE("라이브 대기 중"),
     OBSERVING("화면 및 UI 트리 분석 중"),
     THINKING("Gemini 멀티모달 추론 중"),
     AWAITING_APPROVAL("사용자 승인 대기 중"),
     ACTING("모바일 액션 실행 중"),
-    COMPLETED("작업 완료"),
+    COMPLETED("라이브 응답 완료"),
     STOPPED("사용자 중단"),
     ERROR("오류 발생")
 }
@@ -88,17 +120,12 @@ object ToolSafetyGate {
         args: JSONObject,
         permissionHub: PermissionHubManager
     ): SafetyGateDecision {
-        // 1. Safe read-only tools are always allowed
         if (toolSpec.riskTier == ToolRiskTier.SAFE) {
             return SafetyGateDecision.Allow
         }
-
-        // 2. If Unrestricted Autonomous Mode is enabled, allow all tools immediately
         if (permissionHub.isUnrestrictedMode()) {
             return SafetyGateDecision.Allow
         }
-
-        // 3. Otherwise, inspect per-capability governance setting
         val capability = toolSpec.capability ?: return SafetyGateDecision.Allow
         return when (permissionHub.getCapabilityLevel(capability)) {
             PermissionLevel.ALWAYS -> SafetyGateDecision.Allow

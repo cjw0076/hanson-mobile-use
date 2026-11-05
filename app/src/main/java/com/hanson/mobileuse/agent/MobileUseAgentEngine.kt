@@ -1,9 +1,11 @@
 package com.hanson.mobileuse.agent
 
 import android.content.Context
+import android.speech.tts.TextToSpeech
 import com.hanson.mobileuse.accessibility.AtomicSnapshot
 import com.hanson.mobileuse.accessibility.HansonAccessibilityService
-import com.hanson.mobileuse. accessibility.HierarchyDumper
+import com.hanson.mobileuse.accessibility.HierarchyDumper
+import com.hanson.mobileuse.notification.InterceptedNotification
 import com.hanson.mobileuse.service.FloatingHudService
 import com.hanson.mobileuse.service.HansonForegroundService
 import kotlinx.coroutines.CompletableDeferred
@@ -17,18 +19,22 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import org.json.JSONArray
+import org.json.JSONObject
+import java.util.Locale
 
 data class AgentEngineConfig(
     val apiKey: String = "",
     val modelName: String = GeminiMultimodalClient.DEFAULT_MODEL,
     val maxIterations: Int = 15,
-    val autoShowFloatingHud: Boolean = true
+    val autoShowFloatingHud: Boolean = true,
+    val ttsVoiceReply: Boolean = false
 )
 
 /**
- * Core Multimodal Mobile-Use Agent Engine.
- * Orchestrates Perception (AtomicSnapshot) -> Gemini 3-Phase Reasoning -> Safety Gate -> Tool Execution
- * -> Action Receipts & Floating HUD updates.
+ * Core Multimodal Mobile-Use Agent Engine with Continuous Runtime Live Chat.
+ * Maintains an always-on conversational thread (`chatMessages`) shared across the main app,
+ * the Floating Live Chat Overlay (`SYSTEM_ALERT_WINDOW`), and the `:18888/chat` RPC bridge.
  */
 class MobileUseAgentEngine(
     private val context: Context,
@@ -40,6 +46,8 @@ class MobileUseAgentEngine(
         private const val KEY_MODEL = "gemini_model_name"
         private const val KEY_MAX_ITER = "max_iterations"
         private const val KEY_AUTO_HUD = "auto_floating_hud"
+        private const val KEY_TTS_VOICE = "tts_voice_reply"
+        private const val KEY_CHAT_HISTORY = "live_chat_history_json"
     }
 
     private val prefs = context.getSharedPreferences(CONFIG_PREFS, Context.MODE_PRIVATE)
@@ -49,12 +57,17 @@ class MobileUseAgentEngine(
 
     private var activeJob: Job? = null
     private var approvalDeferred: CompletableDeferred<Boolean>? = null
+    private var tts: TextToSpeech? = null
+    private var ttsReady = false
 
     private val _config = MutableStateFlow(loadConfig())
     val config: StateFlow<AgentEngineConfig> = _config.asStateFlow()
 
     private val _currentSession = MutableStateFlow(AgentRunSession())
     val currentSession: StateFlow<AgentRunSession> = _currentSession.asStateFlow()
+
+    private val _chatMessages = MutableStateFlow(loadPersistedChatMessages())
+    val chatMessages: StateFlow<List<LiveChatMessage>> = _chatMessages.asStateFlow()
 
     private val _runHistory = MutableStateFlow<List<AgentRunSession>>(emptyList())
     val runHistory: StateFlow<List<AgentRunSession>> = _runHistory.asStateFlow()
@@ -65,6 +78,28 @@ class MobileUseAgentEngine(
     init {
         HansonForegroundService.onEmergencyStopRequested = { stopRun("알림바 긴급 정지 버튼으로 중단되었습니다.") }
         FloatingHudService.onStopClicked = { stopRun("플로팅 HUD 정지 버튼으로 중단되었습니다.") }
+        FloatingHudService.onSendLiveChatMessage = { userMsg -> sendChatMessage(userMsg) }
+        initTts()
+    }
+
+    private fun initTts() {
+        try {
+            tts = TextToSpeech(context.applicationContext) { status ->
+                if (status == TextToSpeech.SUCCESS) {
+                    tts?.language = Locale.KOREAN
+                    ttsReady = true
+                }
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun speakIfEnabled(text: String) {
+        if (!_config.value.ttsVoiceReply || !ttsReady) return
+        try {
+            tts?.speak(text.take(220), TextToSpeech.QUEUE_FLUSH, null, "hanson_live_${System.currentTimeMillis()}")
+        } catch (_: Exception) {
+        }
     }
 
     private fun loadConfig(): AgentEngineConfig {
@@ -73,7 +108,8 @@ class MobileUseAgentEngine(
             modelName = prefs.getString(KEY_MODEL, GeminiMultimodalClient.DEFAULT_MODEL)
                 ?: GeminiMultimodalClient.DEFAULT_MODEL,
             maxIterations = prefs.getInt(KEY_MAX_ITER, 15).coerceIn(3, 40),
-            autoShowFloatingHud = prefs.getBoolean(KEY_AUTO_HUD, true)
+            autoShowFloatingHud = prefs.getBoolean(KEY_AUTO_HUD, true),
+            ttsVoiceReply = prefs.getBoolean(KEY_TTS_VOICE, false)
         )
     }
 
@@ -81,27 +117,161 @@ class MobileUseAgentEngine(
         apiKey: String? = null,
         modelName: String? = null,
         maxIterations: Int? = null,
-        autoShowFloatingHud: Boolean? = null
+        autoShowFloatingHud: Boolean? = null,
+        ttsVoiceReply: Boolean? = null
     ) {
         val current = _config.value
         val next = current.copy(
             apiKey = apiKey ?: current.apiKey,
             modelName = modelName ?: current.modelName,
             maxIterations = (maxIterations ?: current.maxIterations).coerceIn(3, 40),
-            autoShowFloatingHud = autoShowFloatingHud ?: current.autoShowFloatingHud
+            autoShowFloatingHud = autoShowFloatingHud ?: current.autoShowFloatingHud,
+            ttsVoiceReply = ttsVoiceReply ?: current.ttsVoiceReply
         )
         prefs.edit()
             .putString(KEY_API_KEY, next.apiKey)
             .putString(KEY_MODEL, next.modelName)
             .putInt(KEY_MAX_ITER, next.maxIterations)
             .putBoolean(KEY_AUTO_HUD, next.autoShowFloatingHud)
+            .putBoolean(KEY_TTS_VOICE, next.ttsVoiceReply)
             .apply()
         _config.value = next
     }
 
-    fun startRun(goalPrompt: String) {
+    private fun loadPersistedChatMessages(): List<LiveChatMessage> {
+        val raw = prefs.getString(KEY_CHAT_HISTORY, null)
+        if (raw.isNullOrBlank()) {
+            return listOf(
+                LiveChatMessage(
+                    sender = ChatSender.AGENT,
+                    text = "안녕하세요! Hanson × Google Artemis 상시 라이브 채팅 세션이 연결되었습니다. 다른 앱(카카오톡, 유튜브, 브라우저 등)을 사용하시는 중에도 플로팅 라이브 채팅창이나 이 화면에서 언제든 명령·질문을 이어가실 수 있습니다.",
+                    subtitle = "Runtime Live Session · :18888 Active",
+                    toolBadge = "LIVE READY"
+                )
+            )
+        }
+        return try {
+            val arr = JSONArray(raw)
+            val list = mutableListOf<LiveChatMessage>()
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                list.add(
+                    LiveChatMessage(
+                        id = obj.optString("id", "msg_$i"),
+                        sender = runCatching { ChatSender.valueOf(obj.optString("sender", "AGENT")) }
+                            .getOrDefault(ChatSender.AGENT),
+                        text = obj.optString("text", ""),
+                        subtitle = obj.optString("subtitle", ""),
+                        toolBadge = obj.optString("toolBadge").takeIf { it.isNotBlank() },
+                        succeeded = obj.optBoolean("succeeded", true),
+                        replySessionId = obj.optString("replySessionId").takeIf { it.isNotBlank() },
+                        timestampMs = obj.optLong("timestampMs", System.currentTimeMillis())
+                    )
+                )
+            }
+            if (list.isEmpty()) {
+                listOf(
+                    LiveChatMessage(
+                        sender = ChatSender.AGENT,
+                        text = "Hanson × Google Artemis 상시 라이브 채팅 런타임이 활성화되었습니다.",
+                        toolBadge = "LIVE READY"
+                    )
+                )
+            } else list
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    private fun appendChatMessage(msg: LiveChatMessage) {
+        _chatMessages.update { prev ->
+            val updated = (prev + msg).takeLast(80)
+            persistChatMessages(updated)
+            updated
+        }
+        FloatingHudService.notifyChatUpdated(_chatMessages.value)
+    }
+
+    private fun persistChatMessages(messages: List<LiveChatMessage>) {
+        try {
+            val arr = JSONArray()
+            messages.takeLast(50).forEach { arr.put(it.toJson()) }
+            prefs.edit().putString(KEY_CHAT_HISTORY, arr.toString()).apply()
+        } catch (_: Exception) {
+        }
+    }
+
+    fun clearLiveChat() {
+        val welcome = LiveChatMessage(
+            sender = ChatSender.AGENT,
+            text = "라이브 채팅 대화 내역을 초기화했습니다. 새로운 명령이나 질문을 입력해 주세요!",
+            subtitle = "Runtime Live Session",
+            toolBadge = "RESET"
+        )
+        _chatMessages.value = listOf(welcome)
+        persistChatMessages(_chatMessages.value)
+        FloatingHudService.notifyChatUpdated(_chatMessages.value)
+    }
+
+    /**
+     * Injects a live message or response directly from the Laptop CLI (:18888/chat) into the phone's live chat stream.
+     */
+    fun injectExternalReply(text: String, badge: String = "LAPTOP CLI") {
+        appendChatMessage(
+            LiveChatMessage(
+                sender = ChatSender.AGENT,
+                text = text,
+                subtitle = "노트북 CLI 실시간 브리지 (:18888/chat)",
+                toolBadge = badge
+            )
+        )
+        speakIfEnabled(text)
+        FloatingHudService.updateHudStatus("노트북 CLI 메시지 도착", text.take(32), false)
+    }
+
+    /**
+     * Streams an incoming intercepted notification (KakaoTalk, SMS, Telegram, Slack, etc.)
+     * directly into the continuous runtime Live Chat so the user can see and reply to it live.
+     */
+    fun postIncomingNotificationToLiveChat(notif: InterceptedNotification) {
+        val msg = LiveChatMessage(
+            sender = ChatSender.NOTIFICATION,
+            text = "[${notif.appLabel}] ${notif.sender}: ${notif.messageText}",
+            subtitle = if (notif.canQuickReply) "방: ${notif.roomOrTitle} · 0.2초 즉시 답장 가능" else "방: ${notif.roomOrTitle}",
+            toolBadge = if (notif.canQuickReply) "RemoteInput" else "Notification",
+            replySessionId = if (notif.canQuickReply) notif.sessionId else null
+        )
+        appendChatMessage(msg)
+    }
+
+    /**
+     * Sends a user message into the continuous runtime Live Chat and triggers the agent loop.
+     */
+    fun sendChatMessage(userMessage: String) {
+        val trimmed = userMessage.trim()
+        if (trimmed.isEmpty()) return
+
+        appendChatMessage(
+            LiveChatMessage(
+                sender = ChatSender.USER,
+                text = trimmed
+            )
+        )
+        startRun(trimmed, appendUserBubble = false)
+    }
+
+    fun startRun(goalPrompt: String, appendUserBubble: Boolean = true) {
         val trimmedGoal = goalPrompt.trim()
         if (trimmedGoal.isEmpty()) return
+
+        if (appendUserBubble) {
+            appendChatMessage(
+                LiveChatMessage(
+                    sender = ChatSender.USER,
+                    text = trimmedGoal
+                )
+            )
+        }
 
         activeJob?.cancel()
         approvalDeferred?.complete(false)
@@ -118,14 +288,14 @@ class MobileUseAgentEngine(
         if (cfg.autoShowFloatingHud) {
             FloatingHudService.startIfPermitted(context)
         }
-        FloatingHudService.updateHudStatus("Hanson AI 실행 중", trimmedGoal.take(32), true)
+        FloatingHudService.updateHudStatus("Hanson AI 추론 중", trimmedGoal.take(32), true)
 
         activeJob = scope.launch {
             runLoop(trimmedGoal, cfg)
         }
     }
 
-    fun stopRun(reason: String = "사용자 요청으로 에이전트 실행을 중지했습니다.") {
+    fun stopRun(reason: String = "사용자 요청으로 현재 작업을 중지했습니다. 라이브 채팅은 계속 유지됩니다.") {
         activeJob?.cancel()
         activeJob = null
         approvalDeferred?.complete(false)
@@ -141,7 +311,15 @@ class MobileUseAgentEngine(
             archiveSession(stopped)
             stopped
         }
-        FloatingHudService.updateHudStatus("에이전트 대기 중", reason.take(30), false)
+        appendChatMessage(
+            LiveChatMessage(
+                sender = ChatSender.AGENT,
+                text = reason,
+                toolBadge = "STOPPED",
+                succeeded = false
+            )
+        )
+        FloatingHudService.updateHudStatus("라이브 채팅 대기 중", reason.take(30), false)
     }
 
     fun resolvePendingApproval(approved: Boolean, alwaysAllowCapability: Boolean = false) {
@@ -168,7 +346,6 @@ class MobileUseAgentEngine(
             }
             FloatingHudService.updateHudStatus("Step $iter/${cfg.maxIterations} · 화면 분석", goal.take(30), true)
 
-            // 1. Capture Atomic Snapshot (Screenshot + Multi-Window UI Tree)
             val snapshot: AtomicSnapshot = HansonAccessibilityService.instance?.captureSnapshotNow(
                 includeScreenshot = true
             ) ?: AtomicSnapshot(
@@ -178,7 +355,6 @@ class MobileUseAgentEngine(
                 activeWindowTitle = "AccessibilityService Off (Fast-Lane Mode)"
             )
 
-            // 2. Decide next action via Gemini VLM + Function Calling (or local fallback)
             _currentSession.update { it.copy(status = AgentRunStatus.THINKING) }
             FloatingHudService.updateHudStatus("Step $iter · AI 추론 중", "화면 요소 ${snapshot.indexedElements.size}개 분석", true)
 
@@ -189,14 +365,14 @@ class MobileUseAgentEngine(
                 iteration = iter,
                 snapshot = snapshot,
                 historySteps = _currentSession.value.steps,
-                previousPlan = _currentSession.value.subGoals
+                previousPlan = _currentSession.value.subGoals,
+                chatHistory = _chatMessages.value
             )
 
             _currentSession.update {
                 it.copy(subGoals = decision.subGoals)
             }
 
-            // 3. Check if task completed or user question
             if (decision.toolName == "complete_task") {
                 val summary = decision.toolArgs.optString("summary", "작업을 성공적으로 완료했습니다.")
                 val finalStep = AgentStepLog(
@@ -222,11 +398,19 @@ class MobileUseAgentEngine(
                     archiveSession(completed)
                     completed
                 }
-                FloatingHudService.updateHudStatus("작업 완료", summary.take(32), false)
+                appendChatMessage(
+                    LiveChatMessage(
+                        sender = ChatSender.AGENT,
+                        text = summary,
+                        subtitle = decision.observation,
+                        toolBadge = "COMPLETE"
+                    )
+                )
+                speakIfEnabled(summary)
+                FloatingHudService.updateHudStatus("라이브 채팅 대기 중", summary.take(32), false)
                 return
             }
 
-            // 4. Safety Gate evaluation
             val spec = ToolSpecRegistry.find(decision.toolName)
             if (spec != null) {
                 when (val gate = ToolSafetyGate.evaluate(spec, decision.toolArgs, permissionHub)) {
@@ -253,6 +437,14 @@ class MobileUseAgentEngine(
                             archiveSession(stopped)
                             stopped
                         }
+                        appendChatMessage(
+                            LiveChatMessage(
+                                sender = ChatSender.AGENT,
+                                text = gate.reasonKo,
+                                toolBadge = "DENIED · ${decision.toolName}",
+                                succeeded = false
+                            )
+                        )
                         FloatingHudService.updateHudStatus("거버넌스 차단", gate.reasonKo.take(28), false)
                         return
                     }
@@ -269,6 +461,13 @@ class MobileUseAgentEngine(
                                 )
                             )
                         }
+                        appendChatMessage(
+                            LiveChatMessage(
+                                sender = ChatSender.AGENT,
+                                text = "승인 요청: ${gate.reasonKo}",
+                                toolBadge = "APPROVAL · ${spec.name}"
+                            )
+                        )
                         FloatingHudService.updateHudStatus("승인 대기 중", "${spec.name} 실행 확인 필요", true)
                         val approved = deferred.await()
                         approvalDeferred = null
@@ -281,7 +480,6 @@ class MobileUseAgentEngine(
                 }
             }
 
-            // 5. Execute Tool
             _currentSession.update { it.copy(status = AgentRunStatus.ACTING) }
             FloatingHudService.updateHudStatus("Step $iter · ${decision.toolName}", decision.observation.take(30), true)
 
@@ -304,6 +502,16 @@ class MobileUseAgentEngine(
                 screenshotBase64 = snapshot.screenshotBase64Jpeg
             )
 
+            appendChatMessage(
+                LiveChatMessage(
+                    sender = ChatSender.ACTION,
+                    text = outcome.outputText,
+                    subtitle = "관찰: ${decision.observation}",
+                    toolBadge = "STEP $iter · ${decision.toolName}",
+                    succeeded = outcome.succeeded
+                )
+            )
+
             if (outcome.receipt != null) {
                 _allReceipts.update { (listOf(outcome.receipt) + it).take(50) }
             }
@@ -320,32 +528,48 @@ class MobileUseAgentEngine(
                 _currentSession.update { prev ->
                     val finished = prev.copy(
                         status = AgentRunStatus.COMPLETED,
-                        finalSummary = "에이전트 질문: $question",
+                        finalSummary = question,
                         finishedAtMs = System.currentTimeMillis()
                     )
                     archiveSession(finished)
-                    finished
+                    completedSessionWithQuestion(finished)
                 }
-                FloatingHudService.updateHudStatus("질문 대기", question.take(30), false)
+                appendChatMessage(
+                    LiveChatMessage(
+                        sender = ChatSender.AGENT,
+                        text = question,
+                        toolBadge = "QUESTION"
+                    )
+                )
+                speakIfEnabled(question)
+                FloatingHudService.updateHudStatus("질문 응답 대기", question.take(30), false)
                 return
             }
 
-            // Settle UI animations before next perception snapshot
             delay(900L)
         }
 
-        // Max iterations reached
+        val maxMsg = "최대 반복 횟수(${cfg.maxIterations}회)까지 실행을 마쳤습니다. 추가로 진행할 작업을 말씀해 주세요."
         _currentSession.update { prev ->
             val finished = prev.copy(
                 status = AgentRunStatus.COMPLETED,
-                finalSummary = "최대 반복 횟수(${cfg.maxIterations}회)에 도달하여 실행을 마무리했습니다.",
+                finalSummary = maxMsg,
                 finishedAtMs = System.currentTimeMillis()
             )
             archiveSession(finished)
             finished
         }
-        FloatingHudService.updateHudStatus("반복 완료", "최대 스텝 도달", false)
+        appendChatMessage(
+            LiveChatMessage(
+                sender = ChatSender.AGENT,
+                text = maxMsg,
+                toolBadge = "DONE"
+            )
+        )
+        FloatingHudService.updateHudStatus("라이브 채팅 대기 중", "다음 명령 대기", false)
     }
+
+    private fun completedSessionWithQuestion(session: AgentRunSession): AgentRunSession = session
 
     private fun archiveSession(session: AgentRunSession) {
         _runHistory.update { prev ->

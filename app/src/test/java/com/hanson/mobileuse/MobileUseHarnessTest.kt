@@ -48,19 +48,20 @@ class MobileUseHarnessTest {
     }
 
     @Test
-    fun toolSpecRegistry_exposesAll21MobileUseToolsAndValidGeminiSchema() {
+    fun toolSpecRegistry_exposesAll22MobileUseToolsAndValidGeminiSchema() {
         val specs = ToolSpecRegistry.allSpecs
-        assertEquals(21, specs.size)
+        assertEquals(22, specs.size)
         assertNotNull(ToolSpecRegistry.find("click"))
         assertNotNull(ToolSpecRegistry.find("click_sequence"))
         assertNotNull(ToolSpecRegistry.find("reply_notification"))
         assertNotNull(ToolSpecRegistry.find("control_device_setting"))
         assertNotNull(ToolSpecRegistry.find("manage_app"))
+        assertNotNull(ToolSpecRegistry.find("os_cli_exec"))
 
         val geminiJson = ToolSpecRegistry.toGeminiToolsJson()
         assertEquals(1, geminiJson.length())
         val declarations = geminiJson.getJSONObject(0).getJSONArray("functionDeclarations")
-        assertEquals(21, declarations.length())
+        assertEquals(22, declarations.length())
     }
 
     @Test
