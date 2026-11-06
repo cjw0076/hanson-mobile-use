@@ -2,20 +2,17 @@ package com.hanson.mobileuse.agent
 
 import android.content.Context
 import android.content.Intent
-import android.media.AudioFormat
-import android.media.AudioRecord
-import android.media.MediaRecorder
 import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.NoiseSuppressor
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.speech.ModelDownloadListener
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import com.hanson.mobileuse.service.FloatingHudService
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -23,15 +20,15 @@ import kotlinx.coroutines.flow.update
 import java.util.Locale
 
 enum class LiveVoiceMode(val labelKo: String, val badge: String) {
-    ON_DEVICE_DUPLEX("S25 내장 온디바이스 풀듀플렉스 (Google/Samsung NPU)", "ON-DEVICE LIVE"),
-    GEMINI_3_8_LIVE("Gemini 3.8 Live Extended Thinking (WebSocket)", "GEMINI 3.8 LIVE")
+    ON_DEVICE_DUPLEX("실시간 양방향 보이스 (Full-Duplex)", "LIVE VOICE"),
+    GEMINI_3_8_LIVE("Gemini 3.8 Live Extended Thinking", "3.8 LIVE")
 }
 
 enum class LiveVoicePhase(val labelKo: String) {
-    OFF("음성 세션 대기"),
-    LISTENING("듣는 중 (말씀하세요)"),
-    THINKING("생각 및 실행 중 (Non-blocking)"),
-    SPEAKING("답변 발화 중 (말씀하시면 즉시 끼어들기)")
+    OFF("보이스 대기"),
+    LISTENING("듣고 있습니다... 편하게 말씀하세요"),
+    THINKING("화면을 보며 생각 중..."),
+    SPEAKING("대답하는 중 (말씀하시면 즉시 듣습니다)")
 }
 
 data class LiveVoiceState(
@@ -49,13 +46,13 @@ data class LiveVoiceState(
 )
 
 /**
- * Built-in Hands-Free Continuous Live Voice Chat Manager (`LiveVoiceSessionManager`).
+ * Full-Duplex Conversational Voice Coordinator (`LiveVoiceSessionManager`).
  *
- * Uses the Galaxy S25's built-in speech/audio hardware & OS modules:
- * 1. `SpeechRecognizer.createOnDeviceSpeechRecognizer` / `createSpeechRecognizer` (continuous loop with partial streaming)
- * 2. Hardware `AcousticEchoCanceler` + `NoiseSuppressor` probes
- * 3. Neural `TextToSpeech` (Korean) with automatic Barge-In interruption and conversational fillers
- *    (inspired by `gemini-3.8-live-extended-thinking` non-blocking tool execution).
+ * Designed for natural back-and-forth human dialogue while controlling the phone:
+ * - Zero canned heuristic parrot phrases ("네, '...' 바로 처리할게요" 제거).
+ * - Unified TTS + SpeechRecognizer state machine: pauses mic cleanly while speaking to avoid self-echo,
+ *   supports instant Barge-In interruption, and automatically re-opens the microphone 180ms after
+ *   every agent utterance so the conversation flows continuously across apps.
  */
 object LiveVoiceSessionManager {
 
@@ -76,6 +73,17 @@ object LiveVoiceSessionManager {
         initTts(context.applicationContext)
     }
 
+    fun ensureInitialized(context: Context, onUserSpokeCommand: ((String) -> Unit)? = null) {
+        if (appContext == null) {
+            appContext = context.applicationContext
+            probeBuiltInModules(context.applicationContext)
+            initTts(context.applicationContext)
+        }
+        if (onUserSpokeCommand != null) {
+            onFinalTranscriptCallback = onUserSpokeCommand
+        }
+    }
+
     fun probeBuiltInModules(context: Context) {
         val onDeviceAvail = runCatching {
             SpeechRecognizer.isOnDeviceRecognitionAvailable(context)
@@ -91,8 +99,7 @@ object LiveVoiceSessionManager {
             "com.google.android.tts" to "Google Neural TTS & Speech",
             "com.google.android.aicore" to "Google AICore (Gemma/LiteRT NPU)",
             "com.samsung.android.bixby.ondevice.kokr" to "Samsung On-Device 한국어 NPU",
-            "com.samsung.android.intellivoiceservice" to "Galaxy AI IntelliVoice",
-            "com.google.android.apps.accessibility.voiceaccess" to "Google Voice Access"
+            "com.samsung.android.intellivoiceservice" to "Galaxy AI IntelliVoice"
         )
         val installed = knownPackages.mapNotNull { (pkg, name) ->
             val exists = runCatching { pm.getPackageInfo(pkg, 0) != null }.getOrDefault(false)
@@ -116,7 +123,7 @@ object LiveVoiceSessionManager {
             tts = TextToSpeech(context) { status ->
                 if (status == TextToSpeech.SUCCESS) {
                     tts?.language = Locale.KOREAN
-                    tts?.setSpeechRate(1.08f)
+                    tts?.setSpeechRate(1.06f)
                     tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                         override fun onStart(utteranceId: String?) {
                             _state.update { it.copy(phase = LiveVoicePhase.SPEAKING) }
@@ -128,7 +135,7 @@ object LiveVoiceSessionManager {
                                     if (_state.value.isActive) {
                                         startListeningCycle()
                                     }
-                                }, 250L)
+                                }, 180L)
                             } else {
                                 _state.update { it.copy(phase = LiveVoicePhase.OFF) }
                             }
@@ -137,7 +144,7 @@ object LiveVoiceSessionManager {
                         @Deprecated("Deprecated in Java")
                         override fun onError(utteranceId: String?) {
                             if (_state.value.isActive) {
-                                mainHandler.postDelayed({ startListeningCycle() }, 400L)
+                                mainHandler.postDelayed({ startListeningCycle() }, 300L)
                             }
                         }
                     })
@@ -158,15 +165,16 @@ object LiveVoiceSessionManager {
     }
 
     fun startLiveVoiceSession() {
-        val ctx = appContext ?: return
+        if (appContext == null) return
         _state.update {
             it.copy(
                 isActive = true,
                 phase = LiveVoicePhase.LISTENING,
-                partialTranscript = "마이크 세션을 여는 중..."
+                partialTranscript = "듣고 있습니다..."
             )
         }
-        speakConversationalFiller("네, 라이브 보이스가 켜졌습니다. 편하게 말씀하세요.")
+        FloatingHudService.updateVoiceBadge(true, "보이스 대화 중")
+        speakConversationalFiller("네, 듣고 있어요. 무엇을 도와드릴까요?")
     }
 
     fun stopLiveVoiceSession() {
@@ -185,19 +193,40 @@ object LiveVoiceSessionManager {
                 audioLevelRms = 0f
             )
         }
+        FloatingHudService.updateVoiceBadge(false, "보이스 꺼짐")
     }
 
     /**
-     * Speaks a response or conversational filler (like `gemini-3.8-live-extended-thinking`).
+     * Interrupts current TTS output immediately (Barge-In) and starts listening to the user.
+     */
+    fun bargeInAndListen() {
+        mainHandler.post {
+            runCatching { tts?.stop() }
+            if (_state.value.isActive) {
+                startListeningCycle()
+            }
+        }
+    }
+
+    /**
+     * Speaks a natural conversational response from the agent.
+     * If `forceSpeak` is false, speaks only when the Live Voice session is active or TTS is enabled.
      * Automatically resumes continuous listening after speaking completes.
      */
-    fun speakConversationalFiller(text: String) {
+    fun speakConversationalFiller(text: String, queueAdd: Boolean = false) {
         val clean = text
+            .replace(Regex("\\[[^\\]]*\\]"), " ") // Strip any bracketed technical tags
             .replace(Regex("<[^>]+>"), " ")
+            .replace(Regex("[•▪▶]"), " ")
             .replace(Regex("\\s+"), " ")
             .trim()
-            .take(180)
-        if (clean.isBlank()) return
+            .take(220)
+        if (clean.isBlank()) {
+            if (_state.value.isActive) {
+                mainHandler.postDelayed({ startListeningCycle() }, 200L)
+            }
+            return
+        }
 
         _state.update {
             it.copy(
@@ -208,7 +237,7 @@ object LiveVoiceSessionManager {
 
         if (!ttsReady) {
             if (_state.value.isActive) {
-                mainHandler.postDelayed({ startListeningCycle() }, 500L)
+                mainHandler.postDelayed({ startListeningCycle() }, 400L)
             }
             return
         }
@@ -216,9 +245,10 @@ object LiveVoiceSessionManager {
         mainHandler.post {
             runCatching {
                 speechRecognizer?.cancel()
+                val queueMode = if (queueAdd) TextToSpeech.QUEUE_ADD else TextToSpeech.QUEUE_FLUSH
                 tts?.speak(
                     clean,
-                    TextToSpeech.QUEUE_FLUSH,
+                    queueMode,
                     null,
                     "live_voice_${System.currentTimeMillis()}"
                 )
@@ -245,19 +275,19 @@ object LiveVoiceSessionManager {
                     putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ko-KR")
                     putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
                     putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+                    putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1100L)
+                    putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 900L)
                 }
                 _state.update {
                     it.copy(
                         phase = LiveVoicePhase.LISTENING,
-                        partialTranscript = ""
+                        partialTranscript = "듣고 있습니다..."
                     )
                 }
                 speechRecognizer?.startListening(intent)
-            } catch (e: Exception) {
-                _state.update {
-                    it.copy(
-                        partialTranscript = "음성 인식 대기 중 (${e.message?.take(30)})"
-                    )
+            } catch (_: Exception) {
+                if (_state.value.isActive) {
+                    mainHandler.postDelayed({ startListeningCycle() }, 700L)
                 }
             }
         }
@@ -269,13 +299,12 @@ object LiveVoiceSessionManager {
                 _state.update {
                     it.copy(
                         phase = LiveVoicePhase.LISTENING,
-                        partialTranscript = "듣고 있습니다..."
+                        partialTranscript = "말씀하세요..."
                     )
                 }
             }
 
             override fun onBeginningOfSpeech() {
-                // Barge-in: if TTS was somehow speaking, stop it immediately
                 runCatching { tts?.stop() }
                 _state.update { it.copy(phase = LiveVoicePhase.LISTENING) }
             }
@@ -303,7 +332,7 @@ object LiveVoiceSessionManager {
                         if (_state.value.isActive && _state.value.phase != LiveVoicePhase.SPEAKING) {
                             startListeningCycle()
                         }
-                    }, 650L)
+                    }, 450L)
                 }
             }
 
@@ -317,11 +346,10 @@ object LiveVoiceSessionManager {
                             partialTranscript = spoken
                         )
                     }
-                    // Conversational filler like gemini-3.8-live-extended-thinking while non-blocking tool runs!
-                    speakConversationalFiller("네, '$spoken' 바로 처리할게요.")
+                    // Directly forward to the conversational agent engine without any canned parrot filler!
                     onFinalTranscriptCallback?.invoke(spoken)
                 } else if (_state.value.isActive) {
-                    mainHandler.postDelayed({ startListeningCycle() }, 400L)
+                    mainHandler.postDelayed({ startListeningCycle() }, 300L)
                 }
             }
 

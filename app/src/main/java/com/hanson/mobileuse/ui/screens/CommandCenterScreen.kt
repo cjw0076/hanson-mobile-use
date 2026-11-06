@@ -121,10 +121,11 @@ fun CommandCenterScreen(
 
     val starterPrompts = remember {
         listOf(
-            "카카오톡 안 읽은 메시지 요약",
+            "지금 화면에 뭐 있어?",
+            "유튜브 앱 크래프트 클린룸 보드로 만들어줘",
             "유튜브에서 로파이 틀어줘",
-            "모델 Argon으로 변경",
-            "권한 원터치 자동 구성"
+            "첫 번째 항목 눌러줘",
+            "온디바이스 AI 모델 상태 확인"
         )
     }
 
@@ -517,6 +518,61 @@ fun CommandCenterScreen(
                                 )
                             }
                         }
+                    }
+                }
+            }
+
+            // 4.5 Live Voice Conversation Bar (Barge-In & Real-Time Transcript)
+            if (isVoiceListening) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(ObsidianColors.Surface)
+                        .border(1.dp, ObsidianColors.Accent, RoundedCornerShape(14.dp))
+                        .clickable {
+                            LiveVoiceSessionManager.bargeInAndListen()
+                        }
+                        .padding(horizontal = 14.dp, vertical = 9.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "실시간 보이스 동행 · ${voiceState.phase.labelKo}",
+                            color = ObsidianColors.TextPrimary,
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                        val liveTranscript = voiceState.partialTranscript.ifBlank {
+                            voiceState.lastSpokenResponse.ifBlank {
+                                "말씀하시면 화면을 함께 보고 대화하며 제어합니다 (탭하여 끼어들기)"
+                            }
+                        }
+                        Text(
+                            text = liveTranscript,
+                            color = ObsidianColors.TextSecondary,
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(999.dp))
+                            .background(ObsidianColors.Accent)
+                            .clickable {
+                                LiveVoiceSessionManager.stopLiveVoiceSession()
+                            }
+                            .padding(horizontal = 10.dp, vertical = 5.dp)
+                    ) {
+                        Text(
+                            text = "종료",
+                            color = ObsidianColors.OnAccent,
+                            fontSize = 10.5.sp,
+                            fontWeight = FontWeight.Bold
+                        )
                     }
                 }
             }

@@ -26,6 +26,7 @@ import android.widget.TextView
 import com.hanson.mobileuse.agent.ChatSender
 import com.hanson.mobileuse.agent.HansonRuntimeHolder
 import com.hanson.mobileuse.agent.LiveChatMessage
+import com.hanson.mobileuse.agent.LiveVoiceSessionManager
 import com.hanson.mobileuse.ui.MainActivity
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -33,9 +34,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlin.math.abs
 
 /**
- * Tier 2 Expandable Floating Live Chat & Agent HUD Overlay (`SYSTEM_ALERT_WINDOW`).
- * Can stay as a compact draggable pill OR expand into an interactive Live Chat window
- * over any app (KakaoTalk, YouTube, Browser, etc.) with keyboard input and quick actions.
+ * Pure Achromatic (무채색) Floating Live Voice & Chat Overlay (`SYSTEM_ALERT_WINDOW`).
+ * Lets the user converse naturally via voice (`음성`) or text (`보드`) while Hanson
+ * controls KakaoTalk, YouTube, Toss, Chrome, or Settings in the foreground.
  */
 class FloatingHudService : Service() {
 
@@ -61,6 +62,10 @@ class FloatingHudService : Service() {
             instance?.postStatusUpdate(title, subtitle, isRunning)
         }
 
+        fun updateVoiceBadge(isListening: Boolean, label: String) {
+            instance?.postVoiceBadgeUpdate(isListening, label)
+        }
+
         fun notifyChatUpdated(messages: List<LiveChatMessage>) {
             instance?.postChatMessagesUpdate(messages)
         }
@@ -75,6 +80,7 @@ class FloatingHudService : Service() {
     private var subtitleView: TextView? = null
     private var dotView: View? = null
     private var stopButton: TextView? = null
+    private var voiceButton: TextView? = null
     private var toggleChatButton: TextView? = null
 
     private var expandedChatContainer: LinearLayout? = null
@@ -93,7 +99,6 @@ class FloatingHudService : Service() {
         createOverlayView()
         _isShowing.value = true
 
-        // Sync initial chat messages from runtime holder
         val engine = HansonRuntimeHolder.getAgentEngine(applicationContext)
         postChatMessagesUpdate(engine.chatMessages.value)
     }
@@ -111,9 +116,29 @@ class FloatingHudService : Service() {
         mainHandler.post {
             titleView?.text = title
             subtitleView?.text = subtitle
-            val dotColor = if (isRunning) Color.parseColor("#34D399") else Color.parseColor("#6C8EFF")
+            val dotColor = if (isRunning) Color.parseColor("#FAFAFA") else Color.parseColor("#71717A")
             (dotView?.background as? GradientDrawable)?.setColor(dotColor)
             stopButton?.visibility = if (isRunning) View.VISIBLE else View.GONE
+        }
+    }
+
+    fun postVoiceBadgeUpdate(isListening: Boolean, label: String) {
+        mainHandler.post {
+            val density = resources.displayMetrics.density
+            fun dp(value: Int): Int = (value * density).toInt()
+            voiceButton?.text = if (isListening) "음성 켜짐" else "음성"
+            voiceButton?.setTextColor(
+                if (isListening) Color.parseColor("#09090B") else Color.parseColor("#FAFAFA")
+            )
+            voiceButton?.background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(999).toFloat()
+                setColor(if (isListening) Color.parseColor("#FAFAFA") else Color.parseColor("#18181B"))
+                setStroke(dp(1), Color.parseColor("#3F3F46"))
+            }
+            if (isListening) {
+                subtitleView?.text = label
+            }
         }
     }
 
@@ -124,52 +149,39 @@ class FloatingHudService : Service() {
             val density = resources.displayMetrics.density
             fun dp(value: Int): Int = (value * density).toInt()
 
-            messages.takeLast(12).forEach { msg ->
-                val isUser = msg.sender == ChatSender.USER
-                val bubble = LinearLayout(this).apply {
-                    orientation = LinearLayout.VERTICAL
-                    setPadding(dp(10), dp(7), dp(10), dp(7))
-                    layoutParams = LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.MATCH_PARENT,
-                        LinearLayout.LayoutParams.WRAP_CONTENT
-                    ).apply {
-                        bottomMargin = dp(6)
-                    }
-                    background = GradientDrawable().apply {
-                        shape = GradientDrawable.RECTANGLE
-                        cornerRadius = dp(10).toFloat()
-                        if (isUser) {
-                            setColor(Color.parseColor("#2E6C8EFF"))
-                            setStroke(dp(1), Color.parseColor("#886C8EFF"))
-                        } else {
-                            setColor(Color.parseColor("#FF14161D"))
-                            setStroke(dp(1), Color.parseColor("#26FFFFFF"))
+            messages.filter { it.sender == ChatSender.USER || it.sender == ChatSender.AGENT }
+                .takeLast(10)
+                .forEach { msg ->
+                    val isUser = msg.sender == ChatSender.USER
+                    val bubble = LinearLayout(this).apply {
+                        orientation = LinearLayout.VERTICAL
+                        setPadding(dp(10), dp(7), dp(10), dp(7))
+                        layoutParams = LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.MATCH_PARENT,
+                            LinearLayout.LayoutParams.WRAP_CONTENT
+                        ).apply {
+                            bottomMargin = dp(6)
+                        }
+                        background = GradientDrawable().apply {
+                            shape = GradientDrawable.RECTANGLE
+                            cornerRadius = dp(10).toFloat()
+                            if (isUser) {
+                                setColor(Color.parseColor("#FAFAFA"))
+                            } else {
+                                setColor(Color.parseColor("#18181B"))
+                                setStroke(dp(1), Color.parseColor("#27272A"))
+                            }
                         }
                     }
-                }
 
-                val prefix = when (msg.sender) {
-                    ChatSender.USER -> "나"
-                    ChatSender.AGENT -> msg.toolBadge ?: "Hanson AI"
-                    ChatSender.ACTION -> msg.toolBadge ?: "ACTION"
-                    ChatSender.NOTIFICATION -> "알림 · ${msg.toolBadge ?: "RemoteInput"}"
+                    val bodyTv = TextView(this).apply {
+                        text = msg.text
+                        setTextColor(if (isUser) Color.parseColor("#09090B") else Color.parseColor("#FAFAFA"))
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                    }
+                    bubble.addView(bodyTv)
+                    listLayout.addView(bubble)
                 }
-
-                val headerTv = TextView(this).apply {
-                    text = prefix
-                    setTextColor(if (isUser) Color.parseColor("#6C8EFF") else Color.parseColor("#34D399"))
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
-                    setTypeface(typeface, Typeface.BOLD)
-                }
-                val bodyTv = TextView(this).apply {
-                    text = msg.text
-                    setTextColor(Color.parseColor("#F1F3F9"))
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
-                }
-                bubble.addView(headerTv)
-                bubble.addView(bodyTv)
-                listLayout.addView(bubble)
-            }
             chatScrollView?.post {
                 chatScrollView?.fullScroll(View.FOCUS_DOWN)
             }
@@ -179,13 +191,12 @@ class FloatingHudService : Service() {
     private fun setChatExpanded(expanded: Boolean) {
         isChatExpanded = expanded
         expandedChatContainer?.visibility = if (expanded) View.VISIBLE else View.GONE
-        toggleChatButton?.text = if (expanded) "접기" else "채팅"
+        toggleChatButton?.text = if (expanded) "접기" else "보드"
 
         val wm = windowManager ?: return
         val root = rootView ?: return
         val params = layoutParams ?: return
 
-        // Toggle FLAG_NOT_FOCUSABLE so EditText can receive soft keyboard input when expanded!
         params.flags = if (expanded) {
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
@@ -214,28 +225,27 @@ class FloatingHudService : Service() {
 
         val outerCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(12), dp(9), dp(12), dp(9))
+            setPadding(dp(12), dp(8), dp(12), dp(8))
             background = GradientDrawable().apply {
                 shape = GradientDrawable.RECTANGLE
-                cornerRadius = dp(20).toFloat()
-                setColor(Color.parseColor("#F20D0F14"))
-                setStroke(dp(1), Color.parseColor("#806C8EFF"))
+                cornerRadius = dp(16).toFloat()
+                setColor(Color.parseColor("#F509090B"))
+                setStroke(dp(1), Color.parseColor("#3F3F46"))
             }
         }
 
-        // Top Pill Header Row
         val headerRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
 
         val statusDot = View(this).apply {
-            layoutParams = LinearLayout.LayoutParams(dp(9), dp(9)).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(7), dp(7)).apply {
                 marginEnd = dp(8)
             }
             background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
-                setColor(Color.parseColor("#34D399"))
+                setColor(Color.parseColor("#FAFAFA"))
             }
         }
         dotView = statusDot
@@ -243,12 +253,12 @@ class FloatingHudService : Service() {
 
         val textColumn = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            layoutParams = LinearLayout.LayoutParams(dp(170), LinearLayout.LayoutParams.WRAP_CONTENT)
+            layoutParams = LinearLayout.LayoutParams(dp(150), LinearLayout.LayoutParams.WRAP_CONTENT)
         }
 
         val titleTv = TextView(this).apply {
-            text = "Hanson Live Chat HUD"
-            setTextColor(Color.parseColor("#F1F3F9"))
+            text = "hanson"
+            setTextColor(Color.parseColor("#FAFAFA"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
             setTypeface(typeface, Typeface.BOLD)
             maxLines = 1
@@ -256,8 +266,8 @@ class FloatingHudService : Service() {
         titleView = titleTv
 
         val subTv = TextView(this).apply {
-            text = "라이브 세션 활성 · 탭하여 채팅"
-            setTextColor(Color.parseColor("#9BA1B0"))
+            text = "소통 및 완전제어 대기"
+            setTextColor(Color.parseColor("#A1A1AA"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
             maxLines = 1
         }
@@ -268,8 +278,8 @@ class FloatingHudService : Service() {
         headerRow.addView(textColumn)
 
         val stopBtn = TextView(this).apply {
-            text = "정지"
-            setTextColor(Color.parseColor("#FFFFFF"))
+            text = "중지"
+            setTextColor(Color.parseColor("#09090B"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f)
             setTypeface(typeface, Typeface.BOLD)
             setPadding(dp(8), dp(4), dp(8), dp(4))
@@ -278,12 +288,12 @@ class FloatingHudService : Service() {
                 LinearLayout.LayoutParams.WRAP_CONTENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply {
-                marginStart = dp(6)
+                marginStart = dp(5)
             }
             background = GradientDrawable().apply {
                 shape = GradientDrawable.RECTANGLE
-                cornerRadius = dp(10).toFloat()
-                setColor(Color.parseColor("#F87171"))
+                cornerRadius = dp(999).toFloat()
+                setColor(Color.parseColor("#FAFAFA"))
             }
             setOnClickListener {
                 onStopClicked?.invoke()
@@ -292,9 +302,11 @@ class FloatingHudService : Service() {
         stopButton = stopBtn
         headerRow.addView(stopBtn)
 
-        val chatToggleBtn = TextView(this).apply {
-            text = "채팅"
-            setTextColor(Color.parseColor("#06070B"))
+        // 1-Touch Live Voice Button on Floating HUD
+        val voiceBtn = TextView(this).apply {
+            val active = LiveVoiceSessionManager.state.value.isActive
+            text = if (active) "음성 켜짐" else "음성"
+            setTextColor(if (active) Color.parseColor("#09090B") else Color.parseColor("#FAFAFA"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f)
             setTypeface(typeface, Typeface.BOLD)
             setPadding(dp(9), dp(4), dp(9), dp(4))
@@ -302,12 +314,42 @@ class FloatingHudService : Service() {
                 LinearLayout.LayoutParams.WRAP_CONTENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply {
-                marginStart = dp(6)
+                marginStart = dp(5)
             }
             background = GradientDrawable().apply {
                 shape = GradientDrawable.RECTANGLE
-                cornerRadius = dp(10).toFloat()
-                setColor(Color.parseColor("#6C8EFF"))
+                cornerRadius = dp(999).toFloat()
+                setColor(if (active) Color.parseColor("#FAFAFA") else Color.parseColor("#18181B"))
+                setStroke(dp(1), Color.parseColor("#3F3F46"))
+            }
+            setOnClickListener {
+                val engine = HansonRuntimeHolder.getAgentEngine(applicationContext)
+                engine.updateConfig(ttsVoiceReply = true)
+                LiveVoiceSessionManager.toggleLiveVoiceSession(applicationContext) { spoken ->
+                    engine.sendChatMessage(spoken)
+                }
+            }
+        }
+        voiceButton = voiceBtn
+        headerRow.addView(voiceBtn)
+
+        val chatToggleBtn = TextView(this).apply {
+            text = "보드"
+            setTextColor(Color.parseColor("#FAFAFA"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f)
+            setTypeface(typeface, Typeface.BOLD)
+            setPadding(dp(9), dp(4), dp(9), dp(4))
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                marginStart = dp(5)
+            }
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(999).toFloat()
+                setColor(Color.parseColor("#18181B"))
+                setStroke(dp(1), Color.parseColor("#3F3F46"))
             }
             setOnClickListener {
                 setChatExpanded(!isChatExpanded)
@@ -317,8 +359,8 @@ class FloatingHudService : Service() {
         headerRow.addView(chatToggleBtn)
 
         val openBtn = TextView(this).apply {
-            text = "앱"
-            setTextColor(Color.parseColor("#6C8EFF"))
+            text = "열기"
+            setTextColor(Color.parseColor("#A1A1AA"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f)
             setTypeface(typeface, Typeface.BOLD)
             setPadding(dp(7), dp(4), dp(4), dp(4))
@@ -332,7 +374,6 @@ class FloatingHudService : Service() {
         headerRow.addView(openBtn)
         outerCard.addView(headerRow)
 
-        // Expandable Live Chat Drawer Container
         val chatDrawer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
@@ -345,7 +386,7 @@ class FloatingHudService : Service() {
         val scroll = ScrollView(this).apply {
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(190)
+                dp(180)
             )
         }
         chatScrollView = scroll
@@ -361,7 +402,6 @@ class FloatingHudService : Service() {
         scroll.addView(msgList)
         chatDrawer.addView(scroll)
 
-        // Input Row inside Overlay
         val inputRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -374,28 +414,28 @@ class FloatingHudService : Service() {
         }
 
         val edit = EditText(this).apply {
-            hint = "타 앱 위에서 실시간 명령/질문 입력..."
-            setHintTextColor(Color.parseColor("#636978"))
-            setTextColor(Color.parseColor("#F1F3F9"))
+            hint = "말하거나 여기에 지시하세요..."
+            setHintTextColor(Color.parseColor("#71717A"))
+            setTextColor(Color.parseColor("#FAFAFA"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
             setPadding(dp(10), dp(6), dp(10), dp(6))
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
             background = GradientDrawable().apply {
                 shape = GradientDrawable.RECTANGLE
                 cornerRadius = dp(10).toFloat()
-                setColor(Color.parseColor("#1A1E28"))
-                setStroke(dp(1), Color.parseColor("#33FFFFFF"))
+                setColor(Color.parseColor("#18181B"))
+                setStroke(dp(1), Color.parseColor("#27272A"))
             }
         }
         chatInputEdit = edit
         inputRow.addView(edit)
 
         val sendBtn = TextView(this).apply {
-            text = "전송"
-            setTextColor(Color.parseColor("#06070B"))
+            text = "실행"
+            setTextColor(Color.parseColor("#09090B"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
             setTypeface(typeface, Typeface.BOLD)
-            setPadding(dp(12), dp(8), dp(12), dp(8))
+            setPadding(dp(12), dp(7), dp(12), dp(7))
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
@@ -404,8 +444,8 @@ class FloatingHudService : Service() {
             }
             background = GradientDrawable().apply {
                 shape = GradientDrawable.RECTANGLE
-                cornerRadius = dp(10).toFloat()
-                setColor(Color.parseColor("#34D399"))
+                cornerRadius = dp(999).toFloat()
+                setColor(Color.parseColor("#FAFAFA"))
             }
             setOnClickListener {
                 val msg = edit.text?.toString()?.trim().orEmpty()

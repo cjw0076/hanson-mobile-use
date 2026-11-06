@@ -13,3 +13,5 @@ app/build/
 *.aab
 *.ap_
 *.dex
+tools/craft-anything/
+hs_err_pid*.log

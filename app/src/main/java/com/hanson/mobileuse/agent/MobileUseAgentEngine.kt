@@ -1,19 +1,14 @@
 package com.hanson.mobileuse.agent
 
 import android.content.Context
-import android.speech.tts.TextToSpeech
 import com.hanson.mobileuse.accessibility.AtomicSnapshot
 import com.hanson.mobileuse.accessibility.HansonAccessibilityService
 import com.hanson.mobileuse.accessibility.HierarchyDumper
 import com.hanson.mobileuse.notification.InterceptedNotification
-import com.hanson.mobileuse.paradigm.CompositeExecutionMode
 import com.hanson.mobileuse.paradigm.HabitOrganonRuntime
 import com.hanson.mobileuse.paradigm.LiquidUiSynthesizer
-import com.hanson.mobileuse.paradigm.ModeTurnResult
 import com.hanson.mobileuse.paradigm.ParadigmExecutionModeController
-import com.hanson.mobileuse.paradigm.SemanticTeleportCandidate
 import com.hanson.mobileuse.paradigm.SemanticTeleportRouter
-import com.hanson.mobileuse.paradigm.TeleportResult
 import com.hanson.mobileuse.paradigm.WorldModelGraph
 import com.hanson.mobileuse.service.FloatingHudService
 import com.hanson.mobileuse.service.HansonForegroundService
@@ -38,13 +33,17 @@ data class AgentEngineConfig(
     val modelName: String = GeminiMultimodalClient.DEFAULT_MODEL,
     val maxIterations: Int = 15,
     val autoShowFloatingHud: Boolean = true,
-    val ttsVoiceReply: Boolean = false
+    val ttsVoiceReply: Boolean = true
 )
 
 /**
- * Core Multimodal Mobile-Use Agent Engine with Continuous Runtime Live Chat.
- * Maintains an always-on conversational thread (`chatMessages`) shared across the main app,
- * the Floating Live Chat Overlay (`SYSTEM_ALERT_WINDOW`), and the `:18888/chat` RPC bridge.
+ * Conversational Full-Control Mobile-Use Agent Engine (`MobileUseAgentEngine`).
+ *
+ * Bridges:
+ * - Multi-Tier Mobile AI Infrastructure Router (`MobileAiInfrastructureRouter`:
+ *   Galaxy S25 Built-In AICore Gemini Nano NPU + MediaPipe Tasks GenAI + Local Edge LLM + Cloud Gemini 3.8/Argon)
+ * - Full-Duplex Conversational Voice Loop (`LiveVoiceSessionManager`) with live mid-execution steering
+ * - Ground-Truth Action Trajectory Verifier & Self-Healer (`ActionTrajectoryVerifierAndHealer`)
  */
 class MobileUseAgentEngine(
     private val context: Context,
@@ -63,6 +62,7 @@ class MobileUseAgentEngine(
     private val prefs = context.getSharedPreferences(CONFIG_PREFS, Context.MODE_PRIVATE)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val multimodalClient = GeminiMultimodalClient()
+    val aiInfrastructureRouter = MobileAiInfrastructureRouter(context, multimodalClient)
     private val toolHarness = AgentToolExecutionHarness(context)
     private val trajectoryVerifier = ActionTrajectoryVerifierAndHealer(context)
     val worldModelGraph = WorldModelGraph(context)
@@ -72,8 +72,9 @@ class MobileUseAgentEngine(
 
     private var activeJob: Job? = null
     private var approvalDeferred: CompletableDeferred<Boolean>? = null
-    private var tts: TextToSpeech? = null
-    private var ttsReady = false
+
+    @Volatile
+    private var liveSteeringGoal: String? = null
 
     private val _config = MutableStateFlow(loadConfig())
     val config: StateFlow<AgentEngineConfig> = _config.asStateFlow()
@@ -91,30 +92,18 @@ class MobileUseAgentEngine(
     val allReceipts: StateFlow<List<ActionReceipt>> = _allReceipts.asStateFlow()
 
     init {
-        HansonForegroundService.onEmergencyStopRequested = { stopRun("알림바 긴급 정지 버튼으로 중단되었습니다.") }
-        FloatingHudService.onStopClicked = { stopRun("플로팅 HUD 정지 버튼으로 중단되었습니다.") }
+        HansonForegroundService.onEmergencyStopRequested = { stopRun("네, 작업을 바로 멈췄어요.") }
+        FloatingHudService.onStopClicked = { stopRun("네, 작업을 멈췄어요. 다음엔 어떻게 할까요?") }
         FloatingHudService.onSendLiveChatMessage = { userMsg -> sendChatMessage(userMsg) }
-        initTts()
-    }
-
-    private fun initTts() {
-        try {
-            tts = TextToSpeech(context.applicationContext) { status ->
-                if (status == TextToSpeech.SUCCESS) {
-                    tts?.language = Locale.KOREAN
-                    ttsReady = true
-                }
-            }
-        } catch (_: Exception) {
+        LiveVoiceSessionManager.ensureInitialized(context) { spoken ->
+            sendChatMessage(spoken)
         }
     }
 
     private fun speakIfEnabled(text: String) {
-        if (!_config.value.ttsVoiceReply || !ttsReady) return
-        try {
-            tts?.speak(text.take(220), TextToSpeech.QUEUE_FLUSH, null, "hanson_live_${System.currentTimeMillis()}")
-        } catch (_: Exception) {
-        }
+        val shouldSpeak = LiveVoiceSessionManager.state.value.isActive || _config.value.ttsVoiceReply
+        if (!shouldSpeak) return
+        LiveVoiceSessionManager.speakConversationalFiller(text)
     }
 
     private fun loadConfig(): AgentEngineConfig {
@@ -129,7 +118,7 @@ class MobileUseAgentEngine(
             modelName = normalizedModel,
             maxIterations = prefs.getInt(KEY_MAX_ITER, 15).coerceIn(3, 40),
             autoShowFloatingHud = prefs.getBoolean(KEY_AUTO_HUD, true),
-            ttsVoiceReply = prefs.getBoolean(KEY_TTS_VOICE, false)
+            ttsVoiceReply = prefs.getBoolean(KEY_TTS_VOICE, true)
         )
     }
 
@@ -165,8 +154,8 @@ class MobileUseAgentEngine(
             return listOf(
                 LiveChatMessage(
                     sender = ChatSender.AGENT,
-                    text = "할 일을 한 줄로 입력하거나 음성으로 말씀하세요. 모델 변경·권한 구성·음성 설정도 에이전트가 직접 처리합니다.",
-                    subtitle = "One-Touch Board · Active",
+                    text = "안녕하세요! 화면을 함께 보며 대화하고 제어할 준비가 되었어요. 마이크를 켜고 편하게 말씀하시거나 아래에 입력해 주세요.",
+                    subtitle = "S25 NPU · Conversational Full-Control",
                     toolBadge = "READY"
                 )
             )
@@ -194,7 +183,7 @@ class MobileUseAgentEngine(
                 listOf(
                     LiveChatMessage(
                         sender = ChatSender.AGENT,
-                        text = "원터치 보드가 준비되었습니다.",
+                        text = "화면을 보며 대화하고 제어할 준비가 되었어요.",
                         toolBadge = "READY"
                     )
                 )
@@ -225,9 +214,9 @@ class MobileUseAgentEngine(
     fun clearLiveChat() {
         val welcome = LiveChatMessage(
             sender = ChatSender.AGENT,
-            text = "보드를 비웠습니다. 수행할 작업이나 설정을 지시해 주세요.",
-            subtitle = "One-Touch Board",
-            toolBadge = "CLEAR"
+            text = "대화 보드를 비웠어요. 지금 보고 계신 화면에서 무엇을 도와드릴까요?",
+            subtitle = "Conversational Full-Control",
+            toolBadge = "READY"
         )
         _chatMessages.value = listOf(welcome)
         persistChatMessages(_chatMessages.value)
@@ -236,31 +225,34 @@ class MobileUseAgentEngine(
 
     /**
      * One-Touch Environment Auto-Setup:
-     * Automatically enables unrestricted capability governance, triggers OS-level `self-heal`
-     * (Accessibility, Notification Listener, Overlay), and refreshes permission state.
+     * Enables unrestricted capability governance, triggers OS-level `self-heal`
+     * (Accessibility, Notification Listener, Overlay), and refreshes mobile AI infrastructure.
      */
     fun runOneTouchAutoSetup() {
         scope.launch {
             permissionHub.setUnrestrictedMode(true)
+            aiInfrastructureRouter.refreshInfrastructureState()
             val healOutcome = toolHarness.execute(
                 toolName = "os_cli_exec",
-                args = JSONObject().put("subcommand", "self-heal"),
+                args = JSONObject().put("command", "self-heal"),
                 latestSnapshot = null
             )
             permissionHub.refreshStatus()
             if (_config.value.autoShowFloatingHud) {
                 FloatingHudService.startIfPermitted(context)
             }
-            val msgText = if (healOutcome.succeeded) {
-                "원터치 환경 자동 구성을 완료했습니다. (접근성·알림 리스너·오버레이·무제한 거버넌스 활성화)"
+            val aiState = aiInfrastructureRouter.state.value
+            val npuNote = if (aiState.googleAiCoreInstalled) {
+                "S25 내장 Gemini Nano NPU 및 접근성·오버레이 권한이 모두 연결되었습니다."
             } else {
-                "권한 거버넌스를 무제한으로 전환하고 런타임 구성을 갱신했습니다."
+                "접근성·알림·오버레이 권한 자동 구성을 완료했습니다."
             }
+            val msgText = if (healOutcome.succeeded) npuNote else "런타임 권한과 온디바이스 AI 라우터 구성을 완료했습니다."
             appendChatMessage(
                 LiveChatMessage(
                     sender = ChatSender.AGENT,
                     text = msgText,
-                    subtitle = "1-Touch Self-Heal Completed",
+                    subtitle = "1-Touch Auto-Setup",
                     toolBadge = "AUTO-SETUP"
                 )
             )
@@ -269,161 +261,140 @@ class MobileUseAgentEngine(
     }
 
     /**
-     * Handles user requests to change settings (model, voice/TTS, HUD, theme, permissions)
-     * directly through the agent without opening any settings screen.
+     * Handles explicit Hanson self-configuration or mobile AI model management commands
+     * without intercepting normal app-control requests like "유튜브 켜줘".
      */
-    private fun tryHandleAgentConfigCommand(prompt: String): Boolean {
-        val lower = prompt.lowercase(Locale.ROOT)
-        val isConfigIntent = listOf(
-            "모델", "바꿔", "변경", "전환", "켜줘", "꺼줘", "켜", "꺼",
-            "설정", "다크 모드", "라이트 모드", "화이트 모드", "음성", "목소리",
-            "플로팅", "오버레이", "권한", "자동 구성", "자가 치유", "원터치"
-        ).any { lower.contains(it) }
-        if (!isConfigIntent) return false
+    private fun tryHandleExplicitHansonSelfConfig(prompt: String): Boolean {
+        val lower = prompt.lowercase(Locale.ROOT).trim()
 
-        // 1. Auto-setup / permissions
-        if (lower.contains("권한") || lower.contains("자동 구성") || lower.contains("자가 치유") || lower.contains("환경 구성")) {
+        // 1. Mobile On-Device Model Download / Infrastructure status
+        if (
+            lower.contains("온디바이스 모델") ||
+            lower.contains("모바일 모델") ||
+            lower.contains("모바일 ai") ||
+            lower.contains("모델 다운로드") ||
+            lower.contains("모델 받아") ||
+            lower.contains("인프라 상태")
+        ) {
+            val urlMatch = Regex("(https?://[^\\s]+)").find(prompt)?.value
+            scope.launch {
+                val statusMsg = aiInfrastructureRouter.downloadOnDeviceModel(urlMatch)
+                appendChatMessage(
+                    LiveChatMessage(
+                        sender = ChatSender.AGENT,
+                        text = statusMsg,
+                        subtitle = "Mobile AI Infrastructure Router",
+                        toolBadge = aiInfrastructureRouter.state.value.lastUsedBackendBadge
+                    )
+                )
+                speakIfEnabled(statusMsg)
+            }
+            return true
+        }
+
+        // 2. Auto-setup / permissions
+        if (lower.contains("권한 원터치") || lower.contains("환경 원터치") || lower.contains("권한 자동 구성") || lower.contains("자가 치유")) {
             runOneTouchAutoSetup()
             return true
         }
 
-        // 2. Theme switching (Ahaboard Paper Light vs Carbon Dark)
-        if (lower.contains("다크 모드") || lower.contains("어둡게") || lower.contains("카본 모드")) {
+        // 3. Theme switching (Ahaboard Paper Light vs Carbon Dark)
+        if (lower == "다크 모드" || lower == "다크모드" || lower.contains("다크 모드로") || lower.contains("카본 모드로")) {
             ObsidianColors.isDark = true
+            val reply = "다크 카본 무채색 모드로 바꿨어요."
             appendChatMessage(
                 LiveChatMessage(
                     sender = ChatSender.AGENT,
-                    text = "Ahaboard Carbon (무채색 다크) 모드로 전환했습니다.",
-                    subtitle = "Agent Self-Configuration",
+                    text = reply,
                     toolBadge = "CARBON"
                 )
             )
+            speakIfEnabled(reply)
             return true
         }
-        if (lower.contains("라이트 모드") || lower.contains("화이트 모드") || lower.contains("밝게") || lower.contains("페이퍼 모드")) {
+        if (lower == "라이트 모드" || lower == "라이트모드" || lower.contains("라이트 모드로") || lower.contains("페이퍼 모드로")) {
             ObsidianColors.isDark = false
+            val reply = "밝은 페이퍼 무채색 모드로 바꿨어요."
             appendChatMessage(
                 LiveChatMessage(
                     sender = ChatSender.AGENT,
-                    text = "Ahaboard Paper (무채색 라이트) 모드로 전환했습니다.",
-                    subtitle = "Agent Self-Configuration",
+                    text = reply,
                     toolBadge = "PAPER"
-                )
-            )
-            return true
-        }
-
-        // 3. Voice / TTS toggle
-        if (lower.contains("음성") || lower.contains("목소리") || lower.contains("보이스")) {
-            val enable = !(lower.contains("꺼") || lower.contains("끄") || lower.contains("중지") || lower.contains("off"))
-            updateConfig(ttsVoiceReply = enable)
-            val reply = if (enable) "음성 동행(TTS) 응답을 켰습니다." else "음성 동행(TTS) 응답을 껐습니다."
-            appendChatMessage(
-                LiveChatMessage(
-                    sender = ChatSender.AGENT,
-                    text = reply,
-                    subtitle = "Agent Self-Configuration",
-                    toolBadge = if (enable) "VOICE ON" else "VOICE OFF"
-                )
-            )
-            if (enable) speakIfEnabled(reply)
-            return true
-        }
-
-        // 4. Floating HUD overlay toggle
-        if (lower.contains("플로팅") || lower.contains("오버레이") || lower.contains("hud")) {
-            val enable = !(lower.contains("꺼") || lower.contains("끄") || lower.contains("숨겨") || lower.contains("off"))
-            updateConfig(autoShowFloatingHud = enable)
-            if (enable) {
-                FloatingHudService.startIfPermitted(context)
-            } else {
-                FloatingHudService.stop(context)
-            }
-            appendChatMessage(
-                LiveChatMessage(
-                    sender = ChatSender.AGENT,
-                    text = if (enable) "플로팅 오버레이 보드를 활성화했습니다." else "플로팅 오버레이 보드를 숨겼습니다.",
-                    subtitle = "Agent Self-Configuration",
-                    toolBadge = if (enable) "HUD ON" else "HUD OFF"
-                )
-            )
-            return true
-        }
-
-        // 5. Model switching via natural language
-        val matchedModel: Pair<String, String>? = when {
-            lower.contains("argon") || lower.contains("아곤") || lower.contains("자비스") ->
-                "gemini-jarvis-argon" to "Gemini Jarvis Argon (최상위 에이전트 플래그십)"
-            lower.contains("3.8") && (lower.contains("pro") || lower.contains("프로")) ->
-                "gemini-3.8-pro-preview" to "Gemini 3.8 Pro Preview"
-            lower.contains("3.8") || (lower.contains("플래시") && !lower.contains("3.5")) ->
-                "gemini-3.8-flash-preview" to "Gemini 3.8 Flash Preview"
-            lower.contains("3.6") ->
-                "gemini-3.6-pro-preview" to "Gemini 3.6 Pro Preview"
-            lower.contains("3.5") || lower.contains("라이트") || lower.contains("lite") ->
-                "gemini-3.5-flash-lite-preview" to "Gemini 3.5 Flash-Lite Preview"
-            lower.contains("로보틱스") || lower.contains("robotics") ->
-                "gemini-robotics-er-1.6-preview" to "Gemini Robotics ER 1.6 Preview"
-            lower.contains("컴퓨터") || lower.contains("computer") ->
-                "gemini-2.5-computer-use-preview-10-2025" to "Gemini 2.5 Computer Use"
-            lower.contains("cli") || lower.contains("구독") || lower.contains("노트북") ->
-                Pair("laptop-cli-subscription", "노트북 CLI 구독 브리지 (API 키 불필요)")
-            else -> null
-        }
-
-        if (matchedModel != null) {
-            val (modelId, label) = matchedModel
-            updateConfig(modelName = modelId)
-            val reply = "엔진 모델을 [$label] ($modelId)로 즉시 전환했습니다."
-            appendChatMessage(
-                LiveChatMessage(
-                    sender = ChatSender.AGENT,
-                    text = reply,
-                    subtitle = "Agent Self-Configuration · No Settings Needed",
-                    toolBadge = "MODEL"
                 )
             )
             speakIfEnabled(reply)
             return true
         }
 
+        // 4. Explicit Model / AI Router tier switching
+        if (lower.contains("모델") && (lower.contains("바꿔") || lower.contains("변경") || lower.contains("전환"))) {
+            val matchedModel: Pair<String, String>? = when {
+                lower.contains("나노") || lower.contains("nano") || lower.contains("온디바이스") || lower.contains("npu") -> {
+                    aiInfrastructureRouter.setPreferredTier(MobileAiRouteTier.S25_AICORE_NANO)
+                    "gemma-4-26b-a4b-it" to "Galaxy S25 내장 Gemini Nano NPU"
+                }
+                lower.contains("argon") || lower.contains("아곤") -> {
+                    aiInfrastructureRouter.setPreferredTier(MobileAiRouteTier.AUTO_SMART)
+                    "gemini-4-argon" to "Gemini 4 Argon"
+                }
+                lower.contains("3.8") -> {
+                    aiInfrastructureRouter.setPreferredTier(MobileAiRouteTier.AUTO_SMART)
+                    "gemini-3.8-flash" to "Gemini 3.8 Flash"
+                }
+                lower.contains("3.5") || lower.contains("라이트") || lower.contains("lite") -> {
+                    aiInfrastructureRouter.setPreferredTier(MobileAiRouteTier.AUTO_SMART)
+                    "gemini-3.5-flash-lite" to "Gemini 3.5 Flash-Lite"
+                }
+                lower.contains("cli") || lower.contains("구독") || lower.contains("노트북") -> {
+                    aiInfrastructureRouter.setPreferredTier(MobileAiRouteTier.AUTO_SMART)
+                    "cli-subscription-bridge" to "노트북 CLI 구독 브리지"
+                }
+                else -> null
+            }
+
+            if (matchedModel != null) {
+                val (modelId, label) = matchedModel
+                updateConfig(modelName = modelId)
+                val reply = "네, 추론 엔진을 $label 모델로 전환했어요."
+                appendChatMessage(
+                    LiveChatMessage(
+                        sender = ChatSender.AGENT,
+                        text = reply,
+                        toolBadge = "MODEL"
+                    )
+                )
+                speakIfEnabled(reply)
+                return true
+            }
+        }
+
         return false
     }
 
-    /**
-     * Injects a live message or response directly from the Laptop CLI (:18888/chat) into the phone's live chat stream.
-     */
     fun injectExternalReply(text: String, badge: String = "LAPTOP CLI") {
         appendChatMessage(
             LiveChatMessage(
                 sender = ChatSender.AGENT,
                 text = text,
-                subtitle = "노트북 CLI 실시간 브리지 (:18888/chat)",
+                subtitle = "실시간 브리지",
                 toolBadge = badge
             )
         )
         speakIfEnabled(text)
-        FloatingHudService.updateHudStatus("노트북 CLI 메시지 도착", text.take(32), false)
+        FloatingHudService.updateHudStatus("메시지 도착", text.take(32), false)
     }
 
-    /**
-     * Streams an incoming intercepted notification (KakaoTalk, SMS, Telegram, Slack, etc.)
-     * directly into the continuous runtime Live Chat so the user can see and reply to it live.
-     */
     fun postIncomingNotificationToLiveChat(notif: InterceptedNotification) {
         val msg = LiveChatMessage(
             sender = ChatSender.NOTIFICATION,
             text = "[${notif.appLabel}] ${notif.sender}: ${notif.messageText}",
-            subtitle = if (notif.canQuickReply) "방: ${notif.roomOrTitle} · 0.2초 즉시 답장 가능" else "방: ${notif.roomOrTitle}",
+            subtitle = if (notif.canQuickReply) "방: ${notif.roomOrTitle} · 즉시 답장 가능" else "방: ${notif.roomOrTitle}",
             toolBadge = if (notif.canQuickReply) "RemoteInput" else "Notification",
             replySessionId = if (notif.canQuickReply) notif.sessionId else null
         )
         appendChatMessage(msg)
     }
 
-    /**
-     * Sends a user message into the continuous runtime Live Chat and triggers the agent loop.
-     */
     fun sendChatMessage(userMessage: String) {
         val trimmed = userMessage.trim()
         if (trimmed.isEmpty()) return
@@ -437,6 +408,10 @@ class MobileUseAgentEngine(
         startRun(trimmed, appendUserBubble = false)
     }
 
+    /**
+     * Starts a new conversational control run OR steers an active run in real time if the user
+     * speaks mid-execution ("잠깐 멈춰", "아니 두 번째 거 눌러줘", "좀 더 내려봐").
+     */
     fun startRun(goalPrompt: String, appendUserBubble: Boolean = true) {
         val trimmedGoal = goalPrompt.trim()
         if (trimmedGoal.isEmpty()) return
@@ -450,36 +425,63 @@ class MobileUseAgentEngine(
             )
         }
 
-        // Agent Self-Configuration: handle model switch, voice toggle, HUD toggle, theme, or 1-touch setup directly
-        if (tryHandleAgentConfigCommand(trimmedGoal)) {
+        val lower = trimmedGoal.lowercase(Locale.ROOT)
+        // Immediate stop/cancel intent by voice or text
+        if (lower in listOf("멈춰", "스톱", "그만", "정지", "취소", "잠깐만 멈춰", "멈춰줘", "그만해")) {
+            stopRun("네, 바로 멈췄어요. 다음엔 어떻게 할까요?")
+            return
+        }
+
+        if (tryHandleExplicitHansonSelfConfig(trimmedGoal)) {
+            return
+        }
+
+        // If the agent is currently waiting for approval and the user says "응/그래/승인/해줘"
+        if (_currentSession.value.status == AgentRunStatus.AWAITING_APPROVAL && approvalDeferred != null) {
+            val approve = !(lower.contains("아니") || lower.contains("취소") || lower.contains("거절") || lower.contains("마"))
+            resolvePendingApproval(approve, alwaysAllowCapability = approve)
+            return
+        }
+
+        // Live Mid-Execution Steering: if a multi-step trajectory is currently running, steer it in-place!
+        if (activeJob?.isActive == true &&
+            (_currentSession.value.status == AgentRunStatus.OBSERVING ||
+                _currentSession.value.status == AgentRunStatus.THINKING ||
+                _currentSession.value.status == AgentRunStatus.ACTING)
+        ) {
+            liveSteeringGoal = trimmedGoal
+            _currentSession.update { it.copy(goal = trimmedGoal) }
+            FloatingHudService.updateHudStatus("실시간 방향 수정", trimmedGoal.take(30), true)
             return
         }
 
         activeJob?.cancel()
         approvalDeferred?.complete(false)
+        liveSteeringGoal = null
 
         val cfg = _config.value
         val initialSession = AgentRunSession(
             goal = trimmedGoal,
             status = AgentRunStatus.OBSERVING,
             maxIterations = cfg.maxIterations,
-            subGoals = listOf(SubGoalItem("화면 분석 및 실행 계획 수립", SubGoalStatus.IN_PROGRESS))
+            subGoals = listOf(SubGoalItem("화면 확인 및 실행", SubGoalStatus.IN_PROGRESS))
         )
         _currentSession.value = initialSession
 
         if (cfg.autoShowFloatingHud) {
             FloatingHudService.startIfPermitted(context)
         }
-        FloatingHudService.updateHudStatus("Hanson AI 추론 중", trimmedGoal.take(32), true)
+        FloatingHudService.updateHudStatus("한슨 생각 중", trimmedGoal.take(30), true)
 
         activeJob = scope.launch {
             runLoop(trimmedGoal, cfg)
         }
     }
 
-    fun stopRun(reason: String = "사용자 요청으로 현재 작업을 중지했습니다. 라이브 채팅은 계속 유지됩니다.") {
+    fun stopRun(reason: String = "네, 현재 작업을 멈췄어요. 이어서 무엇을 도와드릴까요?") {
         activeJob?.cancel()
         activeJob = null
+        liveSteeringGoal = null
         approvalDeferred?.complete(false)
         approvalDeferred = null
 
@@ -498,10 +500,11 @@ class MobileUseAgentEngine(
                 sender = ChatSender.AGENT,
                 text = reason,
                 toolBadge = "STOPPED",
-                succeeded = false
+                succeeded = true
             )
         )
-        FloatingHudService.updateHudStatus("라이브 채팅 대기 중", reason.take(30), false)
+        speakIfEnabled(reason)
+        FloatingHudService.updateHudStatus("소통 및 제어 대기", reason.take(28), false)
     }
 
     fun resolvePendingApproval(approved: Boolean, alwaysAllowCapability: Boolean = false) {
@@ -516,108 +519,26 @@ class MobileUseAgentEngine(
         _allReceipts.value = emptyList()
     }
 
-    private suspend fun runLoop(goal: String, cfg: AgentEngineConfig) {
+    private suspend fun runLoop(initialGoal: String, cfg: AgentEngineConfig) {
         val (fallbackW, fallbackH) = HierarchyDumper.getScreenDimensions(context)
+        var currentGoal = initialGoal
+        var lastSpokenStepText = ""
 
-        // Layer 1: Check for Fast-Lane Semantic Teleport before executing kinetic steps
-        val teleportCandidate = semanticTeleportRouter.findFastLaneCandidate(goal)
-        var hadInitialTeleportStep = false
-        if (teleportCandidate != null) {
-            when (val teleportResult = semanticTeleportRouter.executeTeleport(teleportCandidate)) {
-                is TeleportResult.Success -> {
-                    val summary = teleportResult.messageKo
-                    val isCompound = semanticTeleportRouter.isCompoundGoal(goal)
-
-                    // For an app launch Intent with compound instructions (e.g. search, click, navigate):
-                    // do NOT terminate with COMPLETED. Instead, launch the app and hand off to Layer 2 in-app kinetic control!
-                    if (teleportCandidate is SemanticTeleportCandidate.IntentCandidate && isCompound) {
-                        val stepLog = AgentStepLog(
-                            stepNumber = 1,
-                            observation = "[Layer 1 Semantic Teleport] 앱 빠른 진입 성공: $summary. 인앱 키네틱 제어로 전환합니다.",
-                            planLedger = listOf(
-                                SubGoalItem("Semantic Teleport 앱 실행", SubGoalStatus.COMPLETED),
-                                SubGoalItem("인앱 연속 물리 제어 (Layer 2)", SubGoalStatus.IN_PROGRESS)
-                            ),
-                            toolName = "semantic_teleport",
-                            toolArgsJson = "{\"targetPackage\": \"${teleportCandidate.packageName}\"}",
-                            resultSummary = summary,
-                            succeeded = true,
-                            activePackage = teleportCandidate.packageName,
-                            elementCount = 0
-                        )
-                        _currentSession.update { prev ->
-                            prev.copy(
-                                status = AgentRunStatus.ACTING,
-                                subGoals = listOf(
-                                    SubGoalItem("Semantic Teleport 앱 실행", SubGoalStatus.COMPLETED),
-                                    SubGoalItem("인앱 연속 물리 제어 (Layer 2)", SubGoalStatus.IN_PROGRESS)
-                                ),
-                                steps = prev.steps + stepLog
-                            )
-                        }
-                        appendChatMessage(
-                            LiveChatMessage(
-                                sender = ChatSender.AGENT,
-                                text = "$summary (인앱 키네틱 조작 계속)",
-                                subtitle = "[Layer 1 Teleport] 앱 실행 후 Layer 2 키네틱 루프로 인계",
-                                toolBadge = "TELEPORT -> KINETIC"
-                            )
-                        )
-                        FloatingHudService.updateHudStatus("앱 실행 완료 · 화면 분석 중", goal.take(30), true)
-                        hadInitialTeleportStep = true
-                        // Fall through to kinetic loop
-                    } else {
-                        // Pure terminal teleport (e.g. RemoteInput reply, pure OS setting, or solo app launch)
-                        val stepLog = AgentStepLog(
-                            stepNumber = 1,
-                            observation = "[Layer 1 Semantic Teleport] Fast-Lane 단축 경로 실행 완료",
-                            planLedger = listOf(SubGoalItem("Semantic Teleport 실행", SubGoalStatus.COMPLETED)),
-                            toolName = "semantic_teleport",
-                            toolArgsJson = "{}",
-                            resultSummary = summary,
-                            succeeded = true,
-                            activePackage = context.packageName,
-                            elementCount = 0
-                        )
-                        _currentSession.update { prev ->
-                            val completed = prev.copy(
-                                status = AgentRunStatus.COMPLETED,
-                                subGoals = listOf(SubGoalItem("Semantic Teleport 실행", SubGoalStatus.COMPLETED)),
-                                steps = prev.steps + stepLog,
-                                finalSummary = summary,
-                                finishedAtMs = System.currentTimeMillis()
-                            )
-                            archiveSession(completed)
-                            completed
-                        }
-                        appendChatMessage(
-                            LiveChatMessage(
-                                sender = ChatSender.AGENT,
-                                text = summary,
-                                subtitle = "[Layer 1 Teleport] 화면 조작 없이 서브-100ms 완료",
-                                toolBadge = "TELEPORT OK"
-                            )
-                        )
-                        speakIfEnabled(summary)
-                        FloatingHudService.updateHudStatus("라이브 채팅 대기 중", summary.take(32), false)
-                        return
-                    }
-                }
-                is TeleportResult.FallbackToKinetic -> {
-                    // Fall back to Layer 2 / Layer 3 kinetic navigation
-                }
+        for (iter in 1..cfg.maxIterations) {
+            // Check if the user spoke a new mid-execution steering instruction!
+            val steered = liveSteeringGoal
+            if (steered != null) {
+                currentGoal = steered
+                liveSteeringGoal = null
             }
-        }
 
-        val startIter = if (hadInitialTeleportStep) 2 else 1
-        for (iter in startIter..cfg.maxIterations) {
             _currentSession.update {
                 it.copy(
+                    goal = currentGoal,
                     currentIteration = iter,
                     status = AgentRunStatus.OBSERVING
                 )
             }
-            FloatingHudService.updateHudStatus("Step $iter/${cfg.maxIterations} · 화면 분석", goal.take(30), true)
 
             val snapshot: AtomicSnapshot = HansonAccessibilityService.instance?.captureSnapshotNow(
                 includeScreenshot = true
@@ -625,68 +546,39 @@ class MobileUseAgentEngine(
                 screenWidth = fallbackW,
                 screenHeight = fallbackH,
                 activePackage = context.packageName,
-                activeWindowTitle = "AccessibilityService Off (Fast-Lane Mode)"
+                activeWindowTitle = "Hanson Board"
             )
 
             _currentSession.update { it.copy(status = AgentRunStatus.THINKING) }
-            FloatingHudService.updateHudStatus("Step $iter · AI 추론 중", "화면 요소 ${snapshot.indexedElements.size}개 분석", true)
+            FloatingHudService.updateHudStatus("화면 분석 중", currentGoal.take(28), true)
 
-            // Evaluate turn using ParadigmExecutionModeController (BOCPD Change-Point Gate + 3 Composite Modes)
-            val recentFailed = _currentSession.value.steps.lastOrNull()?.succeeded == false
-            val modeTurnResult = executionModeController.evaluateTurn(
+            val decision = aiInfrastructureRouter.routeAndDecide(
+                apiKey = cfg.apiKey,
+                modelName = cfg.modelName,
+                goal = currentGoal,
+                iteration = iter,
                 snapshot = snapshot,
-                goal = goal,
-                mode = CompositeExecutionMode.RECURSIVE_EVOLUTION_3PHASE,
-                recentStepFailed = recentFailed
+                historySteps = _currentSession.value.steps,
+                previousPlan = _currentSession.value.subGoals,
+                chatHistory = _chatMessages.value
             )
 
-            val (decision, currentActorTier) = when (modeTurnResult) {
-                is ModeTurnResult.DirectAction -> {
-                    val s1 = modeTurnResult.decision
-                    val tier = if (modeTurnResult.rationaleKo.contains("Rollout") || modeTurnResult.mode == CompositeExecutionMode.PRE_SIMULATION_ROLLOUT) {
-                        "S1_ROLLOUT"
-                    } else {
-                        "S1_HABIT_PROTOTYPE"
-                    }
-                    FloatingHudService.updateHudStatus("Step $iter · 0-LLM S1 반사 실행", modeTurnResult.rationaleKo.take(30), true)
-                    s1 to tier
-                }
-                is ModeTurnResult.SpeculativeDispatched -> {
-                    val s1 = modeTurnResult.speculativeDecision
-                    FloatingHudService.updateHudStatus("Step $iter · 병렬 투기적 S1 디스패치", "투기적 실행 중", true)
-                    s1 to "S1_SPECULATIVE"
-                }
-                is ModeTurnResult.EscalateToSystem2 -> {
-                    FloatingHudService.updateHudStatus("Step $iter · S2 심판 추론", modeTurnResult.reasonKo.take(30), true)
-                    val s2 = multimodalClient.decideNextAction(
-                        apiKey = cfg.apiKey,
-                        modelName = cfg.modelName,
-                        goal = goal,
-                        iteration = iter,
-                        snapshot = snapshot,
-                        historySteps = _currentSession.value.steps,
-                        previousPlan = _currentSession.value.subGoals,
-                        chatHistory = _chatMessages.value
-                    )
-                    s2 to "S2_DELIBERATIVE"
-                }
-            }
+            val backendBadge = aiInfrastructureRouter.state.value.lastUsedBackendBadge
 
             _currentSession.update {
                 it.copy(subGoals = decision.subGoals)
             }
 
+            // 1. Task Completion -> speak and post natural conversational response
             if (decision.toolName == "complete_task") {
-                val consolidatedTrace = habitOrganonRuntime.finalizeEpisodeAndAssignDelayedCredit(
-                    goal = goal,
+                habitOrganonRuntime.finalizeEpisodeAndAssignDelayedCredit(
+                    goal = currentGoal,
                     activePackage = snapshot.activePackage,
                     episodeGoalReached = true
                 )
-                val rawSummary = decision.toolArgs.optString("summary", "작업을 성공적으로 완료했습니다.")
-                val creditFooter = if (consolidatedTrace.isNotEmpty()) {
-                    "\n[Habit-Organon 지연 신용 할당 완료: ${consolidatedTrace.size}개 순수 궤적 간선 승격 · S1=${habitOrganonRuntime.totalS1Calls}/S2=${habitOrganonRuntime.totalS2Deferrals}]"
-                } else ""
-                val summary = rawSummary + creditFooter
+                val summary = decision.spokenReply.ifBlank {
+                    decision.toolArgs.optString("summary", "요청하신 작업을 완료했어요.")
+                }
                 val finalStep = AgentStepLog(
                     stepNumber = iter,
                     observation = decision.observation,
@@ -714,50 +606,65 @@ class MobileUseAgentEngine(
                     LiveChatMessage(
                         sender = ChatSender.AGENT,
                         text = summary,
-                        subtitle = decision.observation,
-                        toolBadge = "COMPLETE"
+                        subtitle = backendBadge,
+                        toolBadge = backendBadge
                     )
                 )
                 speakIfEnabled(summary)
-                FloatingHudService.updateHudStatus("라이브 채팅 대기 중", summary.take(32), false)
+                FloatingHudService.updateHudStatus("소통 및 제어 대기", summary.take(30), false)
                 return
             }
 
+            // 2. Conversational Clarification (`ask_user`) -> speak question & listen for user's answer
+            if (decision.toolName == "ask_user") {
+                val question = decision.toolArgs.optString("question").ifBlank {
+                    decision.spokenReply.ifBlank { "어떤 항목을 선택할지 말씀해 주세요." }
+                }
+                _currentSession.update { prev ->
+                    val finished = prev.copy(
+                        status = AgentRunStatus.COMPLETED,
+                        finalSummary = question,
+                        finishedAtMs = System.currentTimeMillis()
+                    )
+                    archiveSession(finished)
+                    finished
+                }
+                appendChatMessage(
+                    LiveChatMessage(
+                        sender = ChatSender.AGENT,
+                        text = question,
+                        subtitle = backendBadge,
+                        toolBadge = "대화 확인"
+                    )
+                )
+                speakIfEnabled(question)
+                FloatingHudService.updateHudStatus("대답을 듣고 있어요", question.take(30), false)
+                return
+            }
+
+            // 3. Speak natural conversational progress while executing the action
+            val stepNarration = decision.spokenReply.trim()
+            if (stepNarration.isNotBlank() && stepNarration != lastSpokenStepText) {
+                lastSpokenStepText = stepNarration
+                appendChatMessage(
+                    LiveChatMessage(
+                        sender = ChatSender.AGENT,
+                        text = stepNarration,
+                        subtitle = backendBadge,
+                        toolBadge = "${decision.toolName} · $backendBadge"
+                    )
+                )
+                speakIfEnabled(stepNarration)
+            }
+
+            // 4. Safety Gate evaluation
             val spec = ToolSpecRegistry.find(decision.toolName)
             if (spec != null) {
                 when (val gate = ToolSafetyGate.evaluate(spec, decision.toolArgs, permissionHub)) {
                     is SafetyGateDecision.Allow -> Unit
                     is SafetyGateDecision.Deny -> {
-                        val deniedStep = AgentStepLog(
-                            stepNumber = iter,
-                            observation = decision.observation,
-                            planLedger = decision.subGoals,
-                            toolName = decision.toolName,
-                            toolArgsJson = decision.toolArgs.toString(),
-                            resultSummary = "차단됨: ${gate.reasonKo}",
-                            succeeded = false,
-                            activePackage = snapshot.activePackage,
-                            elementCount = snapshot.indexedElements.size
-                        )
-                        _currentSession.update { prev ->
-                            val stopped = prev.copy(
-                                status = AgentRunStatus.STOPPED,
-                                steps = prev.steps + deniedStep,
-                                finalSummary = gate.reasonKo,
-                                finishedAtMs = System.currentTimeMillis()
-                            )
-                            archiveSession(stopped)
-                            stopped
-                        }
-                        appendChatMessage(
-                            LiveChatMessage(
-                                sender = ChatSender.AGENT,
-                                text = gate.reasonKo,
-                                toolBadge = "DENIED · ${decision.toolName}",
-                                succeeded = false
-                            )
-                        )
-                        FloatingHudService.updateHudStatus("거버넌스 차단", gate.reasonKo.take(28), false)
+                        val msg = "보안 설정으로 인해 '${spec.name}' 작업이 제한되어 있어요. 원터치 자동 구성을 실행해 주세요."
+                        stopRun(msg)
                         return
                     }
                     is SafetyGateDecision.AskUser -> {
@@ -773,27 +680,34 @@ class MobileUseAgentEngine(
                                 )
                             )
                         }
+                        val askMsg = "${gate.reasonKo} 진행할까요? '응'이라고 말씀하시면 바로 실행할게요."
                         appendChatMessage(
                             LiveChatMessage(
                                 sender = ChatSender.AGENT,
-                                text = "승인 요청: ${gate.reasonKo}",
-                                toolBadge = "APPROVAL · ${spec.name}"
+                                text = askMsg,
+                                toolBadge = "승인 확인"
                             )
                         )
-                        FloatingHudService.updateHudStatus("승인 대기 중", "${spec.name} 실행 확인 필요", true)
+                        speakIfEnabled(askMsg)
+                        FloatingHudService.updateHudStatus("승인 대기 중", "'응'이라고 말씀하세요", true)
                         val approved = deferred.await()
                         approvalDeferred = null
                         _currentSession.update { it.copy(pendingApproval = null) }
                         if (!approved) {
-                            stopRun("사용자가 '${spec.name}' 실행을 거부하여 중단했습니다.")
+                            stopRun("네, 실행하지 않고 취소했어요.")
                             return
                         }
                     }
                 }
             }
 
+            // 5. Execute Tool Action on the Phone
             _currentSession.update { it.copy(status = AgentRunStatus.ACTING) }
-            FloatingHudService.updateHudStatus("Step $iter · ${decision.toolName}", decision.observation.take(30), true)
+            FloatingHudService.updateHudStatus(
+                "제어 중 · ${decision.toolName}",
+                stepNarration.ifBlank { decision.observation }.take(30),
+                true
+            )
 
             val outcome = toolHarness.execute(
                 toolName = decision.toolName,
@@ -801,13 +715,38 @@ class MobileUseAgentEngine(
                 latestSnapshot = snapshot
             )
 
-            // Wait for UI animation/state transition settle, then capture Post-Snapshot S_{t+1}
-            delay(480L)
+            // If `list_notifications` was called, immediately summarize the notifications in natural Korean!
+            if (decision.toolName == "list_notifications") {
+                val notifSummary = if (outcome.outputText.contains("수신된 알림이 없습니다") || outcome.outputText.isBlank()) {
+                    "지금 새로 도착한 알림이 없어요."
+                } else {
+                    val lines = outcome.outputText.lines().filter { it.isNotBlank() }.take(3)
+                    "최근 도착한 알림을 확인했어요: ${lines.joinToString(" / ")}. 답장을 보낼 메시지가 있나요?"
+                }
+                _currentSession.update { prev ->
+                    prev.copy(
+                        status = AgentRunStatus.COMPLETED,
+                        finalSummary = notifSummary,
+                        finishedAtMs = System.currentTimeMillis()
+                    )
+                }
+                appendChatMessage(
+                    LiveChatMessage(
+                        sender = ChatSender.AGENT,
+                        text = notifSummary,
+                        toolBadge = "알림 브리핑"
+                    )
+                )
+                speakIfEnabled(notifSummary)
+                FloatingHudService.updateHudStatus("소통 및 제어 대기", notifSummary.take(28), false)
+                return
+            }
+
+            delay(450L)
             val postSnapshot: AtomicSnapshot = HansonAccessibilityService.instance?.captureSnapshotNow(
                 includeScreenshot = false
             ) ?: snapshot
 
-            // Closed-Loop Ground-Truth Verification & 3-Stage Self-Healing (인지 -> 복구 -> 재실행)
             val verification = trajectoryVerifier.verifyAndSelfHeal(
                 toolName = decision.toolName,
                 args = decision.toolArgs,
@@ -816,7 +755,6 @@ class MobileUseAgentEngine(
                 postSnapshot = postSnapshot
             )
 
-            // Record transition S_t -> S_{t+1} into the Paradigm World-Model State Graph
             worldModelGraph.recordTransition(
                 preSnapshot = snapshot,
                 postSnapshot = verification.finalSnapshot,
@@ -827,50 +765,17 @@ class MobileUseAgentEngine(
                 selfHealRecipe = verification.recoveryActionKo
             )
 
-            habitOrganonRuntime.recordStepProvenance(
-                stepNumber = iter,
-                preSnapshot = snapshot,
-                postSnapshot = verification.finalSnapshot,
-                actorTier = if (verification.recoveryAttempted) "SELF_HEALER" else currentActorTier,
-                toolName = decision.toolName,
-                toolArgsJson = decision.toolArgs.toString(),
-                verifiedSuccess = verification.verifiedSuccess,
-                uiDeltaRatio = verification.treeDeltaRatio,
-                recoveryAttempted = verification.recoveryAttempted,
-                latencyMs = 480L
-            )
-
-            val verifiedResultText = buildString {
-                append(outcome.outputText)
-                append("\n")
-                append(verification.toFormattedBadgeAndLog())
-            }
-
             val stepLog = AgentStepLog(
                 stepNumber = iter,
                 observation = decision.observation,
                 planLedger = decision.subGoals,
                 toolName = decision.toolName,
                 toolArgsJson = decision.toolArgs.toString(),
-                resultSummary = verifiedResultText,
+                resultSummary = outcome.outputText,
                 succeeded = verification.verifiedSuccess,
                 activePackage = verification.finalSnapshot.activePackage,
                 elementCount = verification.finalSnapshot.indexedElements.size,
                 screenshotBase64 = snapshot.screenshotBase64Jpeg
-            )
-
-            appendChatMessage(
-                LiveChatMessage(
-                    sender = ChatSender.ACTION,
-                    text = verifiedResultText,
-                    subtitle = "궤적 관찰: ${decision.observation}",
-                    toolBadge = if (verification.recoveryAttempted) {
-                        "STEP $iter · ${decision.toolName} (SELF-HEALED)"
-                    } else {
-                        "STEP $iter · ${decision.toolName}"
-                    },
-                    succeeded = verification.verifiedSuccess
-                )
             )
 
             if (outcome.receipt != null) {
@@ -884,40 +789,16 @@ class MobileUseAgentEngine(
                 )
             }
 
-            // Live-update the Liquid UI Trajectory & World-Model HUD
             LiquidUiSynthesizer.updateLiveTrajectoryHud(
-                goal = goal,
+                goal = currentGoal,
                 steps = _currentSession.value.steps,
                 worldGraph = worldModelGraph
             )
 
-            if (decision.toolName == "ask_user") {
-                val question = decision.toolArgs.optString("question", "추후 진행 방향을 알려주세요.")
-                _currentSession.update { prev ->
-                    val finished = prev.copy(
-                        status = AgentRunStatus.COMPLETED,
-                        finalSummary = question,
-                        finishedAtMs = System.currentTimeMillis()
-                    )
-                    archiveSession(finished)
-                    completedSessionWithQuestion(finished)
-                }
-                appendChatMessage(
-                    LiveChatMessage(
-                        sender = ChatSender.AGENT,
-                        text = question,
-                        toolBadge = "QUESTION"
-                    )
-                )
-                speakIfEnabled(question)
-                FloatingHudService.updateHudStatus("질문 응답 대기", question.take(30), false)
-                return
-            }
-
-            delay(900L)
+            delay(650L)
         }
 
-        val maxMsg = "최대 반복 횟수(${cfg.maxIterations}회)까지 실행을 마쳤습니다. 추가로 진행할 작업을 말씀해 주세요."
+        val maxMsg = "여기까지 실행을 마쳤어요. 지금 화면에서 이어서 할 작업을 말씀해 주세요."
         _currentSession.update { prev ->
             val finished = prev.copy(
                 status = AgentRunStatus.COMPLETED,
@@ -934,10 +815,9 @@ class MobileUseAgentEngine(
                 toolBadge = "DONE"
             )
         )
-        FloatingHudService.updateHudStatus("라이브 채팅 대기 중", "다음 명령 대기", false)
+        speakIfEnabled(maxMsg)
+        FloatingHudService.updateHudStatus("소통 및 제어 대기", "다음 명령 대기", false)
     }
-
-    private fun completedSessionWithQuestion(session: AgentRunSession): AgentRunSession = session
 
     private fun archiveSession(session: AgentRunSession) {
         _runHistory.update { prev ->
