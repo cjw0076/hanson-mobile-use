@@ -10,7 +10,7 @@ android {
 
     defaultConfig {
         applicationId = "com.hanson.mobileuse"
-        minSdk = 26
+        minSdk = 31
         targetSdk = 35
         versionCode = 1
         versionName = "1.0.0"
@@ -99,6 +99,10 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    // Official Google On-Device AI Infrastructure (S25 AICore Gemini Nano NPU + MediaPipe Tasks GenAI)
+    implementation("com.google.ai.edge.aicore:aicore:0.0.1-exp02")
+    implementation("com.google.mediapipe:tasks-genai:0.10.35")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")

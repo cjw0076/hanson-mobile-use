@@ -13,12 +13,16 @@ data class ModelTurnDecision(
     val observation: String,
     val subGoals: List<SubGoalItem>,
     val toolName: String,
-    val toolArgs: JSONObject
+    val toolArgs: JSONObject,
+    val spokenReply: String = ""
 )
 
 /**
- * Multimodal Gemini VLM + Function Calling Client with Google Artemis 3-Phase Cognitive Protocol
- * and intelligent on-device fallback planner when offline or before an API key is configured.
+ * Conversational Multimodal VLM + Full-Control Mobile Operator (`GeminiMultimodalClient`).
+ *
+ * Combines real-time natural Korean dialogue (`spokenReply`) with full device control
+ * (`click`, `long_press`, `input_text`, `swipe`, `drag_and_drop`, `haptic_trajectory`,
+ * `press_key`, `manage_app`, `reply_notification`, `control_device_setting`, `ask_user`, `complete_task`).
  */
 class GeminiMultimodalClient {
 
@@ -63,43 +67,23 @@ class GeminiMultimodalClient {
             "gemma-4-26b-a4b-it" to "[온디바이스 로컬] Gemma 4 MoE / LiteRT-LM / Samsung AICore 오프라인 추론"
         )
 
-        /**
-         * Normalizes model strings strictly following https://aistudio.google.com/docs/models
-         * deprecation & automatic routing table:
-         * - `gemini-2.5-flash` / `gemini-2.5-flash-preview-09-2025` / `gemini-2.0-flash-lite` -> `gemini-3.5-flash-lite`
-         * - `gemini-2.5-pro` / `gemini-3-pro-preview` / `gemini-2.0-flash` / `gemini-1.5-*` -> `gemini-3.8-flash`
-         * - `gemini-2.5-flash-lite` -> preserved (`gemini-2.5-flash-lite` is NOT deprecated on AI Studio docs)
-         * - `gemini-3.1-flash-lite-preview` -> `gemini-3.1-flash-lite`
-         * - `gemini-robotics-er-1.6-preview` -> `gemini-robotics-er-2-preview`
-         * - `gemini-3.1-flash-live-preview` / `gemini-2.5-flash-native-audio-preview-12-2025` -> `gemini-3.8-live`
-         * - `gemini-3.1-flash-tts-preview` / `gemini-2.5-flash-preview-tts` / `gemini-2.5-pro-preview-tts` -> `gemini-3.8-flash-tts`
-         * - `gemini-2.5-flash-image` -> `gemini-nano-banana-2.1`
-         */
         fun normalize2026ModelName(rawModel: String): String {
             val trimmed = rawModel.trim()
             if (trimmed.isEmpty()) return DEFAULT_MODEL
 
             return when {
-                // Active 2.5 Flash-Lite is explicitly preserved per AI Studio docs
                 trimmed == "gemini-2.5-flash-lite" -> "gemini-2.5-flash-lite"
-                // Official Dec 1, 2026 route: gemini-2.5-flash -> gemini-3.5-flash-lite
                 trimmed == "gemini-2.5-flash" ||
                     trimmed == "gemini-2.5-flash-preview-09-2025" ||
                     trimmed == "gemini-2.0-flash-lite" -> "gemini-3.5-flash-lite"
-                // Shut-down 3.1 Flash-Lite Preview -> Stable 3.1 Flash-Lite
                 trimmed == "gemini-3.1-flash-lite-preview" -> "gemini-3.1-flash-lite"
-                // Shut-down Robotics ER 1.6 -> Robotics ER 2 Preview
                 trimmed == "gemini-robotics-er-1.6-preview" -> "gemini-robotics-er-2-preview"
-                // Legacy Live preview models -> Gemini 3.8 Live
                 trimmed == "gemini-3.1-flash-live-preview" ||
                     trimmed == "gemini-2.5-flash-native-audio-preview-12-2025" -> "gemini-3.8-live"
-                // Legacy TTS preview models -> Gemini 3.8 Flash TTS
                 trimmed == "gemini-3.1-flash-tts-preview" ||
                     trimmed == "gemini-2.5-flash-preview-tts" ||
                     trimmed == "gemini-2.5-pro-preview-tts" -> "gemini-3.8-flash-tts"
-                // Legacy Nano Banana (2.5-flash-image) -> Nano Banana 2.1
                 trimmed == "gemini-2.5-flash-image" -> "gemini-nano-banana-2.1"
-                // Official Dec 1, 2026 route: gemini-2.5-pro / shut-down 3-pro-preview / 2.5-computer-use / 2.0-flash / 1.5 -> gemini-3.8-flash
                 trimmed == "gemini-2.5-pro" ||
                     trimmed == "gemini-3-pro-preview" ||
                     trimmed == "gemini-2.5-computer-use-preview-10-2025" ||
@@ -111,52 +95,78 @@ class GeminiMultimodalClient {
         }
 
         val SYSTEM_INSTRUCTION = """
-You are Hanson Mobile-Use AI, an unrestricted autonomous Android mobile operator combining Google Artemis (`third_party/mobile_use`) and EZmap.
+You are Hanson, a warm, perceptive, conversational Korean voice & mobile full-control companion.
+You talk naturally with the user like a smart human partner watching their phone screen together, while having complete control over every app, UI element, gesture, and OS setting.
 
-Follow the 3-Phase Cognitive Protocol on EVERY turn:
-1. Phase 1 (Observation): Start your text response with `OBSERVATION: <1-sentence Korean analysis of current screen, active app, and whether previous action succeeded>`.
-2. Phase 2 (Live Sub-goal Ledger): Next, output `PLAN:` followed by markdown checklist items using `[x]` (completed), `[/]` (currently executing), and `[ ]` (pending), in Korean.
-3. Phase 3 (Tool Execution): Invoke exactly ONE tool call to advance the `[/]` sub-goal.
+On EVERY turn, follow this structure:
+1. `SPOKEN: <1~2 natural conversational Korean sentences spoken aloud to the user. Never sound like a system log! Speak naturally, e.g., "유튜브를 열고 로파이 음악을 찾아볼게요.", "지금 카톡 화면에 엄마랑 김철수 님 대화방이 보이는데 어느 방을 열까요?", "네, 두 번째 영상을 바로 재생했어요.">`
+2. `OBSERVATION: <concise Korean summary of current screen and progress>`
+3. `PLAN:` followed by markdown checklist items (`[x]`, `[/]`, `[ ]`).
+4. Invoke ONE tool call to advance the user's goal or respond.
 
-Critical Mobile-Use Rules:
-- Fast-Lane Priority: If the goal can be achieved via a direct OS/Notification tool (`reply_notification`, `list_notifications`, `manage_app`, `control_device_setting`, `make_call`, `send_sms`, `search_contacts`, `manage_calendar`, `set_alarm`), ALWAYS prefer it over multi-step GUI clicking!
-- Screen-Off Reply: When replying to KakaoTalk/SMS/Telegram notifications, call `list_notifications` or `reply_notification` first for sub-200ms background reply without opening the app.
-- GUI Element Indexing: When using `click`, `long_press`, or `input_text`, prefer passing `element_index` from the `Visible UI Elements` list. If an element is only visible in the screenshot, pass `norm_x` and `norm_y` on the [0..1000, 0..1000] grid.
-- Swipe Semantics: `swipe(direction='up')` drags the finger UP (scrolling down to reveal lower content). `swipe(direction='down')` drags the finger DOWN (scrolling up).
-- Loop Avoidance: Never repeat the exact same failing click more than twice; try scrolling (`swipe`), `press_key(key='BACK')`, or `manage_app`.
-- Completion: When the user's goal is achieved, call `complete_task(summary=...)` in Korean.
+Conversational Full-Control Rules:
+- Communicate AND Control: When the user asks a question about the screen or just chats, answer naturally via `complete_task(summary=...)` or `ask_user(question=...)`. When the user wants an action or changes their mind mid-task ("아니 그거 말고 밑에 거 눌러줘", "조금 더 내려봐"), adapt immediately and explain naturally in `SPOKEN:`.
+- Ambiguity -> Ask Naturally: If a request needs a choice (e.g. multiple matching items on screen or missing recipient/message), call `ask_user(question=...)` with a natural spoken question so the user can answer by voice.
+- Fast-Lane & GUI Mastery: Use `reply_notification`, `list_notifications`, `manage_app`, `control_device_setting`, `click`, `long_press`, `input_text`, `swipe`, `drag_and_drop`, `haptic_trajectory`, and `press_key` seamlessly.
+- Never output bracketed diagnostic jargon like `[행동 궤적 1단계]` or `[GROUND-TRUTH]` in `SPOKEN:` or `summary`.
 """.trimIndent()
 
         fun parseObservationAndPlan(rawText: String, previousPlan: List<SubGoalItem>): Pair<String, List<SubGoalItem>> {
+            val (_, obs, plan) = parseSpokenObservationAndPlan(rawText, previousPlan)
+            return obs to plan
+        }
+
+        fun parseSpokenObservationAndPlan(
+            rawText: String,
+            previousPlan: List<SubGoalItem>
+        ): Triple<String, String, List<SubGoalItem>> {
             if (rawText.isBlank()) {
-                return "화면 상태 및 UI 요소 분석 완료" to previousPlan
+                return Triple("", "화면 상태 분석 완료", previousPlan)
             }
+            var spoken = ""
             var observation = ""
             val parsedGoals = mutableListOf<SubGoalItem>()
 
             for (line in rawText.lines()) {
                 val trimmed = line.trim()
-                if (trimmed.uppercase().startsWith("OBSERVATION:")) {
-                    observation = trimmed.substringAfter(":").trim()
-                } else if (trimmed.startsWith("- [x]") || trimmed.startsWith("[x]")) {
-                    val title = trimmed.substringAfter("[x]").trim()
-                    if (title.isNotEmpty()) parsedGoals.add(SubGoalItem(title, SubGoalStatus.COMPLETED))
-                } else if (trimmed.startsWith("- [/]") || trimmed.startsWith("[/]")) {
-                    val title = trimmed.substringAfter("[/]").trim()
-                    if (title.isNotEmpty()) parsedGoals.add(SubGoalItem(title, SubGoalStatus.IN_PROGRESS))
-                } else if (trimmed.startsWith("- [ ]") || trimmed.startsWith("[ ]")) {
-                    val title = trimmed.substringAfter("[ ]").trim()
-                    if (title.isNotEmpty()) parsedGoals.add(SubGoalItem(title, SubGoalStatus.PENDING))
+                when {
+                    trimmed.uppercase().startsWith("SPOKEN:") -> {
+                        spoken = trimmed.substringAfter(":").trim()
+                    }
+                    trimmed.uppercase().startsWith("OBSERVATION:") -> {
+                        observation = trimmed.substringAfter(":").trim()
+                    }
+                    trimmed.startsWith("- [x]") || trimmed.startsWith("[x]") -> {
+                        val title = trimmed.substringAfter("[x]").trim()
+                        if (title.isNotEmpty()) parsedGoals.add(SubGoalItem(title, SubGoalStatus.COMPLETED))
+                    }
+                    trimmed.startsWith("- [/]") || trimmed.startsWith("[/]") -> {
+                        val title = trimmed.substringAfter("[/]").trim()
+                        if (title.isNotEmpty()) parsedGoals.add(SubGoalItem(title, SubGoalStatus.IN_PROGRESS))
+                    }
+                    trimmed.startsWith("- [ ]") || trimmed.startsWith("[ ]") -> {
+                        val title = trimmed.substringAfter("[ ]").trim()
+                        if (title.isNotEmpty()) parsedGoals.add(SubGoalItem(title, SubGoalStatus.PENDING))
+                    }
                 }
             }
 
             if (observation.isBlank()) {
-                observation = rawText.lines().firstOrNull { it.isNotBlank() && !it.startsWith("PLAN") }
+                observation = rawText.lines()
+                    .firstOrNull {
+                        it.isNotBlank() &&
+                            !it.uppercase().startsWith("SPOKEN:") &&
+                            !it.uppercase().startsWith("PLAN")
+                    }
                     ?.take(140)
-                    ?: "화면 분석 및 다음 행동 결정"
+                    ?: spoken.ifBlank { "화면 분석 및 행동 결정" }
             }
 
-            return observation to (if (parsedGoals.isNotEmpty()) parsedGoals else previousPlan)
+            if (spoken.isBlank()) {
+                spoken = observation
+            }
+
+            return Triple(spoken, observation, if (parsedGoals.isNotEmpty()) parsedGoals else previousPlan)
         }
     }
 
@@ -175,11 +185,14 @@ Critical Mobile-Use Rules:
         historySteps: List<AgentStepLog>,
         previousPlan: List<SubGoalItem>,
         chatHistory: List<LiveChatMessage> = emptyList(),
-        preferLaptopCliBridge: Boolean = true,
+        preferLaptopCliBridge: Boolean = false,
         laptopBridgeUrl: String = "http://127.0.0.1:18889/decide"
     ): ModelTurnDecision {
-        // 1. Try Laptop CLI Bridge first (adb reverse tcp:18889 tcp:18889) if enabled
-        if (preferLaptopCliBridge) {
+        val useCliBridge = preferLaptopCliBridge ||
+            modelName == "cli-subscription-bridge" ||
+            modelName == "laptop-cli-subscription"
+
+        if (useCliBridge) {
             val bridgeDecision = tryCallLaptopCliBridge(
                 bridgeUrl = laptopBridgeUrl,
                 goal = goal,
@@ -194,10 +207,9 @@ Critical Mobile-Use Rules:
             }
         }
 
-        // 2. Try Direct Gemini API if API key is configured
         val cleanKey = apiKey.trim()
         if (cleanKey.isEmpty()) {
-            return inferLocalOnDeviceAction(goal, iteration, snapshot, historySteps, previousPlan)
+            return inferLocalOnDeviceAction(goal, iteration, snapshot, historySteps, previousPlan, chatHistory)
         }
 
         return try {
@@ -212,13 +224,8 @@ Critical Mobile-Use Rules:
                 previousPlan = previousPlan,
                 chatHistory = chatHistory
             )
-        } catch (e: Exception) {
-            ModelTurnDecision(
-                observation = "Gemini API 호출 중 오류가 발생하여 로컬 온디바이스 추론으로 전환합니다 (${e.message?.take(60)})",
-                subGoals = previousPlan,
-                toolName = "complete_task",
-                toolArgs = JSONObject().put("summary", "API 호출 오류: ${e.message}")
-            )
+        } catch (_: Exception) {
+            inferLocalOnDeviceAction(goal, iteration, snapshot, historySteps, previousPlan, chatHistory)
         }
     }
 
@@ -263,15 +270,16 @@ Critical Mobile-Use Rules:
                 .build()
 
             val fastClient = httpClient.newBuilder()
-                .connectTimeout(1500, TimeUnit.MILLISECONDS)
-                .readTimeout(25, TimeUnit.SECONDS)
+                .connectTimeout(1200, TimeUnit.MILLISECONDS)
+                .readTimeout(20, TimeUnit.SECONDS)
                 .build()
 
             fastClient.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) return null
                 val bodyStr = resp.body?.string().orEmpty()
                 val json = JSONObject(bodyStr)
-                val obs = json.optString("observation", "[노트북 CLI 브리지] 화면 및 명령 분석 완료")
+                val obs = json.optString("observation", "화면 및 명령 분석 완료")
+                val spoken = json.optString("spokenReply", obs)
                 val toolName = json.optString("toolName", "complete_task")
                 val toolArgs = json.optJSONObject("toolArgs") ?: JSONObject()
                 val planArr = json.optJSONArray("subGoals")
@@ -289,7 +297,8 @@ Critical Mobile-Use Rules:
                     observation = obs,
                     subGoals = if (parsedPlan.isNotEmpty()) parsedPlan else previousPlan,
                     toolName = toolName,
-                    toolArgs = toolArgs
+                    toolArgs = toolArgs,
+                    spokenReply = spoken
                 )
             }
         } catch (_: Exception) {
@@ -310,7 +319,7 @@ Critical Mobile-Use Rules:
         val chatSummary = if (chatHistory.isEmpty()) {
             "(No prior live chat messages)"
         } else {
-            chatHistory.takeLast(12).joinToString("\n") { msg ->
+            chatHistory.takeLast(14).joinToString("\n") { msg ->
                 "[${msg.sender.name}] ${msg.text}"
             }
         }
@@ -330,10 +339,10 @@ Critical Mobile-Use Rules:
         }
 
         val promptText = buildString {
-            appendLine("Continuous Live Chat Context:")
+            appendLine("Live Conversation History with User:")
             appendLine(chatSummary)
             appendLine()
-            appendLine("Current User Message / Goal: $goal")
+            appendLine("Current User Utterance / Goal: $goal")
             appendLine("Current Turn: $iteration")
             appendLine()
             appendLine("Previous Plan Ledger:")
@@ -345,10 +354,9 @@ Critical Mobile-Use Rules:
             appendLine("Current Device Perception Snapshot:")
             appendLine(snapshot.toPromptContext(maxElements = 95))
             appendLine()
-            appendLine("Respond with OBSERVATION:, PLAN:, and invoke one tool call.")
+            appendLine("Respond with SPOKEN:, OBSERVATION:, PLAN:, and invoke one tool call.")
         }
 
-        // 1. Primary 2026 GA Interface: POST https://generativelanguage.googleapis.com/v1beta/interactions
         val interactionsDecision = runCatching {
             callGeminiInteractionsApi(
                 apiKey = apiKey,
@@ -362,7 +370,6 @@ Critical Mobile-Use Rules:
             return interactionsDecision
         }
 
-        // 2. Fallback Legacy Interface: POST /v1beta/models/{model}:generateContent
         val url = "https://generativelanguage.googleapis.com/v1beta/models/$modelName:generateContent?key=$apiKey"
         val partsArray = JSONArray()
         if (!snapshot.screenshotBase64Jpeg.isNullOrBlank()) {
@@ -398,7 +405,6 @@ Critical Mobile-Use Rules:
                 )
             )
             put("tools", ToolSpecRegistry.toGeminiToolsJson())
-            // 2026 Gemini 3.8 / Gemini 4 Argon spec: omit deprecated temperature/top_p and use thinkingConfig
             put(
                 "generationConfig",
                 JSONObject().apply {
@@ -445,30 +451,27 @@ Critical Mobile-Use Rules:
                 }
             }
 
-            val (obs, updatedPlan) = parseObservationAndPlan(textOut, previousPlan)
-            if (fnName != null) {
-                return ModelTurnDecision(
+            val (spoken, obs, updatedPlan) = parseSpokenObservationAndPlan(textOut, previousPlan)
+            return if (fnName != null) {
+                ModelTurnDecision(
                     observation = obs,
                     subGoals = updatedPlan,
                     toolName = fnName,
-                    toolArgs = fnArgs
+                    toolArgs = fnArgs,
+                    spokenReply = spoken
                 )
             } else {
-                return ModelTurnDecision(
+                ModelTurnDecision(
                     observation = obs,
                     subGoals = updatedPlan.map { it.copy(status = SubGoalStatus.COMPLETED) },
                     toolName = "complete_task",
-                    toolArgs = JSONObject().put("summary", textOut.trim().ifBlank { obs })
+                    toolArgs = JSONObject().put("summary", spoken.ifBlank { obs }),
+                    spokenReply = spoken
                 )
             }
         }
     }
 
-    /**
-     * Official 2026 Google AI Studio / Gemini Interactions API (`POST /v1beta/interactions`):
-     * Supports `gemini-4-argon`, `gemini-3.8-flash`, `gemini-3.6-flash`, `gemini-3.5-flash-lite`,
-     * `gemini-robotics-er-2-preview`, and managed agents (`antigravity-preview-09-2026`, `deep-research-*`).
-     */
     private fun callGeminiInteractionsApi(
         apiKey: String,
         modelName: String,
@@ -562,42 +565,210 @@ Critical Mobile-Use Rules:
             }
 
             val combinedText = if (textOut.isNotBlank()) textOut else thoughtSummary
-            val (obs, updatedPlan) = parseObservationAndPlan(combinedText, previousPlan)
+            val (spoken, obs, updatedPlan) = parseSpokenObservationAndPlan(combinedText, previousPlan)
             return if (fnName != null) {
                 ModelTurnDecision(
                     observation = obs,
                     subGoals = updatedPlan,
                     toolName = fnName,
-                    toolArgs = fnArgs
+                    toolArgs = fnArgs,
+                    spokenReply = spoken
                 )
             } else {
                 ModelTurnDecision(
                     observation = obs,
                     subGoals = updatedPlan.map { it.copy(status = SubGoalStatus.COMPLETED) },
                     toolName = "complete_task",
-                    toolArgs = JSONObject().put("summary", combinedText.trim().ifBlank { obs })
+                    toolArgs = JSONObject().put("summary", spoken.ifBlank { obs }),
+                    spokenReply = spoken
                 )
             }
         }
     }
 
     /**
-     * Built-in on-device deterministic planner so the user can test Fast-Lane OS actions,
-     * Screen-Off notification replies, app launching, and UI clicking even before setting a Gemini API key.
+     * Context-Aware Conversational Screen Partner & Full-Control Engine.
+     * Understands natural spoken Korean questions ("지금 화면에 뭐 있어?", "이거 읽어줘"),
+     * deictic/ordinal/spatial references ("첫 번째 거 눌러줘", "두 번째 거", "오른쪽 위에", "더 내려봐", "뒤로 가"),
+     * natural text input, and multi-step app control while replying in natural human Korean.
      */
     fun inferLocalOnDeviceAction(
         goal: String,
         iteration: Int,
         snapshot: AtomicSnapshot,
         historySteps: List<AgentStepLog>,
-        previousPlan: List<SubGoalItem>
+        previousPlan: List<SubGoalItem>,
+        chatHistory: List<LiveChatMessage> = emptyList()
     ): ModelTurnDecision {
         val g = goal.trim()
         val gLower = g.lowercase()
 
-        // =====================================================================
-        // MULTI-STEP GOAL TRAJECTORY PLANNER (열기 -> 탐색/탭 -> 타이핑 -> 드래그/클릭 -> 검증 완료)
-        // =====================================================================
+        val friendlyAppNames = mapOf(
+            "com.kakao.talk" to "카카오톡",
+            "com.google.android.youtube" to "유튜브",
+            "com.android.settings" to "설정",
+            "com.android.chrome" to "크롬 브라우저",
+            "com.nhn.android.search" to "네이버",
+            "viva.republica.toss" to "토스",
+            "com.coupang.mobile" to "쿠팡",
+            "com.sampleapp" to "배달의민족",
+            "com.instagram.android" to "인스타그램",
+            "com.sec.android.gallery3d" to "갤러리",
+            "com.sec.android.app.camera" to "카메라",
+            "com.sec.android.app.clockpackage" to "시계",
+            "com.hanson.mobileuse" to "Hanson 보드"
+        )
+        val currentAppName = friendlyAppNames[snapshot.activePackage]
+            ?: snapshot.activePackage.substringAfterLast('.').ifBlank { "현재 화면" }
+
+        val visibleLabels = snapshot.indexedElements
+            .mapNotNull { el ->
+                el.text.trim().ifBlank { el.contentDesc.trim() }.takeIf { it.length >= 2 }
+            }
+            .distinct()
+
+        // 1. Conversational Screen Inquiry ("지금 화면에 뭐 있어?", "뭐 보여?", "화면 읽어줘", "무슨 앱이야?")
+        if (
+            gLower.contains("화면") && (gLower.contains("뭐") || gLower.contains("읽어") || gLower.contains("보여") || gLower.contains("설명") || gLower.contains("알려")) ||
+            gLower.contains("뭐가 보") || gLower.contains("무슨 앱") || gLower == "지금 뭐해" || gLower == "뭐하고 있어"
+        ) {
+            val previewItems = visibleLabels.take(5)
+            val reply = if (previewItems.isNotEmpty()) {
+                "지금 $currentAppName 화면을 보고 있어요. 화면에는 ${previewItems.joinToString(", ") { "'$it'" }} 같은 항목들이 보이네요. 어떤 걸 눌러볼까요?"
+            } else {
+                "지금 $currentAppName 화면이에요. 실행하거나 누르고 싶은 항목을 편하게 말씀해 주세요."
+            }
+            return ModelTurnDecision(
+                observation = "$currentAppName 화면 요소 ${snapshot.indexedElements.size}개 요약",
+                subGoals = listOf(SubGoalItem("현재 화면 브리핑", SubGoalStatus.COMPLETED)),
+                toolName = "complete_task",
+                toolArgs = JSONObject().put("summary", reply),
+                spokenReply = reply
+            )
+        }
+
+        // 2. Conversational Greeting / Chitchat ("안녕", "반가워", "고마워", "수고했어", "잘했어", "들려?")
+        if (
+            gLower in listOf("안녕", "안녕하세요", "반가워", "야", "헤이", "한슨", "들려", "내 말 들려", "잘 들려") ||
+            gLower.startsWith("고마워") || gLower.startsWith("감사") || gLower.startsWith("잘했어") || gLower.startsWith("수고")
+        ) {
+            val reply = if (gLower.startsWith("고마") || gLower.startsWith("감사") || gLower.startsWith("잘했") || gLower.startsWith("수고")) {
+                "별말씀을요! 지금 $currentAppName 화면인데 이어서 도와드릴 작업이 있을까요?"
+            } else {
+                "네, 잘 들려요! 지금 $currentAppName 화면을 함께 보고 있습니다. 앱을 열거나 화면을 조작할 일이 있으면 편하게 말씀해 주세요."
+            }
+            return ModelTurnDecision(
+                observation = "사용자와 실시간 대화 응답",
+                subGoals = listOf(SubGoalItem("음성 대화 소통", SubGoalStatus.COMPLETED)),
+                toolName = "complete_task",
+                toolArgs = JSONObject().put("summary", reply),
+                spokenReply = reply
+            )
+        }
+
+        // 3. Direct Navigation / Hardware Keys ("뒤로", "이전 화면", "홈으로", "나가", "알림창 열어")
+        if (iteration == 1) {
+            if (gLower.contains("뒤로") || gLower.contains("이전 화면") || gLower.contains("이전으로") || gLower == "취소해" || gLower == "나가") {
+                val spoken = "네, 이전 화면으로 돌아갈게요."
+                return ModelTurnDecision(
+                    observation = "뒤로가기 실행",
+                    subGoals = listOf(SubGoalItem("이전 화면 이동", SubGoalStatus.IN_PROGRESS)),
+                    toolName = "press_key",
+                    toolArgs = JSONObject().put("key", "BACK"),
+                    spokenReply = spoken
+                )
+            }
+            if (gLower.contains("홈 화면") || gLower.contains("홈으로") || gLower == "홈") {
+                val spoken = "네, 홈 화면으로 이동할게요."
+                return ModelTurnDecision(
+                    observation = "홈 화면 이동",
+                    subGoals = listOf(SubGoalItem("홈 화면 이동", SubGoalStatus.IN_PROGRESS)),
+                    toolName = "press_key",
+                    toolArgs = JSONObject().put("key", "HOME"),
+                    spokenReply = spoken
+                )
+            }
+            if (gLower.contains("최근 앱") || gLower.contains("멀티태스킹")) {
+                val spoken = "최근 사용한 앱 목록을 열게요."
+                return ModelTurnDecision(
+                    observation = "최근 앱 목록 열기",
+                    subGoals = listOf(SubGoalItem("최근 앱 열기", SubGoalStatus.IN_PROGRESS)),
+                    toolName = "press_key",
+                    toolArgs = JSONObject().put("key", "RECENTS"),
+                    spokenReply = spoken
+                )
+            }
+        }
+
+        // 4. Conversational Ordinal / Spatial Element Selection ("첫 번째 거 눌러", "두 번째 거", "세 번째", "맨 위에 거", "맨 아래 거", "오른쪽 위")
+        if (iteration == 1 && !gLower.contains("열어서") && !gLower.contains("검색")) {
+            val clickableTargets = snapshot.indexedElements.filter {
+                (it.clickable || it.text.isNotBlank() || it.contentDesc.isNotBlank()) &&
+                    it.centerY in 90..(snapshot.screenHeight - 120)
+            }.sortedWith(compareBy<com.hanson.mobileuse.accessibility.IndexedUiElement> { it.centerY / 90 }.thenBy { it.centerX })
+
+            val ordinalTarget = when {
+                gLower.contains("첫 번째") || gLower.contains("첫번째") || gLower.contains("1번") || gLower.contains("맨 위") || gLower.contains("제일 위") ->
+                    clickableTargets.getOrNull(0)
+                gLower.contains("두 번째") || gLower.contains("두번째") || gLower.contains("2번") ->
+                    clickableTargets.getOrNull(1)
+                gLower.contains("세 번째") || gLower.contains("세번째") || gLower.contains("3번") ->
+                    clickableTargets.getOrNull(2)
+                gLower.contains("네 번째") || gLower.contains("네번째") || gLower.contains("4번") ->
+                    clickableTargets.getOrNull(3)
+                gLower.contains("마지막") || gLower.contains("맨 아래") || gLower.contains("제일 아래") || gLower.contains("맨 밑") ->
+                    clickableTargets.lastOrNull()
+                gLower.contains("오른쪽 위") || gLower.contains("우측 상단") ->
+                    snapshot.indexedElements.filter { it.clickable && it.centerY < 320 }.maxByOrNull { it.centerX }
+                gLower.contains("왼쪽 위") || gLower.contains("좌측 상단") ->
+                    snapshot.indexedElements.filter { it.clickable && it.centerY < 320 }.minByOrNull { it.centerX }
+                else -> null
+            }
+
+            if (ordinalTarget != null) {
+                val label = ordinalTarget.text.ifBlank { ordinalTarget.contentDesc.ifBlank { "선택하신 위치의 항목" } }.take(24)
+                val spoken = "네, '$label' 항목을 바로 누를게요."
+                return ModelTurnDecision(
+                    observation = "'$label' 요소 탭 실행",
+                    subGoals = listOf(SubGoalItem("'$label' 선택", SubGoalStatus.IN_PROGRESS)),
+                    toolName = "click",
+                    toolArgs = JSONObject().apply {
+                        put("element_index", ordinalTarget.index)
+                        put("target_description", label)
+                    },
+                    spokenReply = spoken
+                )
+            }
+        }
+
+        // 5. Conversational Scroll / Swipe ("좀 더 내려봐", "아래로 스크롤", "위로 올려봐", "옆으로 넘겨")
+        if (
+            iteration == 1 &&
+            (gLower.contains("스크롤") || gLower.contains("스와이프") || gLower.contains("내려") || gLower.contains("올려") || gLower.contains("넘겨")) &&
+            !gLower.contains("볼륨") && !gLower.contains("소리") && !gLower.contains("밝기")
+        ) {
+            val dir = when {
+                gLower.contains("위로 올") || gLower.contains("맨 위로") || gLower.contains("다시 위로") -> "down"
+                gLower.contains("오른쪽") || gLower.contains("다음 페이지") || gLower.contains("옆으로") -> "left"
+                gLower.contains("왼쪽") || gLower.contains("이전 페이지") -> "right"
+                else -> "up"
+            }
+            val spoken = when (dir) {
+                "down" -> "화면을 위로 다시 올려볼게요."
+                "left" -> "옆 화면으로 넘겨볼게요."
+                "right" -> "이전 페이지 쪽으로 넘길게요."
+                else -> "아래 내용을 볼 수 있게 화면을 내려볼게요."
+            }
+            return ModelTurnDecision(
+                observation = "화면 스와이프 이동 ($dir)",
+                subGoals = listOf(SubGoalItem("화면 스크롤 이동", SubGoalStatus.IN_PROGRESS)),
+                toolName = "swipe",
+                toolArgs = JSONObject().put("direction", dir).put("duration_ms", 360),
+                spokenReply = spoken
+            )
+        }
+
+        // 6. Multi-Step App + Search/Type + Click Trajectory
         val appMap = mapOf(
             "카카오톡" to "com.kakao.talk",
             "카톡" to "com.kakao.talk",
@@ -609,21 +780,22 @@ Critical Mobile-Use Rules:
             "카메라" to "com.sec.android.app.camera",
             "시계" to "com.sec.android.app.clockpackage",
             "배달의민족" to "com.sampleapp",
+            "배민" to "com.sampleapp",
             "쿠팡" to "com.coupang.mobile",
             "토스" to "viva.republica.toss",
-            "인스타그램" to "com.instagram.android"
+            "인스타그램" to "com.instagram.android",
+            "인스타" to "com.instagram.android"
         )
         val matchedAppEntry = appMap.entries.firstOrNull { gLower.contains(it.key) }
         val targetAppName = matchedAppEntry?.key
         val targetPkg = matchedAppEntry?.value
 
-        // Extract search/typing query ONLY if the user isn't directly asking to click an existing element on screen
         val directScreenElementMatch = snapshot.indexedElements.firstOrNull { el ->
-            (el.text.length >= 2 && g.contains(el.text, ignoreCase = true) && gLower.contains("눌러")) ||
-                (el.contentDesc.length >= 2 && g.contains(el.contentDesc, ignoreCase = true) && gLower.contains("눌러"))
+            (el.text.length >= 2 && g.contains(el.text, ignoreCase = true) && (gLower.contains("눌러") || gLower.contains("선택") || gLower.contains("열어") || gLower.contains("클릭"))) ||
+                (el.contentDesc.length >= 2 && g.contains(el.contentDesc, ignoreCase = true) && (gLower.contains("눌러") || gLower.contains("선택") || gLower.contains("열어") || gLower.contains("클릭")))
         }
 
-        val extractedQuery: String? = if (directScreenElementMatch != null && !gLower.contains("검색하고") && !gLower.contains("검색해서")) {
+        val extractedQuery: String? = if (directScreenElementMatch != null && !gLower.contains("검색") && !gLower.contains("틀어") && !gLower.contains("입력")) {
             null
         } else {
             val quoted = Regex("\"([^\"]+)\"|'([^']+)'").find(g)?.let { m ->
@@ -632,107 +804,78 @@ Critical Mobile-Use Rules:
             if (!quoted.isNullOrBlank()) {
                 quoted
             } else {
-                val searchMatch = Regex("([가-힣a-zA-Z0-9_\\s]{1,22}?)\\s*(?:검색하고|검색해서|검색해|검색|입력하고|입력해|찾고|찾아서|타이핑)").find(g)
-                searchMatch?.groupValues?.getOrNull(1)
+                val pattern = Regex("([가-힣a-zA-Z0-9_\\s]{1,22}?)\\s*(?:검색하고|검색해서|검색해|검색|입력하고|입력해|쳐줘|적어줘|찾고|찾아서|찾아줘|틀어줘|틀어|재생해줘|재생)")
+                pattern.find(g)?.groupValues?.getOrNull(1)
                     ?.replace("열어서", "")
                     ?.replace("열고", "")
+                    ?.replace("에서", "")
                     ?.replace("검색창에", "")
                     ?.replace("검색창", "")
+                    ?.replace("입력창에", "")
                     ?.replace("카카오톡", "")
                     ?.replace("카톡", "")
                     ?.replace("유튜브", "")
                     ?.replace("설정", "")
                     ?.replace("토스", "")
                     ?.replace("네이버", "")
-                    ?.replace("화면에서", "")
+                    ?.replace("쿠팡", "")
+                    ?.replace("배민", "")
                     ?.trim()
                     ?.takeIf { it.isNotBlank() }
             }
         }
 
         val wantsDragAndDrop = gLower.contains("드래그") || gLower.contains("슬라이더") || gLower.contains("옮겨")
-        val wantsSwipeScroll = gLower.contains("스크롤") || gLower.contains("스와이프") || gLower.contains("내려") || gLower.contains("올려")
         val wantsPostResultClick = (extractedQuery != null) && (
             gLower.contains("클릭") || gLower.contains("틀어") || gLower.contains("재생") ||
                 gLower.contains("열어") || gLower.contains("선택") || gLower.contains("눌러") || gLower.contains("들어가")
             )
 
-        val isMultiStepTrajectoryGoal = !gLower.contains("답장") && !gLower.contains("알림") && (
-            (extractedQuery != null) || wantsDragAndDrop || wantsSwipeScroll ||
-                (targetAppName != null && (gLower.contains("그리고") || gLower.contains("해서") || gLower.contains("열어서") || gLower.contains("누르고")))
+        val isMultiStepGoal = !gLower.contains("답장") && !gLower.contains("알림") && (
+            (extractedQuery != null) || wantsDragAndDrop ||
+                (targetAppName != null && (gLower.contains("그리고") || gLower.contains("해서") || gLower.contains("열어서") || gLower.contains("틀어") || gLower.contains("찾아")))
             )
 
-        if (isMultiStepTrajectoryGoal && iteration <= 7) {
+        if (isMultiStepGoal && iteration <= 7) {
             val hasLaunchedApp = historySteps.any { it.toolName == "manage_app" }
             val hasTypedQuery = historySteps.any { it.toolName == "input_text" }
             val hasClickedSearch = historySteps.any { it.toolName == "click" }
             val hasDragged = historySteps.any { it.toolName == "drag_and_drop" || it.toolName == "haptic_trajectory" }
-            val hasSwiped = historySteps.any { it.toolName == "swipe" }
             val clicksAfterTyping = historySteps.dropWhile { it.toolName != "input_text" }.count { it.toolName == "click" }
 
-            // Build dynamic trajectory ledger
             val ledger = mutableListOf<SubGoalItem>()
             if (targetAppName != null) {
                 val done = (snapshot.activePackage == targetPkg) || hasLaunchedApp
-                ledger.add(SubGoalItem("1단계: '$targetAppName' 앱 진입 및 포그라운드 검증", if (done) SubGoalStatus.COMPLETED else SubGoalStatus.IN_PROGRESS))
+                ledger.add(SubGoalItem("$targetAppName 열기", if (done) SubGoalStatus.COMPLETED else SubGoalStatus.IN_PROGRESS))
             }
             if (extractedQuery != null) {
-                ledger.add(
-                    SubGoalItem(
-                        "2단계: 검색/입력창 탐색 탭 및 '$extractedQuery' 타이핑 주입",
-                        when {
-                            hasTypedQuery -> SubGoalStatus.COMPLETED
-                            ledger.all { it.status == SubGoalStatus.COMPLETED } -> SubGoalStatus.IN_PROGRESS
-                            else -> SubGoalStatus.PENDING
-                        }
-                    )
-                )
+                ledger.add(SubGoalItem("'$extractedQuery' 입력 및 검색", if (hasTypedQuery) SubGoalStatus.COMPLETED else SubGoalStatus.IN_PROGRESS))
             }
             if (wantsPostResultClick) {
-                ledger.add(
-                    SubGoalItem(
-                        "3단계: 검색 결과 타깃 요소 탐색 및 탭 실행",
-                        when {
-                            clicksAfterTyping >= 1 -> SubGoalStatus.COMPLETED
-                            hasTypedQuery -> SubGoalStatus.IN_PROGRESS
-                            else -> SubGoalStatus.PENDING
-                        }
-                    )
-                )
-            }
-            if (wantsDragAndDrop) {
-                ledger.add(
-                    SubGoalItem(
-                        "햅틱 궤적: 홀드 후 드래그 앤 드롭(Drag & Drop) 제어",
-                        if (hasDragged) SubGoalStatus.COMPLETED else SubGoalStatus.IN_PROGRESS
-                    )
-                )
-            }
-            if (wantsSwipeScroll) {
-                ledger.add(
-                    SubGoalItem(
-                        "햅틱 궤적: 화면 스크롤/스와이프 이동 및 변위 검증",
-                        if (hasSwiped) SubGoalStatus.COMPLETED else SubGoalStatus.IN_PROGRESS
-                    )
-                )
+                ledger.add(SubGoalItem("결과 항목 선택", if (clicksAfterTyping >= 1) SubGoalStatus.COMPLETED else SubGoalStatus.PENDING))
             }
 
-            // Phase 1: Launch Target App if not in foreground yet
             if (targetAppName != null && snapshot.activePackage != targetPkg && !hasLaunchedApp) {
+                val spoken = if (extractedQuery != null) {
+                    "네, 먼저 ${targetAppName}을 열고 '$extractedQuery'를 찾아볼게요."
+                } else {
+                    "네, ${targetAppName}을 바로 열게요."
+                }
                 return ModelTurnDecision(
-                    observation = "[행동 궤적 1단계 · 앱 진입] 현재 패키지(${snapshot.activePackage})에서 목표 앱 '$targetAppName'($targetPkg)으로 진입합니다.",
+                    observation = "$targetAppName 실행 중",
                     subGoals = ledger,
                     toolName = "manage_app",
-                    toolArgs = JSONObject().put("action", "launch").put("app_name", targetAppName)
+                    toolArgs = JSONObject().put("action", "launch").put("app_name", targetAppName),
+                    spokenReply = spoken
                 )
             }
 
-            // Phase 2 & 3: Search / Input Text Trajectory
             if (extractedQuery != null && !hasTypedQuery) {
                 val editableEl = snapshot.indexedElements.firstOrNull { it.editable }
                 if (editableEl != null) {
+                    val spoken = "검색창에 '$extractedQuery'라고 입력하고 있어요."
                     return ModelTurnDecision(
-                        observation = "[행동 궤적 · 타이핑 주입] 활성 입력창([${editableEl.index}] ${editableEl.shortClass})을 포착하여 '$extractedQuery' 텍스트를 입력하고 제출(ENTER)합니다.",
+                        observation = "'$extractedQuery' 텍스트 입력 및 검색",
                         subGoals = ledger,
                         toolName = "input_text",
                         toolArgs = JSONObject().apply {
@@ -740,11 +883,11 @@ Critical Mobile-Use Rules:
                             put("text", extractedQuery)
                             put("clear_existing", false)
                             put("submit_enter", true)
-                        }
+                        },
+                        spokenReply = spoken
                     )
                 }
 
-                // If no editable field is open yet, locate the search button/icon and click it
                 if (!hasClickedSearch) {
                     val searchBtn = snapshot.indexedElements.firstOrNull { el ->
                         el.text.contains("검색") || el.contentDesc.contains("검색") ||
@@ -756,31 +899,33 @@ Critical Mobile-Use Rules:
                     }
 
                     if (searchBtn != null) {
+                        val spoken = "검색창을 열어서 '$extractedQuery'를 입력할게요."
                         return ModelTurnDecision(
-                            observation = "[행동 궤적 · 검색창 열기] 입력창을 활성화하기 위해 상단 검색 요소([${searchBtn.index}] '${searchBtn.text.ifBlank { searchBtn.contentDesc.ifBlank { "검색 아이콘" } }}')를 탭합니다.",
+                            observation = "상단 검색 버튼 탭",
                             subGoals = ledger,
                             toolName = "click",
                             toolArgs = JSONObject().apply {
                                 put("element_index", searchBtn.index)
                                 put("target_description", "검색 버튼 열기")
-                            }
+                            },
+                            spokenReply = spoken
                         )
                     }
                 }
 
-                // Direct fallback: type into focused field or via OS CLI
+                val spoken = "'$extractedQuery'를 바로 입력할게요."
                 return ModelTurnDecision(
-                    observation = "[행동 궤적 · 포커스 타이핑] '$extractedQuery' 텍스트를 입력창에 주입하고 검색(ENTER)을 실행합니다.",
+                    observation = "'$extractedQuery' 입력",
                     subGoals = ledger,
                     toolName = "input_text",
                     toolArgs = JSONObject().apply {
                         put("text", extractedQuery)
                         put("submit_enter", true)
-                    }
+                    },
+                    spokenReply = spoken
                 )
             }
 
-            // Phase 4-A: Haptic Drag & Drop Trajectory
             if (wantsDragAndDrop && !hasDragged) {
                 val sliderEl = snapshot.indexedElements.firstOrNull { el ->
                     el.shortClass.contains("SeekBar", ignoreCase = true) ||
@@ -790,9 +935,9 @@ Critical Mobile-Use Rules:
                 val startNormX = if (sliderEl != null) ((sliderEl.left + 40) * 1000 / snapshot.screenWidth.coerceAtLeast(1)) else 260
                 val endNormX = if (sliderEl != null) ((sliderEl.right - 40) * 1000 / snapshot.screenWidth.coerceAtLeast(1)) else 780
                 val normY = if (sliderEl != null) sliderEl.normY else 500
-
+                val spoken = "슬라이더를 부드럽게 드래그해서 조절할게요."
                 return ModelTurnDecision(
-                    observation = "[행동 궤적 · 햅틱 드래그 앤 드롭] 시작 지점($startNormX, $normY)에서 480ms 홀드 후 목표 지점($endNormX, $normY)까지 연속 곡선 궤적으로 드래그 앤 드롭합니다.",
+                    observation = "슬라이더 드래그 앤 드롭 실행",
                     subGoals = ledger,
                     toolName = "drag_and_drop",
                     toolArgs = JSONObject().apply {
@@ -802,23 +947,12 @@ Critical Mobile-Use Rules:
                         put("end_norm_y", normY)
                         put("hold_ms", 480)
                         put("duration_ms", 680)
-                        put("description", "목표 슬라이더/아이템 햅틱 드래그 앤 드롭")
-                    }
+                        put("description", "슬라이더 드래그 조절")
+                    },
+                    spokenReply = spoken
                 )
             }
 
-            // Phase 4-B: Swipe / Scroll Trajectory
-            if (wantsSwipeScroll && !hasSwiped) {
-                val dir = if (gLower.contains("아래로") || gLower.contains("위로 스크롤")) "down" else "up"
-                return ModelTurnDecision(
-                    observation = "[행동 궤적 · 햅틱 스와이프] 화면 콘텐츠 탐색을 위해 '$dir' 방향으로 연속 스와이프 궤적을 실행합니다.",
-                    subGoals = ledger,
-                    toolName = "swipe",
-                    toolArgs = JSONObject().put("direction", dir).put("duration_ms", 380)
-                )
-            }
-
-            // Phase 4-C: Post-Search Result Click
             if (wantsPostResultClick && clicksAfterTyping == 0) {
                 val candidateResult = snapshot.indexedElements.firstOrNull { el ->
                     !el.editable && el.centerY > 300 &&
@@ -830,281 +964,176 @@ Critical Mobile-Use Rules:
                 }
 
                 if (candidateResult != null) {
+                    val label = candidateResult.text.ifBlank { candidateResult.contentDesc }.take(24)
+                    val spoken = "검색 결과에서 '$label' 항목을 선택할게요."
                     return ModelTurnDecision(
-                        observation = "[행동 궤적 · 결과 선택] 검색 결과 화면에서 목표 타깃([${candidateResult.index}] '${candidateResult.text.ifBlank { candidateResult.contentDesc }.take(28)}')을 탭합니다.",
+                        observation = "검색 결과 '$label' 탭",
                         subGoals = ledger,
                         toolName = "click",
                         toolArgs = JSONObject().apply {
                             put("element_index", candidateResult.index)
-                            put("target_description", candidateResult.text.ifBlank { candidateResult.contentDesc }.take(30))
-                        }
+                            put("target_description", label)
+                        },
+                        spokenReply = spoken
                     )
                 }
             }
 
-            // Phase 5: All trajectory steps completed and verified!
             if (historySteps.isNotEmpty()) {
-                val trajectorySummary = historySteps.joinToString("\n") { s ->
-                    "• Step ${s.stepNumber} [${s.toolName}]: ${s.resultSummary.lines().firstOrNull().orEmpty()}"
+                val doneMsg = when {
+                    wantsPostResultClick && extractedQuery != null ->
+                        "'$extractedQuery' 검색 결과를 열었어요. 다른 항목을 누르거나 더 내려볼까요?"
+                    extractedQuery != null ->
+                        "'$extractedQuery' 검색을 완료했어요. 화면에서 어떤 항목을 열어볼까요?"
+                    else ->
+                        "요청하신 작업을 완료했어요. 이어서 무엇을 할까요?"
                 }
                 return ModelTurnDecision(
-                    observation = "모든 행동 궤적(${historySteps.size}단계) 실행 및 사후 상태 전이(Post-Snapshot) 검증을 완료했습니다.",
+                    observation = "요청 작업 완료",
                     subGoals = ledger.map { it.copy(status = SubGoalStatus.COMPLETED) },
                     toolName = "complete_task",
-                    toolArgs = JSONObject().put(
-                        "summary",
-                        "[목표 궤적 완주 완료 · 총 ${historySteps.size}스텝 검증됨]\n$trajectorySummary"
-                    )
+                    toolArgs = JSONObject().put("summary", doneMsg),
+                    spokenReply = doneMsg
                 )
             }
         }
 
-        // Single-action completion fallback if already executed a single fast-lane command
+        // Single-step completion with natural conversational response
         if (iteration >= 2 && historySteps.isNotEmpty()) {
             val last = historySteps.last()
-            return ModelTurnDecision(
-                observation = "이전 단계(${last.toolName}) 상태 전이 검증 결과를 확인했습니다.",
-                subGoals = listOf(
-                    SubGoalItem("명령 실행 및 상태 전이 검증", SubGoalStatus.COMPLETED),
-                    SubGoalItem("결과 보고", SubGoalStatus.COMPLETED)
-                ),
-                toolName = "complete_task",
-                toolArgs = JSONObject().put(
-                    "summary",
-                    "[실행 및 상태 검증 완료]\n${last.resultSummary}"
-                )
-            )
-        }
-
-        // 0-A. Universal App Reverse-Engineering & Skill Synthesis (UARP)
-        if (
-            gLower.contains("조종석") ||
-            gLower.contains("대시보드") ||
-            gLower.contains("위젯") ||
-            gLower.contains("ui 그려") ||
-            gLower.contains("렌더링") ||
-            gLower.contains("gen-ui") ||
-            gLower.contains("generative")
-        ) {
-            return ModelTurnDecision(
-                observation = "[Generative UI 엔진] 사용자의 요청에 맞춰 window.HansonOS 브리지와 직결된 실시간 HTML5/JS 마이크로 앱을 합성합니다.",
-                subGoals = listOf(
-                    SubGoalItem("맞춤형 Generative UI 마이크로 앱 합성 및 마운트", SubGoalStatus.IN_PROGRESS),
-                    SubGoalItem("렌더링 결과 브리핑", SubGoalStatus.PENDING)
-                ),
-                toolName = "render_generative_ui",
-                toolArgs = JSONObject().apply {
-                    put("title", "맞춤형 실시간 슈퍼앱 컨트롤 데크")
-                    put("subtitle", "요청('$g') 기반 동적 합성 UI · window.HansonOS 직결")
-                    put("html_content", "")
-                }
-            )
-        }
-
-        if (
-            gLower.contains("리버스") ||
-            gLower.contains("reverse") ||
-            gLower.contains("분석해서 스킬") ||
-            gLower.contains("스킬로 만들") ||
-            gLower.contains("프로토콜 학습") ||
-            gLower.contains("앱 분석") ||
-            gLower.contains("동작방식 학습")
-        ) {
-            val cleaned = g
-                .replace("리버스 엔지니어링", "")
-                .replace("리버스", "")
-                .replace("분석해서 스킬로 만들어줘", "")
-                .replace("스킬로 만들어줘", "")
-                .replace("프로토콜 학습해줘", "")
-                .replace("앱 분석해줘", "")
-                .replace("해줘", "")
-                .trim()
-                .ifBlank { "현재앱" }
-            return ModelTurnDecision(
-                observation = "[UARP 리버스 엔지니어링] '$cleaned'의 APK 바이너리(base.apk), 매니페스트 딥링크, Exported Activity 및 UI 프레임워크를 역분석하여 재사용 가능한 스킬로 합성합니다.",
-                subGoals = listOf(
-                    SubGoalItem("APK 바이너리 및 매니페스트 딥링크/Activity 역분석", SubGoalStatus.IN_PROGRESS),
-                    SubGoalItem("영구 앱 제어 스킬 합성 및 등록", SubGoalStatus.PENDING)
-                ),
-                toolName = "reverse_engineer_app",
-                toolArgs = JSONObject().put("app_query", cleaned)
-            )
-        }
-
-        // 0. Native Mobile OS CLI (`hanson ...`, `/cli ...`, `/sh ...`, `dumpsys`, `애니메이션`, `강제 종료`, `self-heal`)
-        if (
-            gLower.startsWith("hanson ") ||
-            gLower.startsWith("/cli ") ||
-            gLower.startsWith("/sh ") ||
-            gLower.contains("dumpsys") ||
-            gLower.contains("액티비티 스택") ||
-            gLower.contains("애니메이션 배속") ||
-            gLower.contains("자가 치유") ||
-            gLower.contains("self-heal")
-        ) {
-            val cliCmd = when {
-                gLower.contains("액티비티 스택") -> "top"
-                gLower.contains("애니메이션 배속") -> {
-                    val scale = Regex("[0-9.]+").find(g)?.value ?: "0.5"
-                    "setting put global animator_duration_scale $scale"
-                }
-                gLower.contains("자가 치유") || gLower.contains("self-heal") -> "self-heal"
-                else -> g.removePrefix("hanson ").removePrefix("/cli ").removePrefix("/sh ").trim()
+            val cleanLine = last.resultSummary.lines().firstOrNull()
+                ?.replace(Regex("\\[[^\\]]*\\]"), "")
+                ?.trim()
+                .orEmpty()
+            val naturalDone = when (last.toolName) {
+                "manage_app" -> "$currentAppName 화면을 열었어요. 여기서 무엇을 도와드릴까요?"
+                "click" -> "선택하신 항목을 눌렀어요. 지금 화면에서 이어서 할 작업을 말씀해 주세요."
+                "swipe" -> "화면을 이동했어요. 찾으시는 항목이 보이나요?"
+                "press_key" -> "화면을 전환했어요. 다음엔 어떻게 할까요?"
+                else -> cleanLine.ifBlank { "요청하신 작업을 마쳤어요. 더 필요한 게 있으신가요?" }
             }
             return ModelTurnDecision(
-                observation = "[Hanson Mobile OS CLI] 네이티브 OS CLI 명령('$cliCmd')을 실행합니다.",
-                subGoals = listOf(SubGoalItem("모바일 OS CLI ($cliCmd) 실행", SubGoalStatus.IN_PROGRESS)),
-                toolName = "os_cli_exec",
-                toolArgs = JSONObject().put("command", cliCmd)
+                observation = "작업 완료 및 대화 대기",
+                subGoals = listOf(SubGoalItem("작업 완료", SubGoalStatus.COMPLETED)),
+                toolName = "complete_task",
+                toolArgs = JSONObject().put("summary", naturalDone),
+                spokenReply = naturalDone
             )
         }
 
-        // 1. Notification reply / check
+        // 7. Notifications & Quick Reply
         if (gLower.contains("답장") || (gLower.contains("알림") && gLower.contains("보내"))) {
             val replyMsg = g.substringAfter("\"", "").substringBefore("\"", "")
-                .ifBlank { "확인했습니다. 잠시 후 연락드리겠습니다." }
+                .ifBlank { g.substringAfter("'", "").substringBefore("'", "") }
+            if (replyMsg.isBlank()) {
+                val q = "어떤 내용으로 답장을 보낼까요? 보낼 말씀을 편하게 이야기해 주세요."
+                return ModelTurnDecision(
+                    observation = "답장 메시지 내용 확인 요청",
+                    subGoals = listOf(SubGoalItem("답장 내용 확인", SubGoalStatus.IN_PROGRESS)),
+                    toolName = "ask_user",
+                    toolArgs = JSONObject().put("question", q),
+                    spokenReply = q
+                )
+            }
+            val spoken = "네, 화면을 전환하지 않고 바로 '$replyMsg'라고 답장을 보낼게요."
             return ModelTurnDecision(
-                observation = "수신된 메신저 알림의 RemoteInput 토큰을 통해 화면을 켜지 않고 즉시 답장을 전송합니다.",
-                subGoals = listOf(
-                    SubGoalItem("수신 알림 RemoteInput 세션 탐색 및 즉시 답장", SubGoalStatus.IN_PROGRESS),
-                    SubGoalItem("완료 보고", SubGoalStatus.PENDING)
-                ),
+                observation = "알림 즉시 답장 전송",
+                subGoals = listOf(SubGoalItem("알림 답장 전송", SubGoalStatus.IN_PROGRESS)),
                 toolName = "reply_notification",
                 toolArgs = JSONObject().apply {
                     put("target", "")
                     put("message", replyMsg)
-                }
+                },
+                spokenReply = spoken
             )
         }
 
-        if (gLower.contains("알림")) {
+        if (gLower.contains("알림") || (gLower.contains("카톡") && (gLower.contains("왔어") || gLower.contains("읽어") || gLower.contains("요약") || gLower.contains("확인")))) {
+            val spoken = "최근 도착한 알림과 메시지를 바로 확인해 볼게요."
             return ModelTurnDecision(
-                observation = "최근 가로챈 카카오톡·SMS·메신저 알림 세션을 조회합니다.",
-                subGoals = listOf(
-                    SubGoalItem("최근 수신 알림 목록 조회", SubGoalStatus.IN_PROGRESS),
-                    SubGoalItem("결과 요약", SubGoalStatus.PENDING)
-                ),
+                observation = "수신 알림 확인",
+                subGoals = listOf(SubGoalItem("최근 알림 조회", SubGoalStatus.IN_PROGRESS)),
                 toolName = "list_notifications",
-                toolArgs = JSONObject().put("only_replyable", false).put("limit", 10)
+                toolArgs = JSONObject().put("only_replyable", false).put("limit", 10),
+                spokenReply = spoken
             )
         }
 
-        // 2. Brightness / Volume / DND
+        // 8. Brightness / Volume / DND
         if (gLower.contains("밝기")) {
-            val num = Regex("\\d+").find(g)?.value?.toIntOrNull() ?: 180
+            val num = Regex("\\d+").find(g)?.value?.toIntOrNull()
+                ?: if (gLower.contains("어둡") || gLower.contains("낮춰") || gLower.contains("줄여")) 80 else 200
+            val spoken = "화면 밝기를 ${num}으로 조절할게요."
             return ModelTurnDecision(
-                observation = "시스템 화면 밝기 설정을 $num 으로 직접 변경합니다.",
-                subGoals = listOf(SubGoalItem("시스템 화면 밝기 제어", SubGoalStatus.IN_PROGRESS)),
+                observation = "화면 밝기 $num 설정",
+                subGoals = listOf(SubGoalItem("화면 밝기 조절", SubGoalStatus.IN_PROGRESS)),
                 toolName = "control_device_setting",
-                toolArgs = JSONObject().put("setting", "brightness").put("value", num.toString())
+                toolArgs = JSONObject().put("setting", "brightness").put("value", num.toString()),
+                spokenReply = spoken
             )
         }
 
         if (gLower.contains("볼륨") || gLower.contains("소리")) {
-            val num = Regex("\\d+").find(g)?.value?.toIntOrNull() ?: 50
+            val num = Regex("\\d+").find(g)?.value?.toIntOrNull()
+                ?: if (gLower.contains("줄여") || gLower.contains("낮춰") || gLower.contains("작게")) 25 else 65
+            val spoken = "미디어 소리를 ${num}%로 맞출게요."
             return ModelTurnDecision(
-                observation = "미디어 오디오 볼륨을 ${num}%로 변경합니다.",
-                subGoals = listOf(SubGoalItem("오디오 볼륨 조절", SubGoalStatus.IN_PROGRESS)),
+                observation = "볼륨 ${num}% 조절",
+                subGoals = listOf(SubGoalItem("볼륨 조절", SubGoalStatus.IN_PROGRESS)),
                 toolName = "control_device_setting",
-                toolArgs = JSONObject().put("setting", "volume_media").put("value", num.toString())
+                toolArgs = JSONObject().put("setting", "volume_media").put("value", num.toString()),
+                spokenReply = spoken
             )
         }
 
-        if (gLower.contains("방해금지") || gLower.contains("dnd")) {
-            val turnOff = gLower.contains("꺼") || gLower.contains("해제") || gLower.contains("off")
-            return ModelTurnDecision(
-                observation = "방해금지 모드(DND)를 ${if (turnOff) "해제" else "활성화"}합니다.",
-                subGoals = listOf(SubGoalItem("방해금지 모드 전환", SubGoalStatus.IN_PROGRESS)),
-                toolName = "control_device_setting",
-                toolArgs = JSONObject().put("setting", "dnd").put("value", if (turnOff) "off" else "on")
-            )
-        }
-
-        // 3. Alarm
-        if (gLower.contains("알람")) {
-            val numbers = Regex("\\d+").findAll(g).mapNotNull { it.value.toIntOrNull() }.toList()
-            val hour = numbers.getOrNull(0)?.coerceIn(0, 23) ?: 7
-            val minute = numbers.getOrNull(1)?.coerceIn(0, 59) ?: 30
-            return ModelTurnDecision(
-                observation = "시스템 시계 알람을 ${hour}시 ${minute}분으로 설정합니다.",
-                subGoals = listOf(SubGoalItem("시스템 알람 등록", SubGoalStatus.IN_PROGRESS)),
-                toolName = "set_alarm",
-                toolArgs = JSONObject().apply {
-                    put("hour", hour)
-                    put("minute", minute)
-                    put("label", "Hanson AI 알람")
-                }
-            )
-        }
-
-        // 4. Hardware keys
-        if (gLower.contains("홈 화면") || gLower == "홈" || gLower.contains("home")) {
-            return ModelTurnDecision(
-                observation = "전역 HOME 키를 주입하여 홈 화면으로 이동합니다.",
-                subGoals = listOf(SubGoalItem("홈 화면 이동", SubGoalStatus.IN_PROGRESS)),
-                toolName = "press_key",
-                toolArgs = JSONObject().put("key", "HOME")
-            )
-        }
-        if (gLower.contains("뒤로") || gLower.contains("back")) {
-            return ModelTurnDecision(
-                observation = "전역 BACK 키를 주입합니다.",
-                subGoals = listOf(SubGoalItem("뒤로가기 실행", SubGoalStatus.IN_PROGRESS)),
-                toolName = "press_key",
-                toolArgs = JSONObject().put("key", "BACK")
-            )
-        }
-        if (gLower.contains("빠른 설정") || gLower.contains("퀵세팅")) {
-            return ModelTurnDecision(
-                observation = "시스템 빠른 설정(Quick Settings) 패널을 엽니다.",
-                subGoals = listOf(SubGoalItem("빠른 설정 패널 열기", SubGoalStatus.IN_PROGRESS)),
-                toolName = "press_key",
-                toolArgs = JSONObject().put("key", "QUICK_SETTINGS")
-            )
-        }
-
-        // 5. App Launch
-        val appKeywords = listOf("카카오톡", "카톡", "유튜브", "설정", "크롬", "네이버", "갤러리", "카메라", "시계", "배달의민족", "쿠팡", "토스", "인스타그램")
-        val matchedApp = appKeywords.firstOrNull { gLower.contains(it) }
-        if (matchedApp != null || gLower.contains("열어") || gLower.contains("실행")) {
-            val targetApp = matchedApp ?: g.replace("열어줘", "").replace("실행해줘", "").replace("앱", "").trim()
-            return ModelTurnDecision(
-                observation = "QUERY_ALL_PACKAGES 권한으로 '$targetApp' 패키지를 찾아 즉시 실행합니다.",
-                subGoals = listOf(
-                    SubGoalItem("'$targetApp' 앱 실행", SubGoalStatus.IN_PROGRESS),
-                    SubGoalItem("실행 확인", SubGoalStatus.PENDING)
-                ),
-                toolName = "manage_app",
-                toolArgs = JSONObject().put("action", "launch").put("app_name", targetApp.ifBlank { "설정" })
-            )
-        }
-
-        // 6. Element click by matching text on screen
+        // 9. Match any visible UI element on the current screen by text/description
         val matchedElement = snapshot.indexedElements.firstOrNull { el ->
-            (el.text.isNotBlank() && g.contains(el.text, ignoreCase = true)) ||
-                (el.contentDesc.isNotBlank() && g.contains(el.contentDesc, ignoreCase = true))
+            (el.text.length >= 2 && g.contains(el.text, ignoreCase = true)) ||
+                (el.contentDesc.length >= 2 && g.contains(el.contentDesc, ignoreCase = true))
         }
         if (matchedElement != null) {
+            val label = matchedElement.text.ifBlank { matchedElement.contentDesc }.take(24)
+            val spoken = "네, 화면에 보이는 '$label' 항목을 누를게요."
             return ModelTurnDecision(
-                observation = "화면 UI 트리에서 '[${matchedElement.index}] ${matchedElement.text.ifBlank { matchedElement.contentDesc }}' 요소를 발견하여 탭합니다.",
-                subGoals = listOf(SubGoalItem("화면 요소 탭 실행", SubGoalStatus.IN_PROGRESS)),
+                observation = "'$label' 요소 탭",
+                subGoals = listOf(SubGoalItem("'$label' 탭 실행", SubGoalStatus.IN_PROGRESS)),
                 toolName = "click",
                 toolArgs = JSONObject().apply {
                     put("element_index", matchedElement.index)
-                    put("target_description", matchedElement.text.ifBlank { matchedElement.contentDesc })
-                }
+                    put("target_description", label)
+                },
+                spokenReply = spoken
             )
         }
 
-        // Default: summarize current UI snapshot & prompt for Gemini API key if multi-step vision reasoning is desired
+        // 10. Direct App Launch
+        if (targetAppName != null || gLower.contains("열어") || gLower.contains("실행")) {
+            val targetApp = targetAppName ?: g.replace("열어줘", "").replace("열어", "").replace("실행해줘", "").replace("실행", "").replace("앱", "").trim()
+            if (targetApp.isNotBlank()) {
+                val spoken = "네, ${targetApp}을 바로 열어드릴게요."
+                return ModelTurnDecision(
+                    observation = "$targetApp 실행",
+                    subGoals = listOf(SubGoalItem("$targetApp 실행", SubGoalStatus.IN_PROGRESS)),
+                    toolName = "manage_app",
+                    toolArgs = JSONObject().put("action", "launch").put("app_name", targetApp),
+                    spokenReply = spoken
+                )
+            }
+        }
+
+        // 11. Conversational Fallback: talk naturally about the current screen and ask how to help!
+        val topVisible = visibleLabels.take(4)
+        val conversationalQuestion = if (topVisible.isNotEmpty()) {
+            "지금 $currentAppName 화면에서 ${topVisible.joinToString(", ") { "'$it'" }} 항목들이 보이고 있어요. 이 중에서 어떤 걸 누를지, 아니면 다른 앱을 열지 편하게 말씀해 주세요."
+        } else {
+            "말씀하신 내용을 조금만 더 구체적으로 알려주시겠어요? 예를 들어 '유튜브에서 로파이 틀어줘'나 '첫 번째 거 눌러줘'처럼 말씀하시면 바로 조작할게요."
+        }
         return ModelTurnDecision(
-            observation = "현재 포그라운드 앱(${snapshot.activePackage.ifBlank { "감지 대기" }})에서 ${snapshot.indexedElements.size}개의 UI 요소를 스캔했습니다.",
-            subGoals = listOf(SubGoalItem("화면 스냅샷 및 UI 요소 진단 완료", SubGoalStatus.COMPLETED)),
-            toolName = "complete_task",
-            toolArgs = JSONObject().put(
-                "summary",
-                "현재 화면에서 ${snapshot.indexedElements.size}개의 UI 요소를 분석했습니다. 자유로운 멀티스텝 비전 에이전트 추론을 위해 [설정] 탭에서 Gemini API Key를 입력하거나, '카카오톡 열어줘', '밝기 180으로 설정', '최근 알림 답장해줘' 같은 즉시 제어 명령을 실행해 보세요."
-            )
+            observation = "사용자에게 다음 행동 확인",
+            subGoals = listOf(SubGoalItem("대화형 의도 확인", SubGoalStatus.COMPLETED)),
+            toolName = "ask_user",
+            toolArgs = JSONObject().put("question", conversationalQuestion),
+            spokenReply = conversationalQuestion
         )
     }
 }
