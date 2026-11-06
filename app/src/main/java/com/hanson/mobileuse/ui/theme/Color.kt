@@ -6,153 +6,108 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Color
 
 enum class HansonUiStyle(val label: String, val badge: String) {
-    TACTICAL_MONO("Tactical Mono (Nothing × TE)", "MONO"),
-    SPATIAL_GLASS("Spatial Titanium (Linear × Vision)", "GLASS"),
-    EDITORIAL_IVORY("Editorial Ivory (Claude × Ink)", "IVORY");
+    AHABOARD_PAPER("Ahaboard Paper (Pure Achromatic Light)", "PAPER"),
+    AHABOARD_CARBON("Ahaboard Carbon (Pure Achromatic Dark)", "CARBON");
 
     fun next(): HansonUiStyle = when (this) {
-        TACTICAL_MONO -> SPATIAL_GLASS
-        SPATIAL_GLASS -> EDITORIAL_IVORY
-        EDITORIAL_IVORY -> TACTICAL_MONO
+        AHABOARD_PAPER -> AHABOARD_CARBON
+        AHABOARD_CARBON -> AHABOARD_PAPER
     }
 }
 
 /**
- * Dynamic Multi-Concept Design System supporting all 3 generated UI Aesthetics:
- *  - Concept A: TACTICAL_MONO (Jet carbon, monospace precision, Teenage Engineering signal orange)
- *  - Concept B: SPATIAL_GLASS (Deep titanium slate, 1px specular borders, cyan/violet protocol nodes)
- *  - Concept C: EDITORIAL_IVORY (Warm alabaster paper, deep charcoal ink, sage verification badges)
+ * Pure Achromatic (무채색, 0% Hue Saturation) Design Tokens reverse-engineered from ahaboard.ai.
+ * Eliminates all chromatic noise (no cyan, violet, neon green, or orange).
+ * Relies strictly on luminance contrast, 1dp hairlines, and 3dp solid tactile ink lips.
  */
 object ObsidianColors {
-    var currentStyle by mutableStateOf(HansonUiStyle.SPATIAL_GLASS)
+    var currentStyle by mutableStateOf(HansonUiStyle.AHABOARD_PAPER)
 
+    var isDark: Boolean
+        get() = currentStyle == HansonUiStyle.AHABOARD_CARBON
+        set(value) {
+            currentStyle = if (value) HansonUiStyle.AHABOARD_CARBON else HansonUiStyle.AHABOARD_PAPER
+        }
+
+    fun toggleTheme() {
+        currentStyle = currentStyle.next()
+    }
+
+    // --paper: Main dot-grid canvas background
     val Background: Color
-        get() = when (currentStyle) {
-            HansonUiStyle.TACTICAL_MONO -> Color(0xFF09090B)
-            HansonUiStyle.SPATIAL_GLASS -> Color(0xFF070A10)
-            HansonUiStyle.EDITORIAL_IVORY -> Color(0xFFF6F4EE)
-        }
+        get() = if (isDark) Color(0xFF09090B) else Color(0xFFFAFAFA)
 
+    // --surface: Primary card surface (.brand-card)
     val Surface: Color
-        get() = when (currentStyle) {
-            HansonUiStyle.TACTICAL_MONO -> Color(0xFF121215)
-            HansonUiStyle.SPATIAL_GLASS -> Color(0xFF0E131F)
-            HansonUiStyle.EDITORIAL_IVORY -> Color(0xFFECE9E0)
-        }
+        get() = if (isDark) Color(0xFF121214) else Color(0xFFFFFFFF)
 
+    // --surface-subtle: Secondary / chip surface
     val SurfaceHigh: Color
-        get() = when (currentStyle) {
-            HansonUiStyle.TACTICAL_MONO -> Color(0xFF1A1A1F)
-            HansonUiStyle.SPATIAL_GLASS -> Color(0xFF161E2E)
-            HansonUiStyle.EDITORIAL_IVORY -> Color(0xFFE2DDD2)
-        }
+        get() = if (isDark) Color(0xFF18181B) else Color(0xFFF4F4F5)
 
+    // --surface-active: Pressed / elevated surface
     val SurfaceTop: Color
-        get() = when (currentStyle) {
-            HansonUiStyle.TACTICAL_MONO -> Color(0xFF232329)
-            HansonUiStyle.SPATIAL_GLASS -> Color(0xFF1E293B)
-            HansonUiStyle.EDITORIAL_IVORY -> Color(0xFFD6D0C4)
-        }
+        get() = if (isDark) Color(0xFF27272A) else Color(0xFFE4E4E7)
 
     val GlassWhite: Color
-        get() = when (currentStyle) {
-            HansonUiStyle.TACTICAL_MONO -> Color(0x10FFFFFF)
-            HansonUiStyle.SPATIAL_GLASS -> Color(0x1638BDF8)
-            HansonUiStyle.EDITORIAL_IVORY -> Color(0x0F141413)
-        }
+        get() = if (isDark) Color(0x12FFFFFF) else Color(0x0A09090B)
 
+    // --line: 1dp hairline border
     val GlassBorder: Color
-        get() = when (currentStyle) {
-            HansonUiStyle.TACTICAL_MONO -> Color(0x26FFFFFF)
-            HansonUiStyle.SPATIAL_GLASS -> Color(0x3838BDF8)
-            HansonUiStyle.EDITORIAL_IVORY -> Color(0x24141413)
-        }
+        get() = if (isDark) Color(0xFF27272A) else Color(0xFFE4E4E7)
 
+    // --line-strong: Emphasized hairline
     val GlassHighlight: Color
-        get() = when (currentStyle) {
-            HansonUiStyle.TACTICAL_MONO -> Color(0x33FFFFFF)
-            HansonUiStyle.SPATIAL_GLASS -> Color(0x4538BDF8)
-            HansonUiStyle.EDITORIAL_IVORY -> Color(0x30141413)
-        }
+        get() = if (isDark) Color(0xFF3F3F46) else Color(0xFFD4D4D8)
 
+    // --ink: Primary high-contrast monochrome ink (replaces all colorful accents)
     val Accent: Color
-        get() = when (currentStyle) {
-            HansonUiStyle.TACTICAL_MONO -> Color(0xFFFF5722) // Teenage Engineering Signal Orange
-            HansonUiStyle.SPATIAL_GLASS -> Color(0xFF38BDF8) // Spatial Cyan
-            HansonUiStyle.EDITORIAL_IVORY -> Color(0xFF141413) // Deep Charcoal Ink
-        }
+        get() = if (isDark) Color(0xFFFAFAFA) else Color(0xFF09090B)
 
     val AccentDim: Color
-        get() = when (currentStyle) {
-            HansonUiStyle.TACTICAL_MONO -> Color(0x28FF5722)
-            HansonUiStyle.SPATIAL_GLASS -> Color(0x2838BDF8)
-            HansonUiStyle.EDITORIAL_IVORY -> Color(0x18141413)
-        }
+        get() = if (isDark) Color(0x1FFAFAFA) else Color(0x1209090B)
 
+    // Secondary monochrome tone (strictly 0% saturation)
     val AccentPurple: Color
-        get() = when (currentStyle) {
-            HansonUiStyle.TACTICAL_MONO -> Color(0xFFD4D4D8) // Tactical Mono Silver
-            HansonUiStyle.SPATIAL_GLASS -> Color(0xFFA855F7) // Protocol Node Violet
-            HansonUiStyle.EDITORIAL_IVORY -> Color(0xFF3B5944) // Editorial Sage
-        }
+        get() = if (isDark) Color(0xFFD4D4D8) else Color(0xFF27272A)
 
     val AccentPurpleDim: Color
-        get() = when (currentStyle) {
-            HansonUiStyle.TACTICAL_MONO -> Color(0x22D4D4D8)
-            HansonUiStyle.SPATIAL_GLASS -> Color(0x24A855F7)
-            HansonUiStyle.EDITORIAL_IVORY -> Color(0x203B5944)
-        }
+        get() = if (isDark) Color(0x1FD4D4D8) else Color(0x1227272A)
 
     val TextPrimary: Color
-        get() = when (currentStyle) {
-            HansonUiStyle.TACTICAL_MONO -> Color(0xFFFAFAFA)
-            HansonUiStyle.SPATIAL_GLASS -> Color(0xFFF1F5F9)
-            HansonUiStyle.EDITORIAL_IVORY -> Color(0xFF141413)
-        }
+        get() = if (isDark) Color(0xFFFAFAFA) else Color(0xFF09090B)
 
     val TextSecondary: Color
-        get() = when (currentStyle) {
-            HansonUiStyle.TACTICAL_MONO -> Color(0xFFA1A1AA)
-            HansonUiStyle.SPATIAL_GLASS -> Color(0xFF94A3B8)
-            HansonUiStyle.EDITORIAL_IVORY -> Color(0xFF57534E)
-        }
+        get() = if (isDark) Color(0xFFA1A1AA) else Color(0xFF52525B)
 
     val TextMuted: Color
-        get() = when (currentStyle) {
-            HansonUiStyle.TACTICAL_MONO -> Color(0xFF71717A)
-            HansonUiStyle.SPATIAL_GLASS -> Color(0xFF64748B)
-            HansonUiStyle.EDITORIAL_IVORY -> Color(0xFF78716C)
-        }
+        get() = if (isDark) Color(0xFF71717A) else Color(0xFF71717A)
 
     val OnAccent: Color
-        get() = when (currentStyle) {
-            HansonUiStyle.TACTICAL_MONO -> Color(0xFFFFFFFF)
-            HansonUiStyle.SPATIAL_GLASS -> Color(0xFF06101E)
-            HansonUiStyle.EDITORIAL_IVORY -> Color(0xFFF6F4EE)
-        }
+        get() = if (isDark) Color(0xFF09090B) else Color(0xFFFAFAFA)
 
+    // Status tokens are also strictly achromatic grayscale
     val Success: Color
-        get() = when (currentStyle) {
-            HansonUiStyle.TACTICAL_MONO -> Color(0xFF10B981)
-            HansonUiStyle.SPATIAL_GLASS -> Color(0xFF34D399)
-            HansonUiStyle.EDITORIAL_IVORY -> Color(0xFF2E6F40)
-        }
+        get() = if (isDark) Color(0xFFFAFAFA) else Color(0xFF09090B)
 
     val SuccessDim: Color
-        get() = when (currentStyle) {
-            HansonUiStyle.TACTICAL_MONO -> Color(0x2410B981)
-            HansonUiStyle.SPATIAL_GLASS -> Color(0x2434D399)
-            HansonUiStyle.EDITORIAL_IVORY -> Color(0x202E6F40)
-        }
+        get() = if (isDark) Color(0x1FFAFAFA) else Color(0x1209090B)
 
-    val Warning: Color = Color(0xFFFBBF24)
-    val WarningDim: Color = Color(0x24FBBF24)
-    val Error: Color = Color(0xFFEF4444)
-    val ErrorDim: Color = Color(0x24EF4444)
+    val Warning: Color
+        get() = if (isDark) Color(0xFFA1A1AA) else Color(0xFF52525B)
+
+    val WarningDim: Color
+        get() = if (isDark) Color(0x1FA1A1AA) else Color(0x1452525B)
+
+    val Error: Color
+        get() = if (isDark) Color(0xFFD4D4D8) else Color(0xFF18181B)
+
+    val ErrorDim: Color
+        get() = if (isDark) Color(0x24D4D4D8) else Color(0x1618181B)
+
     val Divider: Color
-        get() = when (currentStyle) {
-            HansonUiStyle.TACTICAL_MONO -> Color(0x1FFFFFFF)
-            HansonUiStyle.SPATIAL_GLASS -> Color(0x2438BDF8)
-            HansonUiStyle.EDITORIAL_IVORY -> Color(0x1C141413)
-        }
+        get() = if (isDark) Color(0xFF27272A) else Color(0xFFE4E4E7)
+
+    val DotGridColor: Color
+        get() = if (isDark) Color(0x14FFFFFF) else Color(0x1409090B)
 }

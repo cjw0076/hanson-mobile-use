@@ -17,6 +17,7 @@ import com.hanson.mobileuse.paradigm.TeleportResult
 import com.hanson.mobileuse.paradigm.WorldModelGraph
 import com.hanson.mobileuse.service.FloatingHudService
 import com.hanson.mobileuse.service.HansonForegroundService
+import com.hanson.mobileuse.ui.theme.ObsidianColors
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -164,9 +165,9 @@ class MobileUseAgentEngine(
             return listOf(
                 LiveChatMessage(
                     sender = ChatSender.AGENT,
-                    text = "안녕하세요! Hanson × Google Artemis 상시 라이브 채팅 세션이 연결되었습니다. 다른 앱(카카오톡, 유튜브, 브라우저 등)을 사용하시는 중에도 플로팅 라이브 채팅창이나 이 화면에서 언제든 명령·질문을 이어가실 수 있습니다.",
-                    subtitle = "Runtime Live Session · :18888 Active",
-                    toolBadge = "LIVE READY"
+                    text = "할 일을 한 줄로 입력하거나 음성으로 말씀하세요. 모델 변경·권한 구성·음성 설정도 에이전트가 직접 처리합니다.",
+                    subtitle = "One-Touch Board · Active",
+                    toolBadge = "READY"
                 )
             )
         }
@@ -193,8 +194,8 @@ class MobileUseAgentEngine(
                 listOf(
                     LiveChatMessage(
                         sender = ChatSender.AGENT,
-                        text = "Hanson × Google Artemis 상시 라이브 채팅 런타임이 활성화되었습니다.",
-                        toolBadge = "LIVE READY"
+                        text = "원터치 보드가 준비되었습니다.",
+                        toolBadge = "READY"
                     )
                 )
             } else list
@@ -224,13 +225,169 @@ class MobileUseAgentEngine(
     fun clearLiveChat() {
         val welcome = LiveChatMessage(
             sender = ChatSender.AGENT,
-            text = "라이브 채팅 대화 내역을 초기화했습니다. 새로운 명령이나 질문을 입력해 주세요!",
-            subtitle = "Runtime Live Session",
-            toolBadge = "RESET"
+            text = "보드를 비웠습니다. 수행할 작업이나 설정을 지시해 주세요.",
+            subtitle = "One-Touch Board",
+            toolBadge = "CLEAR"
         )
         _chatMessages.value = listOf(welcome)
         persistChatMessages(_chatMessages.value)
         FloatingHudService.notifyChatUpdated(_chatMessages.value)
+    }
+
+    /**
+     * One-Touch Environment Auto-Setup:
+     * Automatically enables unrestricted capability governance, triggers OS-level `self-heal`
+     * (Accessibility, Notification Listener, Overlay), and refreshes permission state.
+     */
+    fun runOneTouchAutoSetup() {
+        scope.launch {
+            permissionHub.setUnrestrictedMode(true)
+            val healOutcome = toolHarness.execute(
+                toolName = "os_cli_exec",
+                args = JSONObject().put("subcommand", "self-heal"),
+                latestSnapshot = null
+            )
+            permissionHub.refreshStatus()
+            if (_config.value.autoShowFloatingHud) {
+                FloatingHudService.startIfPermitted(context)
+            }
+            val msgText = if (healOutcome.succeeded) {
+                "원터치 환경 자동 구성을 완료했습니다. (접근성·알림 리스너·오버레이·무제한 거버넌스 활성화)"
+            } else {
+                "권한 거버넌스를 무제한으로 전환하고 런타임 구성을 갱신했습니다."
+            }
+            appendChatMessage(
+                LiveChatMessage(
+                    sender = ChatSender.AGENT,
+                    text = msgText,
+                    subtitle = "1-Touch Self-Heal Completed",
+                    toolBadge = "AUTO-SETUP"
+                )
+            )
+            speakIfEnabled(msgText)
+        }
+    }
+
+    /**
+     * Handles user requests to change settings (model, voice/TTS, HUD, theme, permissions)
+     * directly through the agent without opening any settings screen.
+     */
+    private fun tryHandleAgentConfigCommand(prompt: String): Boolean {
+        val lower = prompt.lowercase(Locale.ROOT)
+        val isConfigIntent = listOf(
+            "모델", "바꿔", "변경", "전환", "켜줘", "꺼줘", "켜", "꺼",
+            "설정", "다크 모드", "라이트 모드", "화이트 모드", "음성", "목소리",
+            "플로팅", "오버레이", "권한", "자동 구성", "자가 치유", "원터치"
+        ).any { lower.contains(it) }
+        if (!isConfigIntent) return false
+
+        // 1. Auto-setup / permissions
+        if (lower.contains("권한") || lower.contains("자동 구성") || lower.contains("자가 치유") || lower.contains("환경 구성")) {
+            runOneTouchAutoSetup()
+            return true
+        }
+
+        // 2. Theme switching (Ahaboard Paper Light vs Carbon Dark)
+        if (lower.contains("다크 모드") || lower.contains("어둡게") || lower.contains("카본 모드")) {
+            ObsidianColors.isDark = true
+            appendChatMessage(
+                LiveChatMessage(
+                    sender = ChatSender.AGENT,
+                    text = "Ahaboard Carbon (무채색 다크) 모드로 전환했습니다.",
+                    subtitle = "Agent Self-Configuration",
+                    toolBadge = "CARBON"
+                )
+            )
+            return true
+        }
+        if (lower.contains("라이트 모드") || lower.contains("화이트 모드") || lower.contains("밝게") || lower.contains("페이퍼 모드")) {
+            ObsidianColors.isDark = false
+            appendChatMessage(
+                LiveChatMessage(
+                    sender = ChatSender.AGENT,
+                    text = "Ahaboard Paper (무채색 라이트) 모드로 전환했습니다.",
+                    subtitle = "Agent Self-Configuration",
+                    toolBadge = "PAPER"
+                )
+            )
+            return true
+        }
+
+        // 3. Voice / TTS toggle
+        if (lower.contains("음성") || lower.contains("목소리") || lower.contains("보이스")) {
+            val enable = !(lower.contains("꺼") || lower.contains("끄") || lower.contains("중지") || lower.contains("off"))
+            updateConfig(ttsVoiceReply = enable)
+            val reply = if (enable) "음성 동행(TTS) 응답을 켰습니다." else "음성 동행(TTS) 응답을 껐습니다."
+            appendChatMessage(
+                LiveChatMessage(
+                    sender = ChatSender.AGENT,
+                    text = reply,
+                    subtitle = "Agent Self-Configuration",
+                    toolBadge = if (enable) "VOICE ON" else "VOICE OFF"
+                )
+            )
+            if (enable) speakIfEnabled(reply)
+            return true
+        }
+
+        // 4. Floating HUD overlay toggle
+        if (lower.contains("플로팅") || lower.contains("오버레이") || lower.contains("hud")) {
+            val enable = !(lower.contains("꺼") || lower.contains("끄") || lower.contains("숨겨") || lower.contains("off"))
+            updateConfig(autoShowFloatingHud = enable)
+            if (enable) {
+                FloatingHudService.startIfPermitted(context)
+            } else {
+                FloatingHudService.stop(context)
+            }
+            appendChatMessage(
+                LiveChatMessage(
+                    sender = ChatSender.AGENT,
+                    text = if (enable) "플로팅 오버레이 보드를 활성화했습니다." else "플로팅 오버레이 보드를 숨겼습니다.",
+                    subtitle = "Agent Self-Configuration",
+                    toolBadge = if (enable) "HUD ON" else "HUD OFF"
+                )
+            )
+            return true
+        }
+
+        // 5. Model switching via natural language
+        val matchedModel: Pair<String, String>? = when {
+            lower.contains("argon") || lower.contains("아곤") || lower.contains("자비스") ->
+                "gemini-jarvis-argon" to "Gemini Jarvis Argon (최상위 에이전트 플래그십)"
+            lower.contains("3.8") && (lower.contains("pro") || lower.contains("프로")) ->
+                "gemini-3.8-pro-preview" to "Gemini 3.8 Pro Preview"
+            lower.contains("3.8") || (lower.contains("플래시") && !lower.contains("3.5")) ->
+                "gemini-3.8-flash-preview" to "Gemini 3.8 Flash Preview"
+            lower.contains("3.6") ->
+                "gemini-3.6-pro-preview" to "Gemini 3.6 Pro Preview"
+            lower.contains("3.5") || lower.contains("라이트") || lower.contains("lite") ->
+                "gemini-3.5-flash-lite-preview" to "Gemini 3.5 Flash-Lite Preview"
+            lower.contains("로보틱스") || lower.contains("robotics") ->
+                "gemini-robotics-er-1.6-preview" to "Gemini Robotics ER 1.6 Preview"
+            lower.contains("컴퓨터") || lower.contains("computer") ->
+                "gemini-2.5-computer-use-preview-10-2025" to "Gemini 2.5 Computer Use"
+            lower.contains("cli") || lower.contains("구독") || lower.contains("노트북") ->
+                Pair("laptop-cli-subscription", "노트북 CLI 구독 브리지 (API 키 불필요)")
+            else -> null
+        }
+
+        if (matchedModel != null) {
+            val (modelId, label) = matchedModel
+            updateConfig(modelName = modelId)
+            val reply = "엔진 모델을 [$label] ($modelId)로 즉시 전환했습니다."
+            appendChatMessage(
+                LiveChatMessage(
+                    sender = ChatSender.AGENT,
+                    text = reply,
+                    subtitle = "Agent Self-Configuration · No Settings Needed",
+                    toolBadge = "MODEL"
+                )
+            )
+            speakIfEnabled(reply)
+            return true
+        }
+
+        return false
     }
 
     /**
@@ -291,6 +448,11 @@ class MobileUseAgentEngine(
                     text = trimmedGoal
                 )
             )
+        }
+
+        // Agent Self-Configuration: handle model switch, voice toggle, HUD toggle, theme, or 1-touch setup directly
+        if (tryHandleAgentConfigCommand(trimmedGoal)) {
+            return
         }
 
         activeJob?.cancel()

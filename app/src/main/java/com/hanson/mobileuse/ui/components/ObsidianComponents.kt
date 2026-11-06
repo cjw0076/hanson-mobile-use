@@ -1,16 +1,19 @@
 package com.hanson.mobileuse.ui.components
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -23,7 +26,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -32,28 +38,83 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.hanson.mobileuse.ui.theme.ObsidianColors
 
+/**
+ * Ahaboard `.lb-paper` 24dp radial dot-grid background canvas.
+ */
+@Composable
+fun AhaboardDotGridBox(
+    modifier: Modifier = Modifier,
+    content: @Composable BoxScope.() -> Unit
+) {
+    val bgColor = ObsidianColors.Background
+    val dotColor = ObsidianColors.DotGridColor
+
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(bgColor)
+    ) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val stepPx = 24.dp.toPx()
+            val dotRadiusPx = 1.15.dp.toPx()
+            var x = stepPx / 2f
+            while (x < size.width) {
+                var y = stepPx / 2f
+                while (y < size.height) {
+                    drawCircle(
+                        color = dotColor,
+                        radius = dotRadiusPx,
+                        center = Offset(x, y)
+                    )
+                    y += stepPx
+                }
+                x += stepPx
+            }
+        }
+        content()
+    }
+}
+
+/**
+ * Ahaboard `.brand-card` with optional 3dp solid tactile bottom ink lip (`0 3px 0 0 var(--ink)`).
+ */
 @Composable
 fun GlassCard(
     modifier: Modifier = Modifier,
-    cornerRadius: Dp = 18.dp,
+    cornerRadius: Dp = 14.dp,
     borderColor: Color = ObsidianColors.GlassBorder,
     containerColor: Color = ObsidianColors.Surface,
-    contentPadding: PaddingValues = PaddingValues(16.dp),
+    tactileBottomLip: Boolean = false,
+    contentPadding: PaddingValues = PaddingValues(14.dp),
     content: @Composable ColumnScope.() -> Unit
 ) {
     val shape = RoundedCornerShape(cornerRadius)
+    val lipColor = ObsidianColors.Accent
     Surface(
         modifier = modifier
+            .then(
+                if (tactileBottomLip) {
+                    Modifier
+                        .padding(bottom = 3.dp)
+                        .drawBehind {
+                            val radiusPx = cornerRadius.toPx()
+                            val lipPx = 3.dp.toPx()
+                            drawRoundRect(
+                                color = lipColor,
+                                topLeft = Offset(0f, lipPx),
+                                size = Size(size.width, size.height),
+                                cornerRadius = CornerRadius(radiusPx, radiusPx)
+                            )
+                        }
+                } else {
+                    Modifier
+                }
+            )
             .clip(shape)
             .border(
                 BorderStroke(
-                    1.dp,
-                    Brush.verticalGradient(
-                        listOf(
-                            borderColor.copy(alpha = 0.55f),
-                            borderColor.copy(alpha = 0.15f)
-                        )
-                    )
+                    width = if (tactileBottomLip) 1.5.dp else 1.dp,
+                    color = if (tactileBottomLip) ObsidianColors.Accent else borderColor
                 ),
                 shape
             ),
@@ -73,19 +134,19 @@ fun GlassCard(
 fun StatusPill(
     label: String,
     active: Boolean,
-    activeColor: Color = ObsidianColors.Success,
-    inactiveColor: Color = ObsidianColors.Warning,
+    activeColor: Color = ObsidianColors.Accent,
+    inactiveColor: Color = ObsidianColors.TextMuted,
     onClick: (() -> Unit)? = null
 ) {
     val tint = if (active) activeColor else inactiveColor
-    val bg = if (active) activeColor.copy(alpha = 0.14f) else inactiveColor.copy(alpha = 0.14f)
+    val bg = if (active) ObsidianColors.SurfaceHigh else ObsidianColors.Surface
     val shape = RoundedCornerShape(999.dp)
 
     Row(
         modifier = Modifier
             .clip(shape)
             .background(bg)
-            .border(1.dp, tint.copy(alpha = 0.4f), shape)
+            .border(1.dp, ObsidianColors.GlassBorder, shape)
             .then(if (onClick != null) Modifier.clickable { onClick() } else Modifier)
             .padding(horizontal = 10.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -93,7 +154,7 @@ fun StatusPill(
     ) {
         Box(
             modifier = Modifier
-                .size(7.dp)
+                .size(6.dp)
                 .clip(CircleShape)
                 .background(tint)
         )
@@ -108,18 +169,18 @@ fun StatusPill(
 }
 
 @Composable
-fun CodeBadge(text: String, color: Color = ObsidianColors.Accent) {
+fun CodeBadge(text: String, color: Color = ObsidianColors.TextPrimary) {
     val shape = RoundedCornerShape(6.dp)
     Text(
         text = text,
         color = color,
         fontSize = 11.sp,
         fontFamily = FontFamily.Monospace,
-        fontWeight = FontWeight.Medium,
+        fontWeight = FontWeight.SemiBold,
         modifier = Modifier
             .clip(shape)
-            .background(color.copy(alpha = 0.12f))
-            .border(1.dp, color.copy(alpha = 0.28f), shape)
+            .background(ObsidianColors.SurfaceHigh)
+            .border(1.dp, ObsidianColors.GlassBorder, shape)
             .padding(horizontal = 7.dp, vertical = 2.dp)
     )
 }
