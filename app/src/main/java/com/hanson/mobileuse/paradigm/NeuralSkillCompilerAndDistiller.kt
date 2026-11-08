@@ -380,8 +380,8 @@ class NeuralSkillCompilerAndDistiller(
         val macroKey = "$intentSig|$skelHash"
 
         // 1. Check JIT Compiled Skill Macro with Precondition Guard
-        val macro = compiledMacroSteps[macroKey]
-        if (macro != null && macro.cumulativeCredit >= 0.55f) {
+        val macro = compiledMacroSteps[macroKey] ?: findFuzzyMatchingMacro(skelHash, intentSig, snapshot, dynamicParam)
+        if (macro != null && macro.cumulativeCredit >= 0.50f) {
             val resolvedDecision = tryInstantiateMacroStep(macro, goal, dynamicParam, snapshot)
             if (resolvedDecision != null) {
                 totalMacroHits++
@@ -399,6 +399,44 @@ class NeuralSkillCompilerAndDistiller(
         }
 
         return null
+    }
+
+    private fun findFuzzyMatchingMacro(
+        skelHash: String,
+        intentSig: String,
+        snapshot: AtomicSnapshot,
+        dynamicParam: String
+    ): CompiledMacroStep? {
+        // 1. Same skeleton hash where selector resolves on current snapshot
+        val skelMatches = compiledMacroSteps.values.filter { it.skeletonHash == skelHash && it.cumulativeCredit >= 0.50f }
+        for (candidate in skelMatches) {
+            if (candidate.selector == null || candidate.selector.resolveOnSnapshot(snapshot, dynamicParam) != null) {
+                return candidate
+            }
+        }
+
+        // 2. Compatible package signature with selector resolution
+        val pkgSig = intentSig.substringBefore('|')
+        for ((key, candidate) in compiledMacroSteps) {
+            if (key.startsWith("$pkgSig|") && candidate.cumulativeCredit >= 0.60f) {
+                if (candidate.selector?.resolveOnSnapshot(snapshot, dynamicParam) != null) {
+                    return candidate
+                }
+            }
+        }
+        return null
+    }
+
+    /**
+     * Checks whether a habituated skill macro is already compiled for the given goal and snapshot.
+     */
+    fun isMacroCompiled(goal: String, snapshot: AtomicSnapshot): Boolean {
+        val skelHash = ScreenSkeletonFingerprinter.computeSkeletonHash(snapshot)
+        val intentSig = ScreenSkeletonFingerprinter.classifyIntentSignature(snapshot.activePackage, goal)
+        val dynamicParam = ScreenSkeletonFingerprinter.extractDynamicParameter(goal)
+        val macroKey = "$intentSig|$skelHash"
+        val macro = compiledMacroSteps[macroKey] ?: findFuzzyMatchingMacro(skelHash, intentSig, snapshot, dynamicParam)
+        return macro != null && macro.cumulativeCredit >= 0.50f
     }
 
     private fun tryInstantiateMacroStep(

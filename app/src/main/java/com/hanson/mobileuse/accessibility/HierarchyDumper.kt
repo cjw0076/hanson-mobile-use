@@ -23,6 +23,11 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.min
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+
+typealias AtomicUiSnapshot = AtomicSnapshot
 
 data class AtomicSnapshot(
     val timestampMs: Long = System.currentTimeMillis(),
@@ -93,6 +98,8 @@ object HierarchyDumper {
     private const val TAG = "HierarchyDumper"
     private const val ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT = 3
 
+    val perceptionMutex = Mutex()
+
     fun getScreenDimensions(context: Context): Pair<Int, Int> {
         return try {
             val dm = context.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
@@ -120,6 +127,26 @@ object HierarchyDumper {
     }
 
     fun captureAtomicSnapshot(
+        service: AccessibilityService,
+        includeScreenshot: Boolean = true,
+        filterInvisible: Boolean = true,
+        jpegQuality: Int = 78
+    ): AtomicSnapshot = runBlocking {
+        perceptionMutex.withLock {
+            captureAtomicSnapshotInternal(service, includeScreenshot, filterInvisible, jpegQuality)
+        }
+    }
+
+    suspend fun captureAtomicSnapshotSuspend(
+        service: AccessibilityService,
+        includeScreenshot: Boolean = true,
+        filterInvisible: Boolean = true,
+        jpegQuality: Int = 78
+    ): AtomicSnapshot = perceptionMutex.withLock {
+        captureAtomicSnapshotInternal(service, includeScreenshot, filterInvisible, jpegQuality)
+    }
+
+    private fun captureAtomicSnapshotInternal(
         service: AccessibilityService,
         includeScreenshot: Boolean = true,
         filterInvisible: Boolean = true,

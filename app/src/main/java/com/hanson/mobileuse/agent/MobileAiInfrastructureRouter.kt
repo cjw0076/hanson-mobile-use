@@ -32,6 +32,12 @@ enum class MobileAiRouteTier(val badge: String, val labelKo: String) {
     CLOUD_GEMINI_VLM("GEMINI-CLOUD", "Google Gemini 3.8 / Argon 클라우드 VLM")
 }
 
+enum class TaskComplexity {
+    SIMPLE_NAVIGATION,
+    INTERACTIVE_TASK,
+    COMPLEX_REASONING
+}
+
 data class MobileAiInfrastructureState(
     val activeTier: MobileAiRouteTier = MobileAiRouteTier.AUTO_SMART,
     val googleAiCoreInstalled: Boolean = false,
@@ -226,6 +232,67 @@ class MobileAiInfrastructureRouter(
     }
 
     /**
+     * Dynamically estimates task complexity for intelligent multi-model routing.
+     *
+     * - SIMPLE_NAVIGATION: Single-step, trivial navigation, volume/brightness/settings toggles, or direct app opening.
+     * - INTERACTIVE_TASK: Standard multi-step interactive app tasks, in-app search, form-filling, or messaging.
+     * - COMPLEX_REASONING: Deep analysis, comparison, code canvas visualization, app reverse engineering, or compound multi-goal tasks.
+     */
+    fun estimateTaskComplexity(prompt: String, snapshot: AtomicSnapshot? = null): TaskComplexity {
+        val p = prompt.trim()
+        val pLower = p.lowercase()
+
+        // 1. COMPLEX_REASONING: analytical reasoning, code canvas, reverse engineering, compound subgoals
+        val complexKeywords = listOf(
+            "분석", "비교", "요약", "정리", "추론", "이유", "계획", "전략", "코드", "시각화",
+            "캔버스", "canvas", "차트", "그래프", "svg", "draw", "html", "javascript", "script",
+            "크래프트", "클린룸", "리버스", "구조 파악", "설계", "해석", "판단", "평가",
+            "analyze", "compare", "summarize", "reason", "plan", "strategy", "code", "chart"
+        )
+        if (complexKeywords.any { pLower.contains(it) }) {
+            return TaskComplexity.COMPLEX_REASONING
+        }
+
+        val compoundDelimiters = listOf("동시에", "하면서", ";", "||", "하고 그 다음", "하고 나서", "후에")
+        if (compoundDelimiters.any { pLower.contains(it) }) {
+            return TaskComplexity.COMPLEX_REASONING
+        }
+
+        if (p.length > 70 && (p.count { it == ',' || it == '.' || it == '?' } >= 2)) {
+            return TaskComplexity.COMPLEX_REASONING
+        }
+
+        if (snapshot != null && snapshot.indexedElements.size > 55 && p.length > 40) {
+            return TaskComplexity.COMPLEX_REASONING
+        }
+
+        // 2. SIMPLE_NAVIGATION: single-step hardware controls, navigation, quick toggles, simple app launches
+        val simpleNavKeywords = listOf(
+            "뒤로", "뒤로가기", "back", "홈", "홈으로", "home",
+            "소리", "볼륨", "음량", "volume", "음소거",
+            "밝기", "brightness", "와이파이", "wifi", "블루투스", "bluetooth",
+            "스크롤", "내려", "올려", "scroll down", "scroll up", "위로", "아래로",
+            "시간", "배터리", "날씨", "몇 시", "몇 %", "상태 확인"
+        )
+        if (simpleNavKeywords.any { pLower.contains(it) } && p.length <= 35) {
+            return TaskComplexity.SIMPLE_NAVIGATION
+        }
+
+        val simpleOpenClose = listOf("열어", "실행", "켜줘", "open", "launch", "닫아", "종료", "close")
+        val isSimpleOpen = simpleOpenClose.any { pLower.contains(it) } && p.length <= 22 && !pLower.contains("검색") && !pLower.contains("보내")
+        if (isSimpleOpen) {
+            return TaskComplexity.SIMPLE_NAVIGATION
+        }
+
+        if (p.length <= 15 && (pLower.contains("눌러") || pLower.contains("터치") || pLower.contains("클릭") || pLower.contains("탭"))) {
+            return TaskComplexity.SIMPLE_NAVIGATION
+        }
+
+        // 3. Default: INTERACTIVE_TASK
+        return TaskComplexity.INTERACTIVE_TASK
+    }
+
+    /**
      * Routes a user goal/utterance across the best available AI infrastructure tier:
      * 1. Infrastructure / Assistant Delegation intents (e.g. Perplexity, ChatGPT, Bixby, AICore status)
      * 2. Cloud Gemini VLM (if API key is configured and cloud tier is active)
@@ -262,8 +329,89 @@ class MobileAiInfrastructureRouter(
         val tier = _state.value.activeTier
         val hasApiKey = apiKey.trim().isNotEmpty()
 
-        // 1. Cloud Gemini Frontier VLM (when API key is set and user didn't force on-device only)
-        if (hasApiKey && (tier == MobileAiRouteTier.AUTO_SMART || tier == MobileAiRouteTier.CLOUD_GEMINI_VLM)) {
+        // 1. AUTO_SMART Dynamic Complexity Multi-Model Routing
+        if (tier == MobileAiRouteTier.AUTO_SMART) {
+            val complexity = estimateTaskComplexity(goal, snapshot)
+            when (complexity) {
+                TaskComplexity.SIMPLE_NAVIGATION -> {
+                    // Route SIMPLE_NAVIGATION to on-device AICore Nano or gemini-3.5-flash-lite
+                    if (_state.value.googleAiCoreInstalled) {
+                        val nanoDecision = inferWithAiCoreGeminiNano(
+                            goal = goal,
+                            iteration = iteration,
+                            snapshot = snapshot,
+                            historySteps = historySteps,
+                            previousPlan = previousPlan,
+                            chatHistory = chatHistory
+                        )
+                        if (nanoDecision != null) {
+                            _state.update { it.copy(lastUsedBackendBadge = "S25-NPU-NANO") }
+                            return@withContext nanoDecision
+                        }
+                    }
+                    if (hasApiKey) {
+                        val cloudDecision = runCatching {
+                            cloudClient.decideNextAction(
+                                apiKey = apiKey,
+                                modelName = "gemini-3.5-flash-lite",
+                                goal = goal,
+                                iteration = iteration,
+                                snapshot = snapshot,
+                                historySteps = historySteps,
+                                previousPlan = previousPlan,
+                                chatHistory = chatHistory
+                            )
+                        }.getOrNull()
+                        if (cloudDecision != null) {
+                            _state.update { it.copy(lastUsedBackendBadge = "GEMINI-3.5-FLASH-LITE") }
+                            return@withContext cloudDecision
+                        }
+                    }
+                }
+                TaskComplexity.INTERACTIVE_TASK -> {
+                    // Route INTERACTIVE_TASK to gemini-3.8-flash
+                    if (hasApiKey) {
+                        val cloudDecision = runCatching {
+                            cloudClient.decideNextAction(
+                                apiKey = apiKey,
+                                modelName = "gemini-3.8-flash",
+                                goal = goal,
+                                iteration = iteration,
+                                snapshot = snapshot,
+                                historySteps = historySteps,
+                                previousPlan = previousPlan,
+                                chatHistory = chatHistory
+                            )
+                        }.getOrNull()
+                        if (cloudDecision != null) {
+                            _state.update { it.copy(lastUsedBackendBadge = "GEMINI-3.8-FLASH") }
+                            return@withContext cloudDecision
+                        }
+                    }
+                }
+                TaskComplexity.COMPLEX_REASONING -> {
+                    // Route COMPLEX_REASONING to gemini-4-argon
+                    if (hasApiKey) {
+                        val cloudDecision = runCatching {
+                            cloudClient.decideNextAction(
+                                apiKey = apiKey,
+                                modelName = "gemini-4-argon",
+                                goal = goal,
+                                iteration = iteration,
+                                snapshot = snapshot,
+                                historySteps = historySteps,
+                                previousPlan = previousPlan,
+                                chatHistory = chatHistory
+                            )
+                        }.getOrNull()
+                        if (cloudDecision != null) {
+                            _state.update { it.copy(lastUsedBackendBadge = "GEMINI-4-ARGON") }
+                            return@withContext cloudDecision
+                        }
+                    }
+                }
+            }
+        } else if (hasApiKey && tier == MobileAiRouteTier.CLOUD_GEMINI_VLM) {
             val cloudDecision = runCatching {
                 cloudClient.decideNextAction(
                     apiKey = apiKey,

@@ -17,27 +17,42 @@ import androidx.core.app.NotificationCompat
 import com.hanson.mobileuse.accessibility.HansonAccessibilityService
 import com.hanson.mobileuse.notification.HansonNotificationListenerService
 import com.hanson.mobileuse.notification.RemoteInputSessionCache
+import android.provider.Settings
+import android.util.Log
 import com.hanson.mobileuse.ui.MainActivity
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import org.json.JSONObject
 
 /**
  * Tier 2 Immortal Foreground Watchdog Service (`specialUse`).
  * Keeps the Mobile-Use AI daemon alive in the background, maintains NotificationListener binding,
- * evicts expired `RemoteInput` tokens every 60s, and provides an optional partial WakeLock during
- * active multi-step agent runs.
+ * evicts expired `RemoteInput` tokens every 60s, provides an optional partial WakeLock during
+ * active multi-step agent runs, and runs a coroutine watchdog for automatic accessibility self-healing.
  */
 class HansonForegroundService : Service() {
 
     companion object {
+        private const val TAG = "HansonFgService"
         const val CHANNEL_ID = "hanson_mobile_use_daemon"
         const val NOTIFICATION_ID = 10042
         const val ACTION_STOP_AGENT = "com.hanson.mobileuse.ACTION_STOP_AGENT"
         private const val WATCHDOG_INTERVAL_MS = 60_000L
+        private const val A11Y_WATCHDOG_INTERVAL_MS = 10_000L
 
         private val _isRunning = MutableStateFlow(false)
         val isRunning: StateFlow<Boolean> = _isRunning.asStateFlow()
+
+        private val _lastSelfHealingAttemptMs = MutableStateFlow(0L)
+        val lastSelfHealingAttemptMs: StateFlow<Long> = _lastSelfHealingAttemptMs.asStateFlow()
 
         var onEmergencyStopRequested: (() -> Unit)? = null
 
@@ -59,10 +74,60 @@ class HansonForegroundService : Service() {
             } catch (_: Exception) {
             }
         }
+
+        /**
+         * Checks if HansonAccessibilityService is active and triggers self-healing if disconnected.
+         * Attempts both direct Settings.Secure restoration and OS CLI daemon/shell restoration.
+         */
+        fun initiateAccessibilitySelfHealing(context: Context): Boolean {
+            _lastSelfHealingAttemptMs.value = System.currentTimeMillis()
+            val expectedService = "${context.packageName}/${HansonAccessibilityService::class.java.name}"
+            var healed = false
+
+            // 1. Direct Settings.Secure update if app has WRITE_SECURE_SETTINGS
+            try {
+                val cr = context.contentResolver
+                val current = Settings.Secure.getString(cr, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: ""
+                val target = if (current.isBlank()) {
+                    expectedService
+                } else if (!current.contains(expectedService)) {
+                    "$current:$expectedService"
+                } else {
+                    current
+                }
+                Settings.Secure.putString(cr, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, target)
+                Settings.Secure.putInt(cr, Settings.Secure.ACCESSIBILITY_ENABLED, 1)
+                healed = true
+                Log.i(TAG, "Self-healing applied via Settings.Secure: $target")
+            } catch (e: Throwable) {
+                Log.d(TAG, "Direct Settings.Secure write skipped (${e.message}), escalating to OS CLI")
+            }
+
+            // 2. Escalate to OS CLI daemon (:18890) / in-process HansonOsCliMain self-heal
+            try {
+                val harness = com.hanson.mobileuse.agent.AgentToolExecutionHarness(context)
+                val outcome = harness.execute(
+                    toolName = "os_cli_exec",
+                    args = JSONObject().put("command", "self-heal"),
+                    latestSnapshot = null
+                )
+                if (outcome.succeeded) {
+                    healed = true
+                    Log.i(TAG, "Self-healing executed via OS CLI: ${outcome.outputText}")
+                }
+            } catch (e: Throwable) {
+                Log.w(TAG, "OS CLI self-healing execution error: ${e.message}")
+            }
+
+            return healed
+        }
     }
 
     private val handler = Handler(Looper.getMainLooper())
     private var wakeLock: PowerManager.WakeLock? = null
+    private val serviceJob = SupervisorJob()
+    private val serviceScope = CoroutineScope(Dispatchers.IO + serviceJob)
+    private var a11yWatchdogJob: Job? = null
 
     private val watchdogRunnable = object : Runnable {
         override fun run() {
@@ -87,6 +152,34 @@ class HansonForegroundService : Service() {
         }
         _isRunning.value = true
         handler.post(watchdogRunnable)
+        startAccessibilityWatchdog()
+    }
+
+    private fun startAccessibilityWatchdog() {
+        a11yWatchdogJob?.cancel()
+        a11yWatchdogJob = serviceScope.launch {
+            while (isActive) {
+                delay(A11Y_WATCHDOG_INTERVAL_MS)
+                if (!HansonAccessibilityService.isServiceActive()) {
+                    Log.w(TAG, "Watchdog: HansonAccessibilityService is inactive! Initiating self-healing...")
+                    initiateAccessibilitySelfHealing(this@HansonForegroundService)
+                    updateNotification()
+                }
+            }
+        }
+    }
+
+    private fun updateNotification(statusText: String? = null) {
+        try {
+            val text = statusText ?: if (HansonAccessibilityService.isServiceActive()) {
+                "Artemis Bridge (:18888) · A11y 정상 연결"
+            } else {
+                "A11y 재연결 대기 및 자동 치유 중..."
+            }
+            val nm = getSystemService(NotificationManager::class.java)
+            nm?.notify(NOTIFICATION_ID, buildNotification(text))
+        } catch (_: Throwable) {
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -98,6 +191,8 @@ class HansonForegroundService : Service() {
 
     override fun onDestroy() {
         handler.removeCallbacks(watchdogRunnable)
+        a11yWatchdogJob?.cancel()
+        serviceJob.cancel()
         releaseWakeLock()
         _isRunning.value = false
         super.onDestroy()

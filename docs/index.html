@@ -1,0 +1,1737 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HANSON — Orchestrate Mobile-Use Agents Like a Swarm</title>
+  <meta name="description" content="Beyond Computer-Use. Astra/Argon Mobile I/O, Opus 5.5 Live Code Canvas, JEV Router FG/BG Parallel Orchestration, and Beyond-Habit 12ms System-1 Self-Distillation for Android." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --paper: #F8F9FA;
+      --paper-elev: #FFFFFF;
+      --paper-subtle: #F1F3F5;
+      --ink: #121417;
+      --ink-secondary: #495057;
+      --muted: #868E96;
+      --line: #DEE2E6;
+      --sel-blue: #0D99FF;
+      --guide-red: #F24822;
+      --emerald: #10B981;
+      --violet: #7C3AED;
+      --amber: #F59E0B;
+      --ruler-bg: #2C2C2C;
+      --ruler-line: #3A3A3A;
+    }
+
+    body.dark-mode {
+      --paper: #0B0C0E;
+      --paper-elev: #131519;
+      --paper-subtle: #1A1D23;
+      --ink: #F8F9FA;
+      --ink-secondary: #ADB5BD;
+      --muted: #6C757D;
+      --line: #262A32;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html, body {
+      background: var(--paper);
+      color: var(--ink);
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Pretendard", system-ui, sans-serif;
+      overflow-x: clip;
+      -webkit-font-smoothing: antialiased;
+      scroll-behavior: smooth;
+      transition: background-color 0.25s ease, color 0.25s ease;
+    }
+
+    /* =========================================================================
+       1. SWARM CAD / FIGMA RULERS & LIVE SELECTION OVERLAY
+       ========================================================================= */
+    .ruler {
+      position: fixed;
+      z-index: 90;
+      background: var(--ruler-bg);
+      pointer-events: none;
+      user-select: none;
+    }
+    .ruler-top {
+      top: 0;
+      left: 20px;
+      right: 0;
+      height: 20px;
+      border-bottom: 1px solid var(--ruler-line);
+    }
+    .ruler-left {
+      top: 20px;
+      left: 0;
+      bottom: 0;
+      width: 20px;
+      border-right: 1px solid var(--ruler-line);
+    }
+    .ruler-corner {
+      position: fixed;
+      z-index: 91;
+      top: 0;
+      left: 0;
+      width: 20px;
+      height: 20px;
+      background: var(--ruler-bg);
+      border-right: 1px solid var(--ruler-line);
+      border-bottom: 1px solid var(--ruler-line);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font: 600 8px 'JetBrains Mono', monospace;
+      color: #8C8C8C;
+    }
+
+    #swarm-overlay-canvas {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      pointer-events: none;
+      z-index: 80;
+    }
+
+    /* Blueprint Architectural Grid Lines */
+    .page-shell {
+      position: relative;
+      padding-left: 20px;
+      padding-top: 20px;
+      background-image:
+        linear-gradient(to right, rgba(18, 20, 23, 0.04) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(18, 20, 23, 0.04) 1px, transparent 1px);
+      background-size: 48px 48px;
+    }
+    body.dark-mode .page-shell {
+      background-image:
+        linear-gradient(to right, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
+    }
+
+    .container {
+      max-width: 1240px;
+      margin: 0 auto;
+      border-left: 1px solid var(--line);
+      border-right: 1px solid var(--line);
+      position: relative;
+    }
+
+    /* =========================================================================
+       2. STICKY SWARM NAVIGATION BAR
+       ========================================================================= */
+    .nav-sticky {
+      position: sticky;
+      top: 20px;
+      z-index: 70;
+      background: rgba(248, 249, 250, 0.88);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--line);
+    }
+    body.dark-mode .nav-sticky {
+      background: rgba(11, 12, 14, 0.88);
+    }
+    .nav-inner {
+      max-width: 1240px;
+      margin: 0 auto;
+      height: 64px;
+      padding: 0 28px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-left: 1px solid var(--line);
+      border-right: 1px solid var(--line);
+    }
+    .brand-cluster {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      text-decoration: none;
+      color: var(--ink);
+    }
+    .brand-mark {
+      width: 28px;
+      height: 28px;
+      border-radius: 7px;
+      background: var(--ink);
+      color: var(--paper);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font: 800 13px 'JetBrains Mono', monospace;
+      letter-spacing: -0.04em;
+    }
+    .brand-title {
+      font-weight: 800;
+      font-size: 17px;
+      letter-spacing: -0.03em;
+    }
+    .brand-badge {
+      font: 600 11px 'JetBrains Mono', monospace;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: var(--paper-subtle);
+      border: 1px solid var(--line);
+      color: var(--ink-secondary);
+    }
+
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 24px;
+    }
+    .nav-links a {
+      text-decoration: none;
+      color: var(--ink-secondary);
+      font-size: 13.5px;
+      font-weight: 500;
+      transition: color 0.15s;
+    }
+    .nav-links a:hover {
+      color: var(--ink);
+    }
+
+    .nav-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 9px 16px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      text-decoration: none;
+      cursor: pointer;
+      border: 1px solid var(--line);
+      background: var(--paper-elev);
+      color: var(--ink);
+      transition: transform 0.12s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+    }
+    .btn:hover {
+      border-color: var(--ink);
+      transform: translateY(-1px);
+      box-shadow: 0 3px 0 0 var(--ink);
+    }
+    .btn-primary {
+      background: var(--ink);
+      color: var(--paper);
+      border-color: var(--ink);
+    }
+    .btn-primary:hover {
+      box-shadow: 0 3px 0 0 var(--sel-blue);
+      border-color: var(--sel-blue);
+    }
+
+    /* =========================================================================
+       3. HERO SECTION (SWARM-SITE SPLIT LAYOUT: EDITORIAL LEFT + LIVE DAG RIGHT)
+       ========================================================================= */
+    .hero-grid {
+      display: grid;
+      grid-template-columns: 1.12fr 0.88fr;
+      border-bottom: 1px solid var(--line);
+      min-height: 610px;
+    }
+    @media (max-width: 960px) {
+      .hero-grid { grid-template-columns: 1fr; }
+      .nav-links { display: none; }
+    }
+    .hero-left {
+      padding: 64px 48px;
+      border-right: 1px solid var(--line);
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      position: relative;
+    }
+    .eyebrow-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      width: fit-content;
+      padding: 5px 12px;
+      border-radius: 999px;
+      background: var(--paper-elev);
+      border: 1px solid var(--line);
+      font: 600 11.5px 'JetBrains Mono', monospace;
+      color: var(--ink);
+      margin-bottom: 24px;
+    }
+    .pulse-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--guide-red);
+      box-shadow: 0 0 0 4px rgba(242, 72, 34, 0.2);
+      animation: pulse 1.8s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { transform: scale(1); opacity: 1; }
+      50% { transform: scale(1.25); opacity: 0.7; }
+    }
+
+    .hero-h1 {
+      font-size: clamp(38px, 5vw, 62px);
+      font-weight: 800;
+      line-height: 1.04;
+      letter-spacing: -0.04em;
+      margin-bottom: 22px;
+    }
+    .hero-h1 .highlight-box {
+      position: relative;
+      display: inline-block;
+      padding: 0 6px;
+      border: 1.5px solid var(--sel-blue);
+      background: rgba(13, 153, 255, 0.08);
+    }
+    .hero-h1 .highlight-box::after {
+      content: "618 × 74";
+      position: absolute;
+      bottom: -18px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: var(--sel-blue);
+      color: #fff;
+      font: 600 10px/14px 'Inter', sans-serif;
+      padding: 1px 5px;
+      border-radius: 2px;
+      white-space: nowrap;
+    }
+
+    .hero-lead {
+      font-size: 17.5px;
+      line-height: 1.62;
+      color: var(--ink-secondary);
+      max-width: 560px;
+      margin-bottom: 32px;
+    }
+
+    .hero-cta-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-bottom: 42px;
+    }
+    .btn-lg {
+      padding: 14px 24px;
+      font-size: 14.5px;
+      border-radius: 9px;
+    }
+
+    .hero-metrics {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      padding-top: 24px;
+      border-top: 1px dashed var(--line);
+    }
+    .metric-item .val {
+      font: 800 22px 'JetBrains Mono', monospace;
+      color: var(--ink);
+    }
+    .metric-item .lbl {
+      font-size: 11.5px;
+      color: var(--muted);
+      margin-top: 3px;
+    }
+
+    /* Hero Right: Live Swarm Orchestration DAG Node Tree */
+    .hero-right {
+      padding: 40px 32px;
+      background: var(--paper-subtle);
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      position: relative;
+      overflow: hidden;
+    }
+    .dag-card-root {
+      background: var(--ink);
+      color: var(--paper);
+      padding: 16px 20px;
+      border-radius: 10px;
+      font-family: 'JetBrains Mono', monospace;
+      box-shadow: 0 10px 25px rgba(0,0,0,0.12);
+      position: relative;
+      z-index: 2;
+    }
+    .dag-card-root .fn {
+      font-size: 14px;
+      font-weight: 700;
+      color: #8FC9D6;
+    }
+    .dag-card-root .sub {
+      font-size: 11.5px;
+      color: #9DA2A9;
+      margin-top: 4px;
+    }
+    .dag-connector {
+      height: 32px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      position: relative;
+    }
+    .dag-connector::before {
+      content: "";
+      width: 2px;
+      height: 100%;
+      background: var(--line);
+    }
+    .dag-workers-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      position: relative;
+      z-index: 2;
+    }
+    .worker-node {
+      background: var(--paper-elev);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 14px 16px;
+      transition: all 0.2s ease;
+      position: relative;
+      cursor: pointer;
+    }
+    .worker-node:hover, .worker-node.active-selected {
+      border-color: var(--sel-blue);
+      box-shadow: 0 0 0 1px var(--sel-blue);
+    }
+    .worker-node .w-name {
+      font: 700 12.5px 'JetBrains Mono', monospace;
+      color: var(--ink);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .worker-node .w-role {
+      font-size: 11.5px;
+      color: var(--ink-secondary);
+      margin-top: 4px;
+    }
+    .worker-node .w-status {
+      font: 600 11px 'JetBrains Mono', monospace;
+      margin-top: 8px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      display: inline-block;
+    }
+
+    /* =========================================================================
+       4. CLAUDE OPUS 5.5 MAX — MOTION GRAPHIC COMMERCIAL THEATER
+       ========================================================================= */
+    .section-header {
+      padding: 48px 48px 28px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 20px;
+    }
+    .section-tag {
+      font: 700 11px 'JetBrains Mono', monospace;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--guide-red);
+      margin-bottom: 8px;
+    }
+    .section-title {
+      font-size: clamp(26px, 3.2vw, 38px);
+      font-weight: 800;
+      letter-spacing: -0.03em;
+    }
+
+    .theater-wrapper {
+      padding: 36px 48px 48px;
+      border-bottom: 1px solid var(--line);
+      background: var(--paper-subtle);
+    }
+    @media (max-width: 768px) {
+      .hero-left, .section-header, .theater-wrapper { padding: 28px 20px; }
+    }
+
+    .cinema-frame {
+      background: #07080A;
+      border: 1.5px solid var(--ink);
+      border-radius: 16px;
+      overflow: hidden;
+      box-shadow: 0 24px 60px rgba(0, 0, 0, 0.22);
+      position: relative;
+    }
+    .cinema-topbar {
+      height: 42px;
+      background: #111318;
+      border-bottom: 1px solid #222630;
+      padding: 0 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      color: #E9ECEF;
+      font: 600 11.5px 'JetBrains Mono', monospace;
+    }
+    .cinema-dots {
+      display: flex;
+      gap: 6px;
+    }
+    .cinema-dots span {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #343A40;
+    }
+    .cinema-dots span:nth-child(1) { background: #F24822; }
+    .cinema-dots span:nth-child(2) { background: #F59E0B; }
+    .cinema-dots span:nth-child(3) { background: #10B981; }
+
+    #opus-cinema-canvas {
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      display: block;
+      background: #07080A;
+      cursor: pointer;
+    }
+
+    .cinema-controls {
+      background: #111318;
+      border-top: 1px solid #222630;
+      padding: 12px 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .scene-pills {
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 6px;
+    }
+    @media (max-width: 860px) {
+      .scene-pills { grid-template-columns: repeat(3, 1fr); }
+    }
+    .scene-pill {
+      background: #1A1D24;
+      border: 1px solid #2C313C;
+      color: #ADB5BD;
+      padding: 7px 10px;
+      border-radius: 6px;
+      font: 600 10.5px 'JetBrains Mono', monospace;
+      cursor: pointer;
+      text-align: left;
+      transition: all 0.15s;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .scene-pill.active {
+      background: #0D99FF;
+      border-color: #0D99FF;
+      color: #FFFFFF;
+    }
+    .cinema-transport {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 10px;
+      color: #DEE2E6;
+      font: 500 12px 'JetBrains Mono', monospace;
+    }
+    .progress-bar-track {
+      flex: 1;
+      min-width: 180px;
+      height: 6px;
+      background: #222630;
+      border-radius: 999px;
+      overflow: hidden;
+      cursor: pointer;
+    }
+    .progress-bar-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #0D99FF, #10B981);
+      width: 0%;
+      transition: width 0.1s linear;
+    }
+
+    /* =========================================================================
+       5. 4 PILLARS ARCHITECTURAL BLUEPRINT CARDS
+       ========================================================================= */
+    .pillars-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      border-bottom: 1px solid var(--line);
+    }
+    @media (max-width: 860px) {
+      .pillars-grid { grid-template-columns: 1fr; }
+    }
+    .pillar-card {
+      padding: 40px 44px;
+      border-right: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+      background: var(--paper-elev);
+      position: relative;
+    }
+    .pillar-card:nth-child(2n) { border-right: none; }
+    .pillar-num {
+      font: 800 12px 'JetBrains Mono', monospace;
+      color: var(--sel-blue);
+      margin-bottom: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .pillar-card h3 {
+      font-size: 23px;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      margin-bottom: 12px;
+    }
+    .pillar-card p {
+      font-size: 14.5px;
+      line-height: 1.65;
+      color: var(--ink-secondary);
+      margin-bottom: 20px;
+    }
+    .code-snippet {
+      background: #121417;
+      color: #E9ECEF;
+      padding: 14px 16px;
+      border-radius: 8px;
+      font: 500 12px/1.55 'JetBrains Mono', monospace;
+      overflow-x: auto;
+    }
+
+    /* =========================================================================
+       6. INTERACTIVE GALAXY S25 LIVE SIMULATOR
+       ========================================================================= */
+    .sim-grid {
+      display: grid;
+      grid-template-columns: 380px 1fr;
+      gap: 36px;
+      padding: 48px;
+      border-bottom: 1px solid var(--line);
+      align-items: center;
+    }
+    @media (max-width: 960px) {
+      .sim-grid { grid-template-columns: 1fr; padding: 28px 20px; }
+    }
+    .phone-mockup {
+      width: 340px;
+      margin: 0 auto;
+      background: #09090B;
+      border: 8px solid #27272A;
+      border-radius: 38px;
+      padding: 16px;
+      color: #FAFAFA;
+      box-shadow: 0 25px 50px rgba(0,0,0,0.25);
+    }
+    .phone-notch {
+      width: 90px;
+      height: 18px;
+      background: #18181B;
+      border-radius: 999px;
+      margin: 0 auto 12px;
+    }
+    .phone-board-box {
+      background: #121214;
+      border: 1px solid #27272A;
+      border-radius: 14px;
+      padding: 10px;
+      height: 170px;
+      margin-bottom: 10px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+    .phone-chat-stream {
+      height: 185px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-bottom: 10px;
+      padding-right: 4px;
+    }
+    .chat-bubble-user {
+      align-self: flex-end;
+      background: #FAFAFA;
+      color: #09090B;
+      padding: 7px 11px;
+      border-radius: 12px;
+      font-size: 12px;
+      font-weight: 600;
+      max-width: 85%;
+    }
+    .chat-bubble-agent {
+      align-self: flex-start;
+      background: #18181B;
+      border: 1px solid #27272A;
+      color: #FAFAFA;
+      padding: 8px 11px;
+      border-radius: 12px;
+      font-size: 12px;
+      line-height: 1.45;
+      max-width: 92%;
+    }
+    .chat-badge {
+      display: inline-block;
+      font: 700 9.5px 'JetBrains Mono', monospace;
+      color: #A1A1AA;
+      margin-bottom: 3px;
+    }
+
+    /* Footer */
+    footer {
+      padding: 40px 48px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 16px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Top & Left CAD Rulers (Swarm-Site Signature) -->
+  <div class="ruler-corner">PX</div>
+  <div class="ruler ruler-top"><svg id="ruler-top-svg" width="100%" height="20"></svg></div>
+  <div class="ruler ruler-left"><svg id="ruler-left-svg" width="20" height="100%"></svg></div>
+
+  <!-- Full-Viewport Autonomous Agent Cursor Swarm Overlay -->
+  <canvas id="swarm-overlay-canvas"></canvas>
+
+  <div class="page-shell">
+    <!-- Sticky Top Navigation -->
+    <header class="nav-sticky">
+      <div class="nav-inner">
+        <a href="#" class="brand-cluster">
+          <div class="brand-mark">H</div>
+          <span class="brand-title">hanson</span>
+          <span class="brand-badge">v3.0.0 · SWARM MOBILE-USE</span>
+        </a>
+
+        <nav class="nav-links">
+          <a href="#motion-ad-section">Opus 5.5 Motion Ad</a>
+          <a href="#architecture-section">4-Pillar Architecture</a>
+          <a href="#live-simulator">Interactive S25 Demo</a>
+          <a href="#a2a-open-source">A2A / MCP Protocol</a>
+        </nav>
+
+        <div class="nav-actions">
+          <button class="btn" id="toggle-swarm-btn" onclick="toggleSwarmCursors()">
+            <span>🐝 Swarm Cursors: ON</span>
+          </button>
+          <button class="btn" onclick="document.body.classList.toggle('dark-mode')">
+            <span>◐ Contrast</span>
+          </button>
+          <a class="btn btn-primary" href="https://github.com/cjw0076/hanson-mobile-use/releases/latest" target="_blank" rel="noopener">
+            <span>⬇ APK v3.0.0</span>
+          </a>
+        </div>
+      </div>
+    </header>
+
+    <main class="container">
+      <!-- ===================================================================
+           HERO SECTION: SWARM-SITE EDITORIAL + LIVE AGENT ORCHESTRATION TREE
+           =================================================================== -->
+      <section class="hero-grid">
+        <div class="hero-left">
+          <div>
+            <div class="eyebrow-pill">
+              <span class="pulse-dot"></span>
+              <span>BEYOND COMPUTER-USE · OPEN-SOURCE ANDROID SWARM</span>
+            </div>
+
+            <h1 class="hero-h1">
+              Run a swarm of<br />
+              <span class="highlight-box" id="hero-sel-target">mobile-use agents</span><br />
+              in 12 milliseconds.
+            </h1>
+
+            <p class="hero-lead">
+              <strong>Hanson Mobile-Use AI</strong>는 Astra·Argon급 모바일 입출력(I/O) 엔진, Opus급 실시간 코드 시각화 캔버스, JEV Router 기반 포그라운드/백그라운드 멀티모델 오케스트레이션, 그리고 System-2 추론을 <strong>12ms 습관(Habit)</strong>으로 온라인 증류하는 안드로이드 자율 에이전트 OS입니다.
+            </p>
+
+            <div class="hero-cta-row">
+              <a class="btn btn-primary btn-lg" href="https://github.com/cjw0076/hanson-mobile-use/releases/latest" target="_blank" rel="noopener">
+                ⬇ Download Release APK (v3.0.0)
+              </a>
+              <a class="btn btn-lg" href="#motion-ad-section">
+                🎬 Watch Opus 5.5 Motion Commercial
+              </a>
+              <a class="btn btn-lg" href="https://github.com/cjw0076/hanson-mobile-use" target="_blank" rel="noopener">
+                ★ Star on GitHub
+              </a>
+            </div>
+          </div>
+
+          <div class="hero-metrics">
+            <div class="metric-item">
+              <div class="val">12ms</div>
+              <div class="lbl">System-1 Habit JIT</div>
+            </div>
+            <div class="metric-item">
+              <div class="val">31 Tools</div>
+              <div class="lbl">GUI · OS · Browser · IoT</div>
+            </div>
+            <div class="metric-item">
+              <div class="val">FG + BG</div>
+              <div class="lbl">Parallel Dual Lanes</div>
+            </div>
+            <div class="metric-item">
+              <div class="val">A2A 1.0</div>
+              <div class="lbl">Open Agent Mesh (:18888)</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Hero Right: Live Interactive Swarm Dispatch Tree -->
+        <div class="hero-right">
+          <div class="dag-card-root" id="dag-root-node">
+            <div class="fn">hanson.jevRouter.dispatch(goal)</div>
+            <div class="sub">orchestrator · FG/BG lane split · S1/S2 distillation active</div>
+          </div>
+
+          <div class="dag-connector"></div>
+
+          <div class="dag-workers-grid">
+            <div class="worker-node active-selected" onclick="selectHeroNode(0)">
+              <div class="w-name">
+                <span>agent/astra-io</span>
+                <span style="color:var(--sel-blue)">[FG/OS]</span>
+              </div>
+              <div class="w-role">A11y Tree + UID-2000 :18890 Binder CLI + Screen-Off Reply</div>
+              <div class="w-status">
+                <span class="status-dot" style="background:var(--emerald)"></span>
+                <span>0.02s Zero-GUI Teleport</span>
+              </div>
+            </div>
+
+            <div class="worker-node" onclick="selectHeroNode(1)">
+              <div class="w-name">
+                <span>agent/opus-canvas</span>
+                <span style="color:var(--violet)">[VISUAL]</span>
+              </div>
+              <div class="w-role">Live SVG / HTML5 Code Canvas &amp; AI Image Synthesizer</div>
+              <div class="w-status">
+                <span class="status-dot" style="background:var(--violet)"></span>
+                <span>window.HansonOS Self-Heal</span>
+              </div>
+            </div>
+
+            <div class="worker-node" onclick="selectHeroNode(2)">
+              <div class="w-name">
+                <span>agent/jev-router</span>
+                <span style="color:var(--amber)">[ROUTER]</span>
+              </div>
+              <div class="w-role">S25 Nano NPU ↔ Gemini 3.8 Flash ↔ Argon Dynamic Switch</div>
+              <div class="w-status">
+                <span class="status-dot" style="background:var(--amber)"></span>
+                <span>FG + BG Concurrent Lanes</span>
+              </div>
+            </div>
+
+            <div class="worker-node" onclick="selectHeroNode(3)">
+              <div class="w-name">
+                <span>agent/habit-s1</span>
+                <span style="color:var(--guide-red)">[12ms JIT]</span>
+              </div>
+              <div class="w-role">Contrastive 16KB VLM + Guarded Macro Self-Distillation</div>
+              <div class="w-status">
+                <span class="status-dot" style="background:var(--guide-red)"></span>
+                <span>50× Faster After 1 Demo</span>
+              </div>
+            </div>
+
+            <div class="worker-node" onclick="selectHeroNode(4)">
+              <div class="w-name">
+                <span>agent/browser-bg</span>
+                <span style="color:var(--sel-blue)">[BG WEB]</span>
+              </div>
+              <div class="w-role">Headless DOM Extractor &amp; Interactive Board WebView</div>
+              <div class="w-status">
+                <span class="status-dot" style="background:var(--emerald)"></span>
+                <span>Zero Screen Hijack</span>
+              </div>
+            </div>
+
+            <div class="worker-node" onclick="selectHeroNode(5)">
+              <div class="w-name">
+                <span>agent/omni-nexus</span>
+                <span style="color:var(--emerald)">[A2A/IoT]</span>
+              </div>
+              <div class="w-role">Cross-Device PC Bridge (:18889), BLE Audio &amp; Robot RPC</div>
+              <div class="w-status">
+                <span class="status-dot" style="background:var(--emerald)"></span>
+                <span>/.well-known/agent-card.json</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===================================================================
+           MOTION GRAPHIC COMMERCIAL THEATER (CLAUDE OPUS 5.5 MAX EDITION)
+           =================================================================== -->
+      <section id="motion-ad-section">
+        <div class="section-header">
+          <div>
+            <div class="section-tag">CLAUDE OPUS 5.5 MAX · PROCEDURAL MOTION GRAPHIC FILM</div>
+            <h2 class="section-title">60fps 모션그래픽 런칭 광고 영상 (실시간 시네마 &amp; MP4/WebM 익스포터)</h2>
+          </div>
+          <div style="display:flex; gap:10px; flex-wrap:wrap;">
+            <button class="btn btn-primary" onclick="restartMotionAdWithAudio()">
+              🔊 사운드 켜고 처음부터 재생
+            </button>
+            <button class="btn" id="record-video-btn" onclick="exportMotionAdVideo()">
+              🎥 광고 영상 파일(.webm) 즉시 다운로드
+            </button>
+            <a class="btn" href="hanson-opus55-promo.mp4" download="hanson-opus55-promo.mp4">
+              ⬇ 1080p MP4 원본 다운로드
+            </a>
+          </div>
+        </div>
+
+        <div class="theater-wrapper">
+          <div class="cinema-frame">
+            <div class="cinema-topbar">
+              <div class="cinema-dots"><span></span><span></span><span></span></div>
+              <div id="cinema-scene-title">OPUS 5.5 MAX MOTION ENGINE · SCENE 01 / 06</div>
+              <div id="cinema-timecode">00:00.00 / 00:36.00 · 60 FPS</div>
+            </div>
+
+            <canvas id="opus-cinema-canvas" width="1280" height="720" onclick="toggleCinemaPlay()"></canvas>
+
+            <div class="cinema-controls">
+              <div class="scene-pills">
+                <button class="scene-pill active" onclick="jumpToScene(0)">01. SWARM AWAKENING</button>
+                <button class="scene-pill" onclick="jumpToScene(1)">02. ASTRA/ARGON I/O</button>
+                <button class="scene-pill" onclick="jumpToScene(2)">03. JEV ROUTER FG/BG</button>
+                <button class="scene-pill" onclick="jumpToScene(3)">04. OPUS CODE CANVAS</button>
+                <button class="scene-pill" onclick="jumpToScene(4)">05. HABIT 12ms S1</button>
+                <button class="scene-pill" onclick="jumpToScene(5)">06. OPEN SOURCE A2A</button>
+              </div>
+
+              <div class="cinema-transport">
+                <button class="btn" style="padding:5px 12px; font-size:11.5px;" onclick="toggleCinemaPlay()" id="play-pause-btn">⏸ PAUSE</button>
+                <button class="btn" style="padding:5px 12px; font-size:11.5px;" onclick="toggleCinemaAudio()" id="audio-mute-btn">🔇 SYNTH AUDIO: OFF</button>
+                <div class="progress-bar-track" onclick="scrubCinema(event)">
+                  <div class="progress-bar-fill" id="cinema-progress"></div>
+                </div>
+                <span id="cinema-fps-badge">60.0 FPS · 1280×720</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===================================================================
+           4-PILLAR ARCHITECTURAL BLUEPRINT
+           =================================================================== -->
+      <section id="architecture-section">
+        <div class="section-header">
+          <div>
+            <div class="section-tag">ARCHITECTURAL BLUEPRINT · 4 CORE PILLARS</div>
+            <h2 class="section-title">Computer-Use를 넘어선 4대 모바일 에이전트 아키텍처</h2>
+          </div>
+        </div>
+
+        <div class="pillars-grid">
+          <div class="pillar-card">
+            <div class="pillar-num">
+              <span>PILLAR 01 · ASTRA &amp; ARGON GRADE MOBILE I/O</span>
+              <span>[20ms TELEPORT]</span>
+            </div>
+            <h3>무결점 모바일 입출력 &amp; UID-2000 자가 복구</h3>
+            <p>
+              접근성 멀티윈도우 Z-레이어 트리에서 키보드·상태바 노이즈를 제거하고, 접근성 장애 시 자동으로 <code>127.0.0.1:18890</code> UID-2000 바인더 CLI 데몬으로 폴백합니다. 화면을 켜지 않고 카카오톡·SMS에 0.2초 만에 답장(<code>RemoteInput</code>)하며, 12종 시스템 설정과 딥링크를 클릭 없이 직행합니다.
+            </p>
+            <div class="code-snippet">
+              // Zero-GUI Teleport + UID-2000 Self-Healing Fallback<br/>
+              universalNexus.tryZeroGuiIntentTeleport("유튜브에서 로파이 틀어줘")<br/>
+              // -&gt; 18ms direct Intent dispatch + automatic GesturePassthrough
+            </div>
+          </div>
+
+          <div class="pillar-card">
+            <div class="pillar-num">
+              <span>PILLAR 02 · OPUS-CLASS CODE CANVAS &amp; VISUALS</span>
+              <span>[LIVE WEBVIEW]</span>
+            </div>
+            <h3>코드로 그려서 띄우고, 이미지를 즉석 합성하는 보드</h3>
+            <p>
+              에이전트가 텍스트 답변에 그치지 않고 SVG 아키텍처 다이어그램, 인터랙티브 차트, HTML5 물리 캔버스(<code>draw_with_code</code>), 그리고 멀티모달 이미지(<code>generate_visual_media</code>)를 실시간 코드로 합성해 대화창 상단에 즉시 렌더링합니다. 런타임 JS 오류 발생 시 <code>window.HansonOS</code> 브리지가 자동 자가 수정합니다.
+            </p>
+            <div class="code-snippet">
+              window.HansonOS.runCommand("코드로 시스템 구조도 그려서 띄워줘")<br/>
+              // -&gt; Synthesizes interactive SVG/Canvas + auto-reveals Board
+            </div>
+          </div>
+
+          <div class="pillar-card">
+            <div class="pillar-num">
+              <span>PILLAR 03 · JEV ROUTER &amp; FG/BG PARALLEL LANES</span>
+              <span>[MULTI-MODEL]</span>
+            </div>
+            <h3>언제 어떤 모델을 쓰고, 무엇을 백그라운드로 보낼지 결정</h3>
+            <p>
+              복합 지시(예: <em>"사족 로봇 카톡방 들어가고 동시에 내 폰에 깔린 게임이랑 해커뉴스 요약해줘"</em>)를 받으면 <strong>FG(포그라운드 화면 제어)</strong>와 <strong>BG(백그라운드 브라우저·패키지 스캔·알림·IoT)</strong> 레인으로 자동 분할하여 병렬 실행합니다. 작업 난이도에 따라 S25 내장 Gemini Nano NPU, Gemini 3.5 Lite, 3.8 Flash, 4 Argon을 동적 스위칭합니다.
+            </p>
+            <div class="code-snippet">
+              [FG Lane] -&gt; KakaoTalk UI Navigation (Touch Passthrough ON)<br/>
+              [BG Lane] -&gt; Headless Browser-Use + Package Scan + Robot RPC
+            </div>
+          </div>
+
+          <div class="pillar-card">
+            <div class="pillar-num">
+              <span>PILLAR 04 · BEYOND-HABIT S2 → S1 DISTILLATION</span>
+              <span>[12ms REFLEX]</span>
+            </div>
+            <h3>똑똑한 System-2가 한 번 푼 작업을 12ms 습관으로 증류</h3>
+            <p>
+              System-2(상위 VLM)가 성공적으로 수행한 궤적을 <code>ScreenSkeletonFingerprinter</code>와 <code>{{PARAM}}</code> 동적 슬롯 바인딩으로 일반화하여 <strong>JIT Guarded Macro</strong>로 컴파일하고, 16KB 온디바이스 대조 학습 가중치(<code>s1_contrastive_vlm_weights.bin</code>)로 즉시 증류합니다. 두 번째 실행부터는 클라우드 호출 없이 12ms 만에 완료됩니다.
+            </p>
+            <div class="code-snippet">
+              Run #1 (System-2 Teacher): 620ms -&gt; Verified &amp; Distilled<br/>
+              Run #2 (System-1 Habit JIT): 12ms (98% Token &amp; Latency Saved)
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===================================================================
+           INTERACTIVE GALAXY S25 LIVE SIMULATOR
+           =================================================================== -->
+      <section id="live-simulator">
+        <div class="section-header">
+          <div>
+            <div class="section-tag">TRY IT LIVE IN BROWSER · GALAXY S25 ULTRA SIMULATOR</div>
+            <h2 class="section-title">웹에서 바로 체험하는 Hanson Mobile-Use 시뮬레이터</h2>
+          </div>
+        </div>
+
+        <div class="sim-grid">
+          <div class="phone-mockup">
+            <div class="phone-notch"></div>
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; font-size:12px;">
+              <span style="font-weight:800;">● hanson <span style="font-family:monospace; font-size:10px; color:#A1A1AA;">4-argon · S1-JIT</span></span>
+              <span style="font-family:monospace; font-size:10px; background:#27272A; padding:2px 7px; border-radius:99px;" id="sim-lane-pill">AUTO · FG+BG</span>
+            </div>
+
+            <div class="phone-board-box" id="sim-visual-board">
+              <div style="font-size:10.5px; font-family:monospace; color:#A1A1AA; display:flex; justify-content:space-between;">
+                <span id="sim-board-title">LIVE CODE CANVAS · READY</span>
+                <span>BOARD</span>
+              </div>
+              <svg id="sim-board-svg" viewBox="0 0 280 110" style="width:100%; height:115px;">
+                <rect x="8" y="18" width="76" height="36" rx="6" fill="#18181B" stroke="#FAFAFA" stroke-width="1.5"/>
+                <text x="46" y="39" fill="#FAFAFA" font-size="9" font-family="monospace" text-anchor="middle">S1 HABIT 12ms</text>
+                <line x1="84" y1="36" x2="104" y2="36" stroke="#FAFAFA" stroke-dasharray="3 2"/>
+                <rect x="104" y="18" width="72" height="36" rx="6" fill="#18181B" stroke="#0D99FF" stroke-width="1.5"/>
+                <text x="140" y="39" fill="#0D99FF" font-size="9" font-family="monospace" text-anchor="middle">JEV ROUTER</text>
+                <line x1="176" y1="36" x2="196" y2="36" stroke="#FAFAFA" stroke-dasharray="3 2"/>
+                <rect x="196" y="18" width="76" height="36" rx="6" fill="#18181B" stroke="#10B981" stroke-width="1.5"/>
+                <text x="234" y="39" fill="#10B981" font-size="9" font-family="monospace" text-anchor="middle">OPUS CANVAS</text>
+                <text x="140" y="88" fill="#A1A1AA" font-size="9.5" font-family="monospace" text-anchor="middle">우측 버튼을 눌러 실시간 라우팅을 테스트하세요</text>
+              </svg>
+            </div>
+
+            <div class="phone-chat-stream" id="sim-chat-stream">
+              <div class="chat-bubble-agent">
+                <div class="chat-badge">READY · S1/S2 OMNI-NEXUS</div>
+                <div>안녕하세요! 우측의 데모 시나리오를 클릭하거나 명령을 실행해 보세요.</div>
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <h3 style="font-size:22px; font-weight:800; margin-bottom:12px;">원터치 시나리오 테스트</h3>
+            <p style="font-size:14.5px; color:var(--ink-secondary); margin-bottom:20px; line-height:1.6;">
+              실제 안드로이드 앱(`hanson-mobile-use`)에서 동작하는 것과 동일한 <strong>JEV Router 병렬 분기 + Opus 코드 캔버스 렌더링 + Habit 12ms 증류</strong> 파이프라인을 클릭 한 번으로 확인해 보세요.
+            </p>
+
+            <div style="display:grid; gap:10px; margin-bottom:24px;">
+              <button class="btn" style="justify-content:space-between; padding:14px 18px;" onclick="runSimScenario(0)">
+                <span><strong>[FG + BG 병렬]</strong> "사족 로봇 제어 카톡방 들어가고, 동시에 내 폰 게임 스캔해줘"</span>
+                <span style="font-family:monospace; color:var(--sel-blue);">JEV SPLIT →</span>
+              </button>
+              <button class="btn" style="justify-content:space-between; padding:14px 18px;" onclick="runSimScenario(1)">
+                <span><strong>[Opus 코드 캔버스]</strong> "코드로 S1/S2 아키텍처 성능 차트 그려서 바로 띄워줘"</span>
+                <span style="font-family:monospace; color:var(--violet);">LIVE SVG →</span>
+              </button>
+              <button class="btn" style="justify-content:space-between; padding:14px 18px;" onclick="runSimScenario(2)">
+                <span><strong>[Habit 12ms 증류]</strong> "유튜브에서 로파이 틀어줘 (2회차 실행 → 12ms JIT 매크로 히트)"</span>
+                <span style="font-family:monospace; color:var(--guide-red);">12ms HABIT →</span>
+              </button>
+              <button class="btn" style="justify-content:space-between; padding:14px 18px;" onclick="runSimScenario(3)">
+                <span><strong>[BG Browser-Use &amp; IoT]</strong> "백그라운드 브라우저로 해커뉴스 요약하고 노트북으로 전송해줘"</span>
+                <span style="font-family:monospace; color:var(--emerald);">OMNI-NEXUS →</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===================================================================
+           OPEN SOURCE A2A v1.0 & MCP PROTOCOL HUB
+           =================================================================== -->
+      <section id="a2a-open-source">
+        <div class="section-header">
+          <div>
+            <div class="section-tag">OPEN SOURCE ECOSYSTEM · A2A v1.0 &amp; MCP SERVER (:18888)</div>
+            <h2 class="section-title">전 세계 모든 에이전트와 소통하는 오픈 프로토콜</h2>
+          </div>
+        </div>
+
+        <div style="padding:40px 48px; border-bottom:1px solid var(--line);">
+          <p style="font-size:15px; color:var(--ink-secondary); max-width:780px; line-height:1.65; margin-bottom:20px;">
+            Hanson Mobile-Use AI는 <code>/.well-known/agent-card.json</code> (Google A2A v1.0) 및 <code>/mcp/tools</code> (Model Context Protocol) 표준 엔드포인트를 내장하고 있습니다. Claude Code, Codex, OpenClaw/Moltbook, LangGraph 등 어떤 외부 에이전트든 당신의 스마트폰과 직접 대화하고 피드백을 주고받을 수 있습니다.
+          </p>
+          <div class="code-snippet">
+# 1. ADB 포트 포워딩 또는 Cloudflare Tunnel 연결
+adb forward tcp:18888 tcp:18888
+
+# 2. A2A v1.0 표준 에이전트 카드 조회 &amp; 병렬 BG 작업 위임
+curl -s http://127.0.0.1:18888/.well-known/agent-card.json | jq .
+curl -X POST http://127.0.0.1:18888/a2a -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":"1","method":"tasks/send","params":{"lane":"BG","prompt":"브라우저로 해커뉴스 최신 글 요약해줘"}}'
+          </div>
+        </div>
+      </section>
+
+      <footer>
+        <div>
+          <strong>HANSON MOBILE-USE AI</strong> · MIT Open Source License · Built with Astra/Argon I/O, Opus Live Canvas, JEV Router &amp; Beyond-Habit S1 Distillation.
+        </div>
+        <div style="display:flex; gap:16px;">
+          <a href="https://github.com/cjw0076/hanson-mobile-use" style="color:var(--ink); font-weight:600;">GitHub Repository</a>
+          <a href="https://github.com/cjw0076/hanson-mobile-use/releases" style="color:var(--ink); font-weight:600;">Releases (APK)</a>
+          <a href="https://github.com/cjw0076/hanson-mobile-use/issues" style="color:var(--ink); font-weight:600;">Feedback &amp; Issues</a>
+        </div>
+      </footer>
+    </main>
+  </div>
+
+  <!-- =======================================================================
+       SWARM CURSOR PHYSICS ENGINE + OPUS 5.5 MAX 60FPS MOTION COMMERCIAL ENGINE
+       ======================================================================= -->
+  <script>
+    // =========================================================================
+    // PART 1: SWARM-SITE CAD RULERS & AUTONOMOUS AGENT CURSOR SWARM
+    // =========================================================================
+    const swarmCanvas = document.getElementById('swarm-overlay-canvas');
+    const sCtx = swarmCanvas.getContext('2d');
+    let swarmEnabled = true;
+    let mousePos = { x: window.innerWidth * 0.65, y: window.innerHeight * 0.38, active: false };
+
+    const AGENT_ROLES = [
+      { name: 'agent/astra-io', color: '#0D99FF', task: 'dumping Z-layer UI' },
+      { name: 'agent/opus-5.5', color: '#7C3AED', task: 'rendering SVG canvas' },
+      { name: 'agent/jev-router', color: '#F59E0B', task: 'routing FG+BG lanes' },
+      { name: 'agent/habit-s1', color: '#F24822', task: '12ms JIT macro hit' },
+      { name: 'agent/s25-npu', color: '#10B981', task: 'AICore Nano inference' },
+      { name: 'agent/browser-bg', color: '#0D99FF', task: 'headless DOM scrape' },
+      { name: 'agent/uid2000-cli', color: '#F24822', task: ':18890 binder self-heal' },
+      { name: 'agent/remote-input', color: '#10B981', task: '0.18s KakaoTalk reply' },
+      { name: 'agent/a2a-mesh', color: '#7C3AED', task: 'A2A JSON-RPC sync' },
+      { name: 'agent/iot-robot', color: '#F59E0B', task: 'quadruped telemetry' }
+    ];
+
+    const swarmCursors = AGENT_ROLES.map((role, i) => {
+      const angle = (i / AGENT_ROLES.length) * Math.PI * 2;
+      return {
+        ...role,
+        x: window.innerWidth * 0.5 + Math.cos(angle) * 260,
+        y: window.innerHeight * 0.4 + Math.sin(angle) * 180,
+        vx: 0,
+        vy: 0,
+        orbit: 110 + (i * 22),
+        spin: (i % 2 === 0 ? 1 : -1) * (0.7 + (i * 0.06)),
+        phase: i * 0.9,
+        boxTimer: i * 40
+      };
+    });
+
+    function updateRulers() {
+      const topSvg = document.getElementById('ruler-top-svg');
+      const leftSvg = document.getElementById('ruler-left-svg');
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      let topHtml = `<rect x="${ Math.max(0, mousePos.x - 60) }" y="0" width="120" height="20" fill="rgba(13,153,255,0.22)"/>`;
+      for (let x = 0; x < vw; x += 50) {
+        const major = x % 100 === 0;
+        topHtml += `<line x1="${x}" y1="${major ? 11 : 15}" x2="${x}" y2="20" stroke="#666"/>`;
+        if (major) topHtml += `<text x="${x + 3}" y="10" fill="#999" font-size="9" font-family="Inter, sans-serif">${x}</text>`;
+      }
+      topHtml += `<text x="${Math.max(4, mousePos.x - 56)}" y="10" fill="#0D99FF" font-size="9" font-weight="700" font-family="JetBrains Mono">${Math.round(mousePos.x)}</text>`;
+      topSvg.innerHTML = topHtml;
+
+      let leftHtml = `<rect x="0" y="${ Math.max(0, mousePos.y - 45) }" width="20" height="90" fill="rgba(13,153,255,0.22)"/>`;
+      for (let y = 0; y < vh; y += 50) {
+        const major = y % 100 === 0;
+        leftHtml += `<line x1="${major ? 11 : 15}" y1="${y}" x2="20" y2="${y}" stroke="#666"/>`;
+        if (major && y > 0) leftHtml += `<text x="11" y="${y - 3}" fill="#999" font-size="8.5" font-family="Inter, sans-serif" transform="rotate(-90 11 ${y - 3})">${y}</text>`;
+      }
+      leftSvg.innerHTML = leftHtml;
+    }
+
+    function resizeSwarmCanvas() {
+      swarmCanvas.width = window.innerWidth;
+      swarmCanvas.height = window.innerHeight;
+      updateRulers();
+    }
+    window.addEventListener('resize', resizeSwarmCanvas);
+    window.addEventListener('pointermove', (e) => {
+      mousePos.x = e.clientX;
+      mousePos.y = e.clientY;
+      mousePos.active = true;
+      updateRulers();
+    }, { passive: true });
+    resizeSwarmCanvas();
+
+    function toggleSwarmCursors() {
+      swarmEnabled = !swarmEnabled;
+      document.getElementById('toggle-swarm-btn').innerHTML = `<span>🐝 Swarm Cursors: ${swarmEnabled ? 'ON' : 'OFF'}</span>`;
+      if (!swarmEnabled) sCtx.clearRect(0, 0, swarmCanvas.width, swarmCanvas.height);
+    }
+
+    let swarmTime = 0;
+    function stepSwarm() {
+      requestAnimationFrame(stepSwarm);
+      if (!swarmEnabled) return;
+
+      swarmTime += 0.016;
+      const w = swarmCanvas.width;
+      const h = swarmCanvas.height;
+      sCtx.clearRect(0, 0, w, h);
+
+      const targetX = mousePos.active ? mousePos.x : w * (0.55 + 0.25 * Math.cos(swarmTime * 0.45));
+      const targetY = mousePos.active ? mousePos.y : h * (0.42 + 0.22 * Math.sin(swarmTime * 0.6));
+
+      // Draw subtle red alignment guide when a cursor snaps
+      const lead = swarmCursors[0];
+      if (Math.sin(swarmTime * 1.7) > 0.65) {
+        sCtx.strokeStyle = 'rgba(242, 72, 34, 0.45)';
+        sCtx.lineWidth = 1;
+        sCtx.setLineDash([4, 4]);
+        sCtx.beginPath();
+        sCtx.moveTo(lead.x, 0);
+        sCtx.lineTo(lead.x, h);
+        sCtx.stroke();
+        sCtx.setLineDash([]);
+      }
+
+      for (let i = 0; i < swarmCursors.length; i++) {
+        const c = swarmCursors[i];
+        const dx = c.x - targetX;
+        const dy = c.y - targetY;
+        const dist = Math.hypot(dx, dy) || 1;
+        const nx = dx / dist;
+        const ny = dy / dist;
+
+        // Vortex curl + radial spring + mouse repulsion (< 55px)
+        const desiredR = c.orbit + 25 * Math.sin(swarmTime * 1.2 + c.phase);
+        const radialForce = (desiredR - dist) * 1.8;
+        const tangentX = -ny * 150 * c.spin;
+        const tangentY = nx * 150 * c.spin;
+
+        let ax = nx * radialForce + tangentX;
+        let ay = ny * radialForce + tangentY;
+
+        if (mousePos.active && dist < 72) {
+          ax += nx * 520;
+          ay += ny * 520;
+        }
+
+        c.vx = (c.vx + ax * 0.016) * 0.91;
+        c.vy = (c.vy + ay * 0.016) * 0.91;
+        c.x += c.vx * 0.016 * 60;
+        c.y += c.vy * 0.016 * 60;
+
+        // Occasional Figma bounding box selection overlay
+        c.boxTimer = (c.boxTimer + 1) % 360;
+        if (c.boxTimer < 75 && i < 3) {
+          const bw = 96;
+          const bh = 32;
+          sCtx.strokeStyle = '#0D99FF';
+          sCtx.lineWidth = 1;
+          sCtx.strokeRect(c.x - 12, c.y - 12, bw, bh);
+          sCtx.fillStyle = '#FFFFFF';
+          for (const [hx, hy] of [[c.x - 12, c.y - 12], [c.x - 12 + bw, c.y - 12], [c.x - 12, c.y - 12 + bh], [c.x - 12 + bw, c.y - 12 + bh]]) {
+            sCtx.fillRect(hx - 2.5, hy - 2.5, 5, 5);
+            sCtx.strokeRect(hx - 2.5, hy - 2.5, 5, 5);
+          }
+        }
+
+        // Draw Cursor Arrow
+        sCtx.save();
+        sCtx.translate(c.x, c.y);
+        sCtx.fillStyle = c.color;
+        sCtx.strokeStyle = '#FFFFFF';
+        sCtx.lineWidth = 1.2;
+        sCtx.beginPath();
+        sCtx.moveTo(0, 0);
+        sCtx.lineTo(0, 15);
+        sCtx.lineTo(4.2, 11.5);
+        sCtx.lineTo(11, 11.5);
+        sCtx.closePath();
+        sCtx.fill();
+        sCtx.stroke();
+
+        // Draw Cursor Pill Badge
+        const label = c.name;
+        sCtx.font = '600 10.5px Inter, sans-serif';
+        const tw = sCtx.measureText(label).width + 12;
+        sCtx.fillStyle = c.color;
+        sCtx.beginPath();
+        sCtx.roundRect(10, 12, tw, 18, 4);
+        sCtx.fill();
+        sCtx.fillStyle = '#FFFFFF';
+        sCtx.fillText(label, 16, 24.5);
+        sCtx.restore();
+      }
+    }
+    requestAnimationFrame(stepSwarm);
+
+    function selectHeroNode(idx) {
+      const nodes = document.querySelectorAll('.worker-node');
+      nodes.forEach((n, i) => n.classList.toggle('active-selected', i === idx));
+    }
+
+    // =========================================================================
+    // PART 2: CLAUDE OPUS 5.5 MAX — 60FPS MOTION GRAPHIC COMMERCIAL ENGINE
+    // =========================================================================
+    const adCanvas = document.getElementById('opus-cinema-canvas');
+    const ctx = adCanvas.getContext('2d');
+    const AD_DURATION = 36.0; // 6 scenes * 6 seconds
+    let adTime = 0;
+    let adPlaying = true;
+    let adAudioEnabled = false;
+    let audioCtx = null;
+    let lastSceneTriggered = -1;
+
+    const SCENES = [
+      { title: '01 · SWARM AWAKENING', ko: 'BEYOND COMPUTER-USE. ENTER MOBILE-USE.', sub: '1,000 Autonomous Agent Cursors Converging into One Smartphone OS' },
+      { title: '02 · ASTRA & ARGON MOBILE I/O', ko: 'FULL-SPECTRUM ANDROID PERCEPTION & ACTUATION', sub: 'Z-Layer UI Tree · UID-2000 (:18890) Binder CLI · 0.02s Zero-GUI Intent Teleport' },
+      { title: '03 · JEV ROUTER ORCHESTRATION', ko: 'DYNAMIC MULTI-MODEL & FG / BG PARALLEL LANES', sub: 'S25 AICore Nano NPU ↔ Gemini 3.8 Flash ↔ 4 Argon · Concurrent Execution' },
+      { title: '04 · OPUS 5.5 LIVE CODE CANVAS', ko: 'DRAW WITH CODE. SYNTHESIZE VISUAL MEDIA LIVE.', sub: 'Real-Time SVG Architecture, Interactive Metrics, and Generative Artwork' },
+      { title: '05 · BEYOND-HABIT S1 DISTILLATION', ko: '620ms DELIBERATION → 12ms INSTANT HABIT', sub: 'Online System-2 to System-1 JIT Macro & 16KB Contrastive VLM Distillation' },
+      { title: '06 · OPEN SOURCE · JOIN THE SWARM', ko: 'HANSON MOBILE-USE AI v3.0.0 · MIT OPEN SOURCE', sub: 'A2A v1.0 & MCP Ready (:18888) · Star & Download APK on GitHub Today' }
+    ];
+
+    function playSceneSynthChord(sceneIdx) {
+      if (!adAudioEnabled) return;
+      try {
+        if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        if (audioCtx.state === 'suspended') audioCtx.resume();
+        const now = audioCtx.currentTime;
+        const freqs = [
+          [110, 220, 329.63, 440],
+          [130.81, 261.63, 392.00, 523.25],
+          [146.83, 293.66, 440.00, 587.33],
+          [164.81, 329.63, 493.88, 659.25],
+          [196.00, 392.00, 587.33, 783.99],
+          [220.00, 440.00, 659.25, 880.00]
+        ][sceneIdx % 6];
+
+        freqs.forEach((f, i) => {
+          const osc = audioCtx.createOscillator();
+          const gain = audioCtx.createGain();
+          osc.type = i === 0 ? 'sawtooth' : 'triangle';
+          osc.frequency.setValueAtTime(f, now);
+          gain.gain.setValueAtTime(0.001, now);
+          gain.gain.exponentialRampToValueAtTime(i === 0 ? 0.08 : 0.04, now + 0.06);
+          gain.gain.exponentialRampToValueAtTime(0.0001, now + 1.8);
+          osc.connect(gain);
+          gain.connect(audioCtx.destination);
+          osc.start(now);
+          osc.stop(now + 1.85);
+        });
+      } catch (_) {}
+    }
+
+    function toggleCinemaPlay() {
+      adPlaying = !adPlaying;
+      document.getElementById('play-pause-btn').innerText = adPlaying ? '⏸ PAUSE' : '▶ PLAY';
+    }
+
+    function toggleCinemaAudio() {
+      adAudioEnabled = !adAudioEnabled;
+      document.getElementById('audio-mute-btn').innerText = adAudioEnabled ? '🔊 SYNTH AUDIO: ON' : '🔇 SYNTH AUDIO: OFF';
+      if (adAudioEnabled) playSceneSynthChord(Math.floor(adTime / 6));
+    }
+
+    function restartMotionAdWithAudio() {
+      adTime = 0;
+      adPlaying = true;
+      adAudioEnabled = true;
+      lastSceneTriggered = -1;
+      document.getElementById('play-pause-btn').innerText = '⏸ PAUSE';
+      document.getElementById('audio-mute-btn').innerText = '🔊 SYNTH AUDIO: ON';
+      playSceneSynthChord(0);
+    }
+
+    function jumpToScene(idx) {
+      adTime = idx * 6.0 + 0.01;
+      adPlaying = true;
+      lastSceneTriggered = -1;
+      updateCinemaUi(idx);
+      playSceneSynthChord(idx);
+    }
+
+    function scrubCinema(e) {
+      const rect = e.currentTarget.getBoundingClientRect();
+      const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+      adTime = ratio * AD_DURATION;
+      lastSceneTriggered = -1;
+    }
+
+    function updateCinemaUi(sceneIdx) {
+      const pills = document.querySelectorAll('.scene-pill');
+      pills.forEach((p, i) => p.classList.toggle('active', i === sceneIdx));
+      document.getElementById('cinema-scene-title').innerText = `OPUS 5.5 MAX MOTION ENGINE · ${SCENES[sceneIdx].title}`;
+      document.getElementById('cinema-timecode').innerText = `${adTime.toFixed(2).padStart(5, '0')} / ${AD_DURATION.toFixed(2)} · 60 FPS`;
+      document.getElementById('cinema-progress').style.width = `${(adTime / AD_DURATION) * 100}%`;
+    }
+
+    let lastFrameTs = performance.now();
+    function renderCinemaFrame(now) {
+      requestAnimationFrame(renderCinemaFrame);
+      const dt = Math.min(0.05, (now - lastFrameTs) / 1000);
+      lastFrameTs = now;
+
+      if (adPlaying) {
+        adTime = (adTime + dt) % AD_DURATION;
+      }
+
+      const sceneIdx = Math.min(5, Math.floor(adTime / 6.0));
+      const localT = (adTime % 6.0) / 6.0; // 0..1 within scene
+      if (sceneIdx !== lastSceneTriggered) {
+        lastSceneTriggered = sceneIdx;
+        updateCinemaUi(sceneIdx);
+        playSceneSynthChord(sceneIdx);
+      } else {
+        document.getElementById('cinema-timecode').innerText = `${adTime.toFixed(2).padStart(5, '0')} / ${AD_DURATION.toFixed(2)} · 60 FPS`;
+        document.getElementById('cinema-progress').style.width = `${(adTime / AD_DURATION) * 100}%`;
+      }
+
+      const W = adCanvas.width;
+      const H = adCanvas.height;
+
+      // Deep Carbon Background + Architectural Grid
+      ctx.fillStyle = '#07080A';
+      ctx.fillRect(0, 0, W, H);
+
+      ctx.strokeStyle = 'rgba(255,255,255,0.045)';
+      ctx.lineWidth = 1;
+      const gridOffset = (adTime * 40) % 64;
+      for (let x = -gridOffset; x < W; x += 64) {
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+      }
+      for (let y = 0; y < H; y += 64) {
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+      }
+
+      // Top HUD Framing inside Video
+      ctx.fillStyle = 'rgba(13, 153, 255, 0.14)';
+      ctx.fillRect(48, 38, 290, 28);
+      ctx.strokeStyle = '#0D99FF';
+      ctx.strokeRect(48, 38, 290, 28);
+      ctx.fillStyle = '#0D99FF';
+      ctx.font = '700 12px "JetBrains Mono", monospace';
+      ctx.fillText(SCENES[sceneIdx].title, 60, 56);
+
+      // Scene-specific procedural motion graphics
+      if (sceneIdx === 0) {
+        // SCENE 1: Swarm Awakening (80 particles converging into phone silhouette)
+        const cx = W * 0.5;
+        const cy = H * 0.52;
+        for (let i = 0; i < 64; i++) {
+          const a = (i / 64) * Math.PI * 2 + adTime * 1.4;
+          const r = (1 - Math.min(1, localT * 1.3)) * 420 + 95 + Math.sin(adTime * 3 + i) * 18;
+          const px = cx + Math.cos(a) * r * 1.4;
+          const py = cy + Math.sin(a) * r * 0.75;
+          ctx.fillStyle = i % 3 === 0 ? '#0D99FF' : i % 3 === 1 ? '#10B981' : '#F24822';
+          ctx.beginPath();
+          ctx.arc(px, py, 3.5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+          ctx.beginPath();
+          ctx.moveTo(px, py);
+          ctx.lineTo(cx, cy);
+          ctx.stroke();
+        }
+        ctx.strokeStyle = '#FAFAFA';
+        ctx.lineWidth = 2.5;
+        ctx.strokeRect(cx - 110, cy - 95, 220, 190);
+        ctx.fillStyle = '#FAFAFA';
+        ctx.font = '900 26px Inter, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('HANSON SWARM OS', cx, cy + 8);
+      } else if (sceneIdx === 1) {
+        // SCENE 2: Astra & Argon Mobile I/O Layers
+        const layers = [
+          { label: 'TIER 1 · Z-LAYER ACCESSIBILITY DUMP (NO KEYBOARD NOISE)', col: '#0D99FF', ms: '4ms' },
+          { label: 'TIER 2 · SCREEN-OFF REMOTE-INPUT KAKAOTALK QUICK REPLY', col: '#10B981', ms: '180ms' },
+          { label: 'TIER 3 · ZERO-GUI INTENT TELEPORT (YOUTUBE / MAPS / SETTINGS)', col: '#F59E0B', ms: '20ms' },
+          { label: 'TIER 4 · UID-2000 (:18890) PRIVILEGED BINDER SELF-HEALING CLI', col: '#F24822', ms: '15ms' }
+        ];
+        layers.forEach((l, idx) => {
+          const y = 210 + idx * 82;
+          const slide = Math.min(1, Math.max(0, (localT * 1.6) - idx * 0.18));
+          const x = 140 + (1 - slide) * 180;
+          ctx.fillStyle = 'rgba(255,255,255,0.04)';
+          ctx.strokeStyle = l.col;
+          ctx.lineWidth = 2;
+          ctx.fillRect(x, y, 1000 * slide, 62);
+          ctx.strokeRect(x, y, 1000 * slide, 62);
+          ctx.fillStyle = '#FFFFFF';
+          ctx.font = '700 16px "JetBrains Mono", monospace';
+          ctx.textAlign = 'left';
+          ctx.fillText(l.label, x + 22, y + 37);
+          ctx.fillStyle = l.col;
+          ctx.fillText(l.ms, x + 910 * slide, y + 37);
+        });
+      } else if (sceneIdx === 2) {
+        // SCENE 3: JEV Router FG / BG Parallel Split
+        const cy = 370;
+        ctx.fillStyle = '#0D99FF';
+        ctx.fillRect(100, cy - 35, 280, 70);
+        ctx.fillStyle = '#FFFFFF';
+        ctx.font = '800 16px "JetBrains Mono", monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('JEV ROUTER DISPATCH', 240, cy + 5);
+
+        // Animated packets flowing to FG (top) and BG (bottom)
+        for (let p = 0; p < 12; p++) {
+          const prog = ((adTime * 1.4) + p * 0.08) % 1;
+          const isFg = p % 2 === 0;
+          const px = 380 + prog * 420;
+          const py = cy + (isFg ? -110 : 110) * Math.sin(prog * Math.PI * 0.5);
+          ctx.fillStyle = isFg ? '#0D99FF' : '#10B981';
+          ctx.beginPath();
+          ctx.arc(px, py, 6, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        ctx.strokeStyle = '#0D99FF';
+        ctx.strokeRect(800, 205, 380, 95);
+        ctx.fillStyle = '#FFFFFF';
+        ctx.textAlign = 'left';
+        ctx.fillText('[FG LANE] Gesture & Live UI Control', 820, 245);
+        ctx.fillStyle = '#8FC9D6';
+        ctx.font = '500 13px "JetBrains Mono", monospace';
+        ctx.fillText('Touch Passthrough ON · S25 Nano / Argon', 820, 275);
+
+        ctx.strokeStyle = '#10B981';
+        ctx.strokeRect(800, 425, 380, 95);
+        ctx.fillStyle = '#FFFFFF';
+        ctx.font = '800 16px "JetBrains Mono", monospace';
+        ctx.fillText('[BG LANE] Headless Browser & IoT', 820, 465);
+        ctx.fillStyle = '#10B981';
+        ctx.font = '500 13px "JetBrains Mono", monospace';
+        ctx.fillText('DOM Scrape · App Scan · Quadruped RPC', 820, 495);
+      } else if (sceneIdx === 3) {
+        // SCENE 4: Opus 5.5 Live Code Canvas & Generative Media
+        ctx.strokeStyle = '#7C3AED';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(100, 200, 500, 320);
+        ctx.fillStyle = '#C4B5FD';
+        ctx.font = '600 14px "JetBrains Mono", monospace';
+        ctx.textAlign = 'left';
+        const codeLines = [
+          'tool: "draw_with_code"',
+          'target: "window.HansonOS"',
+          '<svg viewBox="0 0 600 320">',
+          '  <node id="S1_JIT" latency="12ms"/>',
+          '  <node id="OMNI_NEXUS" ports="31"/>',
+          '  <canvas id="procedural_art"/>',
+          '</svg>',
+          '// Auto-healed & mounted in 18ms'
+        ];
+        codeLines.forEach((ln, i) => {
+          if (localT * codeLines.length > i) {
+            ctx.fillText(ln, 128, 245 + i * 32);
+          }
+        });
+
+        // Right side: Live synthesized harmonic waveform & geometry
+        const rcy = 360;
+        ctx.strokeStyle = '#FAFAFA';
+        ctx.strokeRect(660, 200, 500, 320);
+        for (let l = 0; l < 4; l++) {
+          ctx.beginPath();
+          ctx.strokeStyle = l === 0 ? '#0D99FF' : 'rgba(255,255,255,0.28)';
+          for (let x = 680; x <= 1140; x += 8) {
+            const y = rcy + Math.sin((x * 0.018) + adTime * 4 + l) * (42 + l * 14);
+            if (x === 680) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+          }
+          ctx.stroke();
+        }
+      } else if (sceneIdx === 4) {
+        // SCENE 5: Beyond-Habit S2 -> S1 Self-Distillation (620ms -> 12ms)
+        ctx.textAlign = 'left';
+        ctx.fillStyle = '#ADB5BD';
+        ctx.font = '700 16px "JetBrains Mono", monospace';
+        ctx.fillText('EPISODE #1 · SYSTEM-2 CLOUD VLM TEACHER', 140, 250);
+        ctx.fillStyle = '#F59E0B';
+        ctx.fillRect(140, 270, 920, 44);
+        ctx.fillStyle = '#07080A';
+        ctx.fillText('620 ms (Full Deliberative Reasoning)', 160, 298);
+
+        ctx.fillStyle = '#FAFAFA';
+        ctx.fillText('EPISODE #2+ · SYSTEM-1 HABIT JIT MACRO + 16KB CONTRASTIVE VLM', 140, 390);
+        ctx.fillStyle = '#10B981';
+        const barW = Math.max(48, 920 * (1 - Math.min(0.96, localT * 1.4)));
+        ctx.fillRect(140, 410, barW, 54);
+        ctx.fillStyle = '#FFFFFF';
+        ctx.font = '900 22px "JetBrains Mono", monospace';
+        ctx.fillText('12 ms · 50× FASTER · 0 CLOUD TOKENS', 140 + barW + 20, 445);
+      } else {
+        // SCENE 6: Open Source CTA
+        ctx.textAlign = 'center';
+        ctx.fillStyle = '#10B981';
+        ctx.font = '700 16px "JetBrains Mono", monospace';
+        ctx.fillText('MIT OPEN SOURCE · A2A v1.0 · MCP SERVER (:18888)', W / 2, 260);
+        ctx.fillStyle = '#FFFFFF';
+        ctx.font = '900 46px Inter, sans-serif';
+        ctx.fillText('github.com/cjw0076/hanson-mobile-use', W / 2, 340);
+        ctx.fillStyle = '#0D99FF';
+        ctx.fillRect(W / 2 - 210, 390, 420, 64);
+        ctx.fillStyle = '#FFFFFF';
+        ctx.font = '800 20px Inter, sans-serif';
+        ctx.fillText('DOWNLOAD APK v3.0.0 & JOIN THE SWARM', W / 2, 429);
+      }
+
+      // Bottom Cinema Headline Overlay
+      ctx.textAlign = 'left';
+      ctx.fillStyle = '#FFFFFF';
+      ctx.font = '900 34px Inter, sans-serif';
+      ctx.fillText(SCENES[sceneIdx].ko, 48, H - 72);
+      ctx.fillStyle = '#ADB5BD';
+      ctx.font = '500 16px "JetBrains Mono", monospace';
+      ctx.fillText(SCENES[sceneIdx].sub, 48, H - 38);
+    }
+    requestAnimationFrame(renderCinemaFrame);
+
+    // 1-Click WebM Video Exporter using MediaRecorder
+    function exportMotionAdVideo() {
+      const btn = document.getElementById('record-video-btn');
+      if (!adCanvas.captureStream || typeof MediaRecorder === 'undefined') {
+        alert('이 브라우저는 Canvas MediaRecorder를 지원하지 않습니다. 우측의 1080p MP4 다운로드 버튼을 이용해 주세요.');
+        return;
+      }
+      adTime = 0;
+      adPlaying = true;
+      btn.innerText = '⏺ 녹화 중 (12초 하이라이트 생성 중...)';
+      btn.disabled = true;
+
+      const stream = adCanvas.captureStream(60);
+      const chunks = [];
+      const rec = new MediaRecorder(stream, { mimeType: 'video/webm' });
+      rec.ondataavailable = e => { if (e.data && e.data.size > 0) chunks.push(e.data); };
+      rec.onstop = () => {
+        const blob = new Blob(chunks, { type: 'video/webm' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'hanson-mobile-use-opus55-ad.webm';
+        a.click();
+        btn.innerText = '✅ 광고 영상(.webm) 다운로드 완료!';
+        btn.disabled = false;
+      };
+      rec.start();
+      setTimeout(() => { if (rec.state === 'recording') rec.stop(); }, 12000);
+    }
+
+    // =========================================================================
+    // PART 3: INTERACTIVE GALAXY S25 ULTRA SIMULATOR
+    // =========================================================================
+    const SIM_SCENARIOS = [
+      {
+        user: '사족 로봇 제어 카톡방 들어가고, 동시에 내 폰 게임 스캔해줘',
+        lane: 'JEV SPLIT · FG+BG',
+        boardTitle: 'JEV ROUTER · PARALLEL EXECUTION',
+        svg: `<rect x="10" y="15" width="120" height="38" rx="6" fill="#0D99FF"/><text x="70" y="38" fill="#FFF" font-size="9.5" font-family="monospace" text-anchor="middle">[FG] 4족로봇제어 진입</text><rect x="148" y="15" width="122" height="38" rx="6" fill="#10B981"/><text x="209" y="38" fill="#FFF" font-size="9.5" font-family="monospace" text-anchor="middle">[BG] 패키지 스캔 완료</text><text x="140" y="84" fill="#FAFAFA" font-size="9.5" font-family="monospace" text-anchor="middle">2개 레인 동시 완료 · 총 소요시간 190ms</text>`,
+        replies: [
+          { badge: 'FG LANE · S1-CONTRASTIVE-VLM', text: '한글 자모 유사도 매칭으로 [5] "4족로봇제어" 대화방을 찾아 즉시 진입했어요.' },
+          { badge: 'BG LANE · 병렬완료 · 앱/게임 스캔', text: '포그라운드 전환 없이 기기 전체 패키지를 병렬 스캔하여 설치된 앱/게임 목록을 확인했습니다.' }
+        ]
+      },
+      {
+        user: '코드로 S1/S2 아키텍처 성능 차트 그려서 바로 띄워줘',
+        lane: 'OPUS CANVAS · LIVE SVG',
+        boardTitle: 'LIVE METRIC CANVAS · S1 vs S2',
+        svg: `<text x="12" y="24" fill="#FAFAFA" font-size="9" font-family="monospace">S1 Habit JIT (12ms)</text><rect x="12" y="30" width="245" height="12" rx="6" fill="#10B981"/><text x="12" y="60" fill="#A1A1AA" font-size="9" font-family="monospace">S2 Cloud VLM (620ms)</text><rect x="12" y="66" width="68" height="12" rx="6" fill="#0D99FF"/><text x="12" y="100" fill="#10B981" font-size="9.5" font-family="monospace">50x Speedup · Rendered via draw_with_code</text>`,
+        replies: [
+          { badge: 'NEXUS-CODE-CANVAS · draw_with_code', text: '요청하신 S1/S2 성능 비교 차트를 실시간 SVG/HTML5 코드로 합성해 상단 보드에 바로 띄웠어요!' }
+        ]
+      },
+      {
+        user: '유튜브에서 로파이 틀어줘',
+        lane: 'S1 HABIT · 12ms',
+        boardTitle: 'NEXUS-TELEPORT + S1-JIT-MACRO',
+        svg: `<rect x="14" y="20" width="252" height="70" rx="8" fill="#18181B" stroke="#F24822" stroke-width="1.5"/><text x="140" y="48" fill="#F24822" font-size="10.5" font-family="monospace" text-anchor="middle">ZERO-GUI TELEPORT (18ms) HIT!</text><text x="140" y="70" fill="#FAFAFA" font-size="9.5" font-family="monospace" text-anchor="middle">ACTION_SEARCH("로파이") -&gt; 첫 번째 영상 재생</text>`,
+        replies: [
+          { badge: 'NEXUS-TELEPORT · 18ms', text: '유튜브 앱 홈 화면 클릭 단계를 건너뛰고 "로파이" 검색 결과로 0.02초 만에 텔레포트한 뒤 첫 번째 영상을 재생했어요!' }
+        ]
+      },
+      {
+        user: '백그라운드 브라우저로 해커뉴스 요약하고 노트북으로 전송해줘',
+        lane: 'BG BROWSER + PC SYNC',
+        boardTitle: 'MOBILE BROWSER-USE · DOM EXTRACTED',
+        svg: `<rect x="12" y="16" width="256" height="78" rx="8" fill="#18181B" stroke="#0D99FF" stroke-width="1.5"/><text x="24" y="38" fill="#0D99FF" font-size="9.5" font-family="monospace">[BG] news.ycombinator.com (200 OK)</text><text x="24" y="58" fill="#FAFAFA" font-size="9" font-family="monospace">[1] Show HN: Swarm Mobile-Use Agent</text><text x="24" y="76" fill="#10B981" font-size="9" font-family="monospace">-&gt; Synced to Laptop Bridge (:18889)</text>`,
+        replies: [
+          { badge: 'NEXUS-BROWSER-USE + CROSS-DEVICE', text: '화면을 전환하지 않고 백그라운드에서 Hacker News 상위 헤드라인 6건을 추출해 노트북 CLI 브리지(:18889)로 즉시 전송했어요!' }
+        ]
+      }
+    ];
+
+    function runSimScenario(idx) {
+      const sc = SIM_SCENARIOS[idx];
+      const stream = document.getElementById('sim-chat-stream');
+      document.getElementById('sim-lane-pill').innerText = sc.lane;
+      document.getElementById('sim-board-title').innerText = sc.boardTitle;
+      document.getElementById('sim-board-svg').innerHTML = sc.svg;
+
+      const uDiv = document.createElement('div');
+      uDiv.className = 'chat-bubble-user';
+      uDiv.innerText = sc.user;
+      stream.appendChild(uDiv);
+
+      sc.replies.forEach(r => {
+        const aDiv = document.createElement('div');
+        aDiv.className = 'chat-bubble-agent';
+        aDiv.innerHTML = `<div class="chat-badge">${r.badge}</div><div>${r.text}</div>`;
+        stream.appendChild(aDiv);
+      });
+      stream.scrollTop = stream.scrollHeight;
+    }
+  </script>
+</body>
+</html>

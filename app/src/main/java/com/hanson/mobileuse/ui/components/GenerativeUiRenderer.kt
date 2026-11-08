@@ -4,9 +4,16 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color as AndroidColor
+import android.graphics.ColorMatrix
+import android.graphics.ColorMatrixColorFilter
+import android.graphics.Paint
 import android.net.Uri
+import android.view.View
+import android.webkit.ConsoleMessage
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
+import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.foundation.background
@@ -32,6 +39,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -45,6 +53,120 @@ import com.hanson.mobileuse.ui.theme.ObsidianColors
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import org.json.JSONObject
+import java.util.concurrent.CopyOnWriteArrayList
+
+/**
+ * Structured canvas and WebView error telemetry captured from console, runtime errors, and resource failures.
+ */
+data class CanvasErrorTelemetry(
+    val type: String = "runtime_error",
+    val message: String = "",
+    val source: String? = null,
+    val lineNumber: Int? = null,
+    val columnNumber: Int? = null,
+    val timestamp: Long = System.currentTimeMillis(),
+    val rawJson: String = ""
+) {
+    fun toFeedbackPrompt(): String {
+        val loc = buildString {
+            if (lineNumber != null) append(" 라인 $lineNumber")
+            if (columnNumber != null) append(" 컬럼 $columnNumber")
+            if (!source.isNullOrBlank()) append(" (소스: $source)")
+        }.trim()
+        val locStr = if (loc.isNotBlank()) " [$loc]" else ""
+        return "[Canvas Error Intercepted] $type: $message$locStr. 해당 오류를 분석하고 수정된 코드로 즉시 재시도(Self-Correction)하세요."
+    }
+
+    fun toJsonString(): String {
+        return JSONObject().apply {
+            put("type", type)
+            put("message", message)
+            if (source != null) put("source", source)
+            if (lineNumber != null) put("lineNumber", lineNumber)
+            if (columnNumber != null) put("columnNumber", columnNumber)
+            put("timestamp", timestamp)
+            if (rawJson.isNotBlank()) put("rawJson", rawJson)
+        }.toString()
+    }
+
+    companion object {
+        fun fromJson(jsonStr: String): CanvasErrorTelemetry {
+            return runCatching {
+                val obj = JSONObject(jsonStr)
+                CanvasErrorTelemetry(
+                    type = obj.optString("type", "runtime_error"),
+                    message = obj.optString("message", obj.optString("reason", jsonStr)),
+                    source = if (obj.has("source") && !obj.isNull("source")) obj.optString("source") else null,
+                    lineNumber = when {
+                        obj.has("lineNumber") && !obj.isNull("lineNumber") -> obj.optInt("lineNumber")
+                        obj.has("line") && !obj.isNull("line") -> obj.optInt("line")
+                        else -> null
+                    },
+                    columnNumber = when {
+                        obj.has("columnNumber") && !obj.isNull("columnNumber") -> obj.optInt("columnNumber")
+                        obj.has("column") && !obj.isNull("column") -> obj.optInt("column")
+                        obj.has("col") && !obj.isNull("col") -> obj.optInt("col")
+                        else -> null
+                    },
+                    timestamp = obj.optLong("timestamp", System.currentTimeMillis()),
+                    rawJson = jsonStr
+                )
+            }.getOrElse {
+                CanvasErrorTelemetry(
+                    type = "raw_error",
+                    message = jsonStr,
+                    rawJson = jsonStr
+                )
+            }
+        }
+    }
+}
+
+object GenerativeUiRendererDefaults {
+    const val GLOBAL_ERROR_HANDLER_SCRIPT = """
+<script>
+window.onerror = function(msg, url, line, col, error) {
+    if (window.HansonOS && window.HansonOS.reportError) {
+        window.HansonOS.reportError(JSON.stringify({ type: 'runtime_error', message: String(msg), line: line, column: col }));
+    }
+};
+window.addEventListener('unhandledrejection', function(event) {
+    if (window.HansonOS && window.HansonOS.reportError) {
+        window.HansonOS.reportError(JSON.stringify({ type: 'unhandled_rejection', reason: String(event.reason) }));
+    }
+});
+</script>
+"""
+
+    const val ACHROMATIC_DEFENSIVE_CSS = """
+<style id="achromatic-guard">
+  html, body {
+    -webkit-filter: grayscale(100%) !important;
+    filter: grayscale(100%) !important;
+  }
+</style>
+"""
+
+    fun instrumentHtml(rawHtml: String): String {
+        var html = rawHtml
+        if (!html.contains("filter: grayscale(100%)") && !html.contains("filter:grayscale(100%)")) {
+            html = when {
+                html.contains("<head>", ignoreCase = true) -> html.replaceFirst(Regex("(?i)<head>"), "<head>\n$ACHROMATIC_DEFENSIVE_CSS\n")
+                html.contains("<html>", ignoreCase = true) -> html.replaceFirst(Regex("(?i)<html>"), "<html>\n<head>\n$ACHROMATIC_DEFENSIVE_CSS\n</head>\n")
+                else -> "$ACHROMATIC_DEFENSIVE_CSS\n$html"
+            }
+        }
+        if (!html.contains("window.onerror") || !html.contains("reportError")) {
+            html = when {
+                html.contains("<head>", ignoreCase = true) -> html.replaceFirst(Regex("(?i)<head>"), "<head>\n$GLOBAL_ERROR_HANDLER_SCRIPT\n")
+                html.contains("<body>", ignoreCase = true) -> html.replaceFirst(Regex("(?i)<body>"), "<body>\n$GLOBAL_ERROR_HANDLER_SCRIPT\n")
+                else -> "$GLOBAL_ERROR_HANDLER_SCRIPT\n$html"
+            }
+        }
+        return html
+    }
+}
 
 data class GenerativeUiSpec(
     val id: String = "gen_ui_${System.currentTimeMillis()}",
@@ -64,7 +186,48 @@ object GenerativeUiStateHolder {
     private val _activeSpec = MutableStateFlow<GenerativeUiSpec?>(defaultSuperAppCockpitSpec())
     val activeSpec: StateFlow<GenerativeUiSpec?> = _activeSpec.asStateFlow()
 
+    private val _lastError = MutableStateFlow<CanvasErrorTelemetry?>(null)
+    val lastError: StateFlow<CanvasErrorTelemetry?> = _lastError.asStateFlow()
+
+    private val _errorHistory = MutableStateFlow<List<CanvasErrorTelemetry>>(emptyList())
+    val errorHistory: StateFlow<List<CanvasErrorTelemetry>> = _errorHistory.asStateFlow()
+
+    var onErrorReported: ((CanvasErrorTelemetry) -> Unit)? = null
+    private val errorListeners = CopyOnWriteArrayList<(CanvasErrorTelemetry) -> Unit>()
+
+    fun addErrorListener(listener: (CanvasErrorTelemetry) -> Unit) {
+        errorListeners.add(listener)
+    }
+
+    fun removeErrorListener(listener: (CanvasErrorTelemetry) -> Unit) {
+        errorListeners.remove(listener)
+    }
+
+    fun reportError(errorJson: String) {
+        val telemetry = CanvasErrorTelemetry.fromJson(errorJson)
+        reportError(telemetry)
+    }
+
+    fun reportError(telemetry: CanvasErrorTelemetry) {
+        _lastError.value = telemetry
+        _errorHistory.value = _errorHistory.value + telemetry
+        onErrorReported?.invoke(telemetry)
+        errorListeners.forEach { runCatching { it.invoke(telemetry) } }
+    }
+
+    fun clearError() {
+        _lastError.value = null
+    }
+
+    fun clearErrorHistory() {
+        _errorHistory.value = emptyList()
+        _lastError.value = null
+    }
+
+    fun hasError(): Boolean = _lastError.value != null
+
     fun publishSpec(spec: GenerativeUiSpec) {
+        clearError()
         _activeSpec.value = spec
     }
 
@@ -73,6 +236,7 @@ object GenerativeUiStateHolder {
     }
 
     fun restoreDefaultCockpit() {
+        clearError()
         _activeSpec.value = defaultSuperAppCockpitSpec()
     }
 
@@ -106,6 +270,10 @@ object GenerativeUiStateHolder {
     }
   }
   * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Pretendard", sans-serif; }
+  html, body {
+    filter: grayscale(100%) !important;
+    -webkit-filter: grayscale(100%) !important;
+  }
   body {
     background: transparent;
     color: var(--ink);
@@ -164,6 +332,18 @@ object GenerativeUiStateHolder {
     color: var(--ink);
   }
 </style>
+<script>
+  window.onerror = function(msg, url, line, col, error) {
+      if (window.HansonOS && window.HansonOS.reportError) {
+          window.HansonOS.reportError(JSON.stringify({ type: 'runtime_error', message: String(msg), line: line, column: col }));
+      }
+  };
+  window.addEventListener('unhandledrejection', function(event) {
+      if (window.HansonOS && window.HansonOS.reportError) {
+          window.HansonOS.reportError(JSON.stringify({ type: 'unhandled_rejection', reason: String(event.reason) }));
+      }
+  });
+</script>
 </head>
 <body>
   <div class="grid">
@@ -211,7 +391,8 @@ object GenerativeUiStateHolder {
 
 class HansonJsBridge(
     private val context: Context,
-    private val onRunCommand: (String) -> Unit
+    private val onRunCommand: (String) -> Unit,
+    private val onError: ((String) -> Unit)? = null
 ) {
     @JavascriptInterface
     fun runCommand(prompt: String) {
@@ -236,16 +417,93 @@ class HansonJsBridge(
     fun speak(text: String) {
         LiveVoiceSessionManager.speakConversationalFiller(text)
     }
+
+    @JavascriptInterface
+    fun reportError(errorJson: String) {
+        if (errorJson.isNotBlank()) {
+            GenerativeUiStateHolder.reportError(errorJson)
+            onError?.invoke(errorJson)
+        }
+    }
+}
+
+/**
+ * Custom WebChromeClient that intercepts console errors and forwards them to HansonJsBridge.
+ */
+open class HansonWebChromeClient(
+    private val bridge: HansonJsBridge
+) : WebChromeClient() {
+    override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
+        if (consoleMessage != null && consoleMessage.messageLevel() == ConsoleMessage.MessageLevel.ERROR) {
+            val errObj = JSONObject().apply {
+                put("type", "console_error")
+                put("message", consoleMessage.message().orEmpty())
+                put("source", consoleMessage.sourceId().orEmpty())
+                put("lineNumber", consoleMessage.lineNumber())
+                put("timestamp", System.currentTimeMillis())
+            }
+            bridge.reportError(errObj.toString())
+        }
+        return super.onConsoleMessage(consoleMessage)
+    }
+}
+
+/**
+ * Custom WebViewClient that intercepts page load and resource errors and forwards them to HansonJsBridge.
+ */
+open class HansonWebViewClient(
+    private val bridge: HansonJsBridge
+) : WebViewClient() {
+    override fun onReceivedError(
+        view: WebView?,
+        request: WebResourceRequest?,
+        error: WebResourceError?
+    ) {
+        super.onReceivedError(view, request, error)
+        val errObj = JSONObject().apply {
+            put("type", "webview_load_error")
+            put("message", error?.description?.toString() ?: "Unknown WebView Error")
+            put("source", request?.url?.toString().orEmpty())
+            put("errorCode", error?.errorCode ?: -1)
+            put("timestamp", System.currentTimeMillis())
+        }
+        bridge.reportError(errObj.toString())
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onReceivedError(
+        view: WebView?,
+        errorCode: Int,
+        description: String?,
+        failingUrl: String?
+    ) {
+        @Suppress("DEPRECATION")
+        super.onReceivedError(view, errorCode, description, failingUrl)
+        val errObj = JSONObject().apply {
+            put("type", "webview_load_error")
+            put("message", description ?: "Unknown WebView Error")
+            put("source", failingUrl.orEmpty())
+            put("errorCode", errorCode)
+            put("timestamp", System.currentTimeMillis())
+        }
+        bridge.reportError(errObj.toString())
+    }
 }
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 fun GenerativeUiSurfaceCard(
     onRunCommand: (String) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onError: ((String) -> Unit)? = null
 ) {
     val spec by GenerativeUiStateHolder.activeSpec.collectAsState()
+    val lastError by GenerativeUiStateHolder.lastError.collectAsState()
     val currentSpec = spec ?: return
+
+    val finalHtml = remember(currentSpec.htmlContent) {
+        GenerativeUiRendererDefaults.instrumentHtml(currentSpec.htmlContent)
+    }
 
     GlassCard(
         modifier = modifier.fillMaxWidth(),
@@ -332,20 +590,26 @@ fun GenerativeUiSurfaceCard(
                 .height(currentSpec.heightDp.dp)
                 .clip(RoundedCornerShape(12.dp)),
             factory = { ctx ->
+                val bridge = HansonJsBridge(ctx.applicationContext, onRunCommand, onError)
                 WebView(ctx).apply {
                     setBackgroundColor(AndroidColor.TRANSPARENT)
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
-                    webChromeClient = WebChromeClient()
-                    webViewClient = WebViewClient()
-                    addJavascriptInterface(
-                        HansonJsBridge(ctx.applicationContext, onRunCommand),
-                        "HansonOS"
-                    )
-                    tag = currentSpec.id
+                    webChromeClient = HansonWebChromeClient(bridge)
+                    webViewClient = HansonWebViewClient(bridge)
+                    addJavascriptInterface(bridge, "HansonOS")
+
+                    // Pure achromatic defense via hardware layer ColorMatrix filter
+                    val achromaticPaint = Paint().apply {
+                        colorFilter = ColorMatrixColorFilter(ColorMatrix().apply { setSaturation(0f) })
+                    }
+                    setLayerType(View.LAYER_TYPE_HARDWARE, achromaticPaint)
+
+                    val key = "${currentSpec.id}_${finalHtml.hashCode()}"
+                    tag = key
                     loadDataWithBaseURL(
                         "https://hanson.local/",
-                        currentSpec.htmlContent,
+                        finalHtml,
                         "text/html",
                         "utf-8",
                         null
@@ -353,11 +617,12 @@ fun GenerativeUiSurfaceCard(
                 }
             },
             update = { webView ->
-                if (webView.tag != currentSpec.id) {
-                    webView.tag = currentSpec.id
+                val key = "${currentSpec.id}_${finalHtml.hashCode()}"
+                if (webView.tag != key) {
+                    webView.tag = key
                     webView.loadDataWithBaseURL(
                         "https://hanson.local/",
-                        currentSpec.htmlContent,
+                        finalHtml,
                         "text/html",
                         "utf-8",
                         null
@@ -365,5 +630,35 @@ fun GenerativeUiSurfaceCard(
                 }
             }
         )
+
+        if (lastError != null) {
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(ObsidianColors.SurfaceHigh)
+                    .border(1.dp, ObsidianColors.GlassBorder, RoundedCornerShape(8.dp))
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "⚠ [CANVAS ERROR] ${lastError?.type}: ${lastError?.message?.take(36)}",
+                    color = ObsidianColors.TextPrimary,
+                    fontSize = 10.sp,
+                    fontFamily = FontFamily.Monospace,
+                    maxLines = 1
+                )
+                Text(
+                    text = "CLEAR",
+                    color = ObsidianColors.TextSecondary,
+                    fontSize = 9.sp,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.clickable { GenerativeUiStateHolder.clearError() }
+                )
+            }
+        }
     }
 }

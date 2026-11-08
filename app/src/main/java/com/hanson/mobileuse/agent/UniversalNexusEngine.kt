@@ -14,6 +14,8 @@ import com.hanson.mobileuse.accessibility.AtomicSnapshot
 import com.hanson.mobileuse.accessibility.HansonAccessibilityService
 import com.hanson.mobileuse.notification.InterceptedNotification
 import com.hanson.mobileuse.notification.RemoteInputSessionCache
+import com.hanson.mobileuse.ui.components.CanvasErrorTelemetry
+import com.hanson.mobileuse.ui.components.GenerativeUiRendererDefaults
 import com.hanson.mobileuse.ui.components.GenerativeUiSpec
 import com.hanson.mobileuse.ui.components.GenerativeUiStateHolder
 import okhttp3.MediaType.Companion.toMediaType
@@ -63,7 +65,9 @@ data class NexusExecutionResult(
     val summaryKo: String,
     val badge: String,
     val followUpGuiGoal: String? = null,
-    val renderedVisualBoard: Boolean = false
+    val renderedVisualBoard: Boolean = false,
+    val errorTelemetry: CanvasErrorTelemetry? = null,
+    val hasError: Boolean = errorTelemetry != null
 )
 
 /**
@@ -112,8 +116,58 @@ class UniversalNexusEngine(
     var totalVisualSyntheses: Int = 0
         private set
 
+    var lastObservedCanvasError: CanvasErrorTelemetry? = null
+        private set
+
     init {
         loadRulesFromDisk()
+        GenerativeUiStateHolder.addErrorListener { err ->
+            lastObservedCanvasError = err
+        }
+    }
+
+    fun getLatestCanvasError(): CanvasErrorTelemetry? = GenerativeUiStateHolder.lastError.value
+    fun hasCanvasError(): Boolean = GenerativeUiStateHolder.hasError()
+    fun clearCanvasError() {
+        lastObservedCanvasError = null
+        GenerativeUiStateHolder.clearError()
+    }
+    fun getCanvasErrorHistory(): List<CanvasErrorTelemetry> = GenerativeUiStateHolder.errorHistory.value
+
+    fun onCanvasExecutionError(errorJson: String): ToolExecutionOutcome {
+        GenerativeUiStateHolder.reportError(errorJson)
+        val telemetry = GenerativeUiStateHolder.lastError.value
+        val feedback = telemetry?.toFeedbackPrompt() ?: "캔버스 실행 오류: $errorJson"
+        return ToolExecutionOutcome(
+            succeeded = false,
+            outputText = "[Canvas Execution Error Intercepted] $feedback",
+            receipt = ActionReceipt(
+                toolName = "draw_with_code",
+                summaryKo = "캔버스 런타임 오류 포착: ${telemetry?.type ?: "error"}",
+                detailKo = feedback,
+                undoHintKo = "에이전트 자체 수정 루프(Self-Correction)를 통해 코드를 수정합니다."
+            )
+        )
+    }
+
+    fun buildSelfCorrectionPrompt(error: CanvasErrorTelemetry? = null): String {
+        val err = error ?: GenerativeUiStateHolder.lastError.value
+        return err?.toFeedbackPrompt() ?: ""
+    }
+
+    fun executeCanvasSelfCorrection(
+        correctedPrompt: String,
+        correctedCode: String,
+        title: String = ""
+    ): ToolExecutionOutcome {
+        clearCanvasError()
+        return executeDrawWithCode(
+            JSONObject().apply {
+                put("prompt", correctedPrompt)
+                put("code_or_svg", correctedCode)
+                if (title.isNotBlank()) put("title", title)
+            }
+        )
     }
 
     /**
@@ -132,6 +186,27 @@ class UniversalNexusEngine(
     ): NexusExecutionResult? {
         val p = prompt.trim()
         val pLower = p.lowercase(Locale.ROOT)
+
+        // Pillar 4-C: Canvas Error Self-Correction Handling ("캔버스 오류 수정", "에러 고쳐줘", "자체 교정")
+        if ((pLower.contains("캔버스 오류") || pLower.contains("코드 오류") || pLower.contains("캔버스 에러")) &&
+            (pLower.contains("수정") || pLower.contains("고쳐") || pLower.contains("재시도") || pLower.contains("자체 교정") || pLower.contains("복구"))
+        ) {
+            val lastErr = GenerativeUiStateHolder.lastError.value
+            val errDesc = lastErr?.message ?: "런타임 에러"
+            val outcome = executeCanvasSelfCorrection(
+                correctedPrompt = "자체 교정된 무채색 시각화 캔버스",
+                correctedCode = "",
+                title = "자체 교정 캔버스 · $errDesc"
+            )
+            return NexusExecutionResult(
+                handled = true,
+                summaryKo = "이전 캔버스 오류($errDesc)를 분석하여 에이전트 자체 교정(Self-Correction) 루프를 통해 안전한 인터랙티브 캔버스로 재렌더링했습니다.",
+                badge = "NEXUS-CANVAS-SELF-CORRECT",
+                renderedVisualBoard = true,
+                errorTelemetry = null,
+                hasError = false
+            )
+        }
 
         // Pillar 4-A: AI Image / Illustration Generation ("이미지 생성", "그림 그려서 보여줘", "일러스트 생성")
         if ((pLower.contains("이미지") || pLower.contains("그림") || pLower.contains("일러스트") || pLower.contains("포스터") || pLower.contains("아트")) &&
@@ -158,11 +233,14 @@ class UniversalNexusEngine(
             val outcome = executeDrawWithCode(
                 JSONObject().put("prompt", p).put("canvas_type", "auto")
             )
+            val currentErr = GenerativeUiStateHolder.lastError.value
             return NexusExecutionResult(
                 handled = true,
                 summaryKo = outcome.outputText,
-                badge = "NEXUS-CODE-CANVAS",
-                renderedVisualBoard = true
+                badge = if (outcome.succeeded) "NEXUS-CODE-CANVAS" else "NEXUS-CANVAS-ERROR",
+                renderedVisualBoard = true,
+                errorTelemetry = currentErr,
+                hasError = !outcome.succeeded || currentErr != null
             )
         }
 
@@ -566,6 +644,10 @@ class UniversalNexusEngine(
     :root { --bg: #121214; --sub: #18181B; --line: #27272A; --ink: #FAFAFA; --muted: #A1A1AA; }
   }
   * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
+  html, body {
+    filter: grayscale(100%) !important;
+    -webkit-filter: grayscale(100%) !important;
+  }
   body { background: transparent; color: var(--ink); padding: 4px; }
   .card { background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 10px; }
   .hdr { font-size: 12.5px; font-weight: 800; margin-bottom: 4px; }
@@ -576,6 +658,18 @@ class UniversalNexusEngine(
   .idx { font-family: monospace; font-weight: 700; color: var(--ink); }
   .lbl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>
+<script>
+window.onerror = function(msg, url, line, col, error) {
+    if (window.HansonOS && window.HansonOS.reportError) {
+        window.HansonOS.reportError(JSON.stringify({ type: 'runtime_error', message: String(msg), line: line, column: col }));
+    }
+};
+window.addEventListener('unhandledrejection', function(event) {
+    if (window.HansonOS && window.HansonOS.reportError) {
+        window.HansonOS.reportError(JSON.stringify({ type: 'unhandled_rejection', reason: String(event.reason) }));
+    }
+});
+</script>
 </head>
 <body>
   <div class="card">
@@ -604,9 +698,27 @@ class UniversalNexusEngine(
             "코드 라이브 캔버스 · ${prompt.take(18)}"
         }
 
+        // Static syntax & error safety validation
+        if (customCode.isNotBlank()) {
+            val syntaxError = validateCanvasCode(customCode)
+            if (syntaxError != null) {
+                GenerativeUiStateHolder.reportError(syntaxError)
+                return ToolExecutionOutcome(
+                    succeeded = false,
+                    outputText = "[Canvas Error] 문법 또는 구문 오류가 감지되었습니다: ${syntaxError.message}. 자체 수정 피드백: ${syntaxError.toFeedbackPrompt()}",
+                    receipt = ActionReceipt(
+                        toolName = "draw_with_code",
+                        summaryKo = "캔버스 렌더링 문법 오류: ${syntaxError.message.take(24)}",
+                        detailKo = syntaxError.toFeedbackPrompt(),
+                        undoHintKo = "수정된 자바스크립트/HTML 문법으로 재시도하세요."
+                    )
+                )
+            }
+        }
+
         val htmlContent = if (customCode.isNotBlank()) {
             if (customCode.contains("<html", ignoreCase = true) || customCode.contains("<!DOCTYPE", ignoreCase = true)) {
-                customCode
+                GenerativeUiRendererDefaults.instrumentHtml(customCode)
             } else {
                 wrapSvgOrFragmentInAchromaticCanvas(title, customCode)
             }
@@ -633,6 +745,117 @@ class UniversalNexusEngine(
                 undoHintKo = "우측 상단 새로고침 버튼으로 기본 보드로 되돌릴 수 있습니다."
             )
         )
+    }
+
+    fun validateCanvasCode(code: String): CanvasErrorTelemetry? {
+        val trimmed = code.trim()
+        if (trimmed.isEmpty()) {
+            return CanvasErrorTelemetry(
+                type = "syntax_error",
+                message = "캔버스 코드가 비어 있습니다."
+            )
+        }
+
+        // Check for unclosed script tags
+        val scriptOpenCount = Regex("<script\\b", RegexOption.IGNORE_CASE).findAll(trimmed).count()
+        val scriptCloseCount = Regex("</script>", RegexOption.IGNORE_CASE).findAll(trimmed).count()
+        if (scriptOpenCount != scriptCloseCount) {
+            return CanvasErrorTelemetry(
+                type = "syntax_error",
+                message = "스크립트 태그가 올바르게 닫히지 않았습니다 (<script> $scriptOpenCount vs </script> $scriptCloseCount)."
+            )
+        }
+
+        // Check for unclosed svg tags if code is an SVG fragment
+        if (trimmed.startsWith("<svg", ignoreCase = true) && !trimmed.contains("</svg>", ignoreCase = true)) {
+            return CanvasErrorTelemetry(
+                type = "syntax_error",
+                message = "SVG 태그가 올바르게 닫히지 않았습니다 (</svg> 누락)."
+            )
+        }
+
+        // Check for unclosed style tags
+        val styleOpenCount = Regex("<style\\b", RegexOption.IGNORE_CASE).findAll(trimmed).count()
+        val styleCloseCount = Regex("</style>", RegexOption.IGNORE_CASE).findAll(trimmed).count()
+        if (styleOpenCount != styleCloseCount) {
+            return CanvasErrorTelemetry(
+                type = "syntax_error",
+                message = "스타일 태그가 올바르게 닫히지 않았습니다 (<style> $styleOpenCount vs </style> $styleCloseCount)."
+            )
+        }
+
+        // Check for inline JS errors inside <script> blocks
+        Regex("(?si)<script\\b[^>]*>(.*?)</script>").findAll(trimmed).forEach { match ->
+            val jsCode = match.groupValues[1]
+            val jsError = validateJsBracesAndParentheses(jsCode)
+            if (jsError != null) {
+                return CanvasErrorTelemetry(
+                    type = "js_syntax_error",
+                    message = "자바스크립트 구문 오류: $jsError"
+                )
+            }
+        }
+
+        return null
+    }
+
+    private fun validateJsBracesAndParentheses(jsCode: String): String? {
+        var braces = 0
+        var parens = 0
+        var brackets = 0
+        var inSingleQuote = false
+        var inDoubleQuote = false
+        var inBacktick = false
+        var escaped = false
+
+        for (ch in jsCode) {
+            if (escaped) {
+                escaped = false
+                continue
+            }
+            if (ch == '\\') {
+                escaped = true
+                continue
+            }
+            if (ch == '\'' && !inDoubleQuote && !inBacktick) {
+                inSingleQuote = !inSingleQuote
+                continue
+            }
+            if (ch == '"' && !inSingleQuote && !inBacktick) {
+                inDoubleQuote = !inDoubleQuote
+                continue
+            }
+            if (ch == '`' && !inSingleQuote && !inDoubleQuote) {
+                inBacktick = !inBacktick
+                continue
+            }
+            if (inSingleQuote || inDoubleQuote || inBacktick) continue
+
+            when (ch) {
+                '{' -> braces++
+                '}' -> {
+                    braces--
+                    if (braces < 0) return "닫는 중괄호('}')가 여는 중괄호 없이 사용되었습니다."
+                }
+                '(' -> parens++
+                ')' -> {
+                    parens--
+                    if (parens < 0) return "닫는 소괄호(')')가 여는 소괄호 없이 사용되었습니다."
+                }
+                '[' -> brackets++
+                ']' -> {
+                    brackets--
+                    if (brackets < 0) return "닫는 대괄호(']')가 여는 대괄호 없이 사용되었습니다."
+                }
+            }
+        }
+        if (inSingleQuote) return "작은따옴표(')가 닫히지 않았습니다."
+        if (inDoubleQuote) return "큰따옴표(\")가 닫히지 않았습니다."
+        if (inBacktick) return "백틱(`)이 닫히지 않았습니다."
+        if (braces > 0) return "중괄호('{') ${braces}개가 닫히지 않았습니다."
+        if (parens > 0) return "소괄호('(') ${parens}개가 닫히지 않았습니다."
+        if (brackets > 0) return "대괄호('[') ${brackets}개가 닫히지 않았습니다."
+        return null
     }
 
     /**
@@ -739,10 +962,26 @@ class UniversalNexusEngine(
   :root { --bg: #FFFFFF; --ink: #09090B; --line: #E4E4E7; }
   @media (prefers-color-scheme: dark) { :root { --bg: #121214; --ink: #FAFAFA; --line: #27272A; } }
   * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, sans-serif; }
+  html, body {
+    filter: grayscale(100%) !important;
+    -webkit-filter: grayscale(100%) !important;
+  }
   body { background: transparent; color: var(--ink); display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 240px; padding: 6px; }
   .stage { width: 100%; background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 10px; display: flex; flex-direction: column; align-items: center; justify-content: center; overflow: hidden; }
   svg { max-width: 100%; height: auto; }
 </style>
+<script>
+window.onerror = function(msg, url, line, col, error) {
+    if (window.HansonOS && window.HansonOS.reportError) {
+        window.HansonOS.reportError(JSON.stringify({ type: 'runtime_error', message: String(msg), line: line, column: col }));
+    }
+};
+window.addEventListener('unhandledrejection', function(event) {
+    if (window.HansonOS && window.HansonOS.reportError) {
+        window.HansonOS.reportError(JSON.stringify({ type: 'unhandled_rejection', reason: String(event.reason) }));
+    }
+});
+</script>
 </head>
 <body>
   <div class="stage">$fragment</div>
@@ -767,6 +1006,10 @@ class UniversalNexusEngine(
   :root { --bg: #FFFFFF; --sub: #F4F4F5; --ink: #09090B; --muted: #71717A; --line: #D4D4D8; }
   @media (prefers-color-scheme: dark) { :root { --bg: #121214; --sub: #18181B; --ink: #FAFAFA; --muted: #A1A1AA; --line: #3F3F46; } }
   * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, monospace; }
+  html, body {
+    filter: grayscale(100%) !important;
+    -webkit-filter: grayscale(100%) !important;
+  }
   body { background: transparent; color: var(--ink); padding: 4px; }
   .board { background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 10px; }
   .caption { font-size: 11px; font-weight: 700; margin-bottom: 6px; display: flex; justify-content: space-between; }
@@ -778,6 +1021,18 @@ class UniversalNexusEngine(
   .edge { stroke: var(--ink); stroke-width: 1.4; stroke-dasharray: 4 3; fill: none; animation: dash 12s linear infinite; }
   @keyframes dash { to { stroke-dashoffset: -120; } }
 </style>
+<script>
+window.onerror = function(msg, url, line, col, error) {
+    if (window.HansonOS && window.HansonOS.reportError) {
+        window.HansonOS.reportError(JSON.stringify({ type: 'runtime_error', message: String(msg), line: line, column: col }));
+    }
+};
+window.addEventListener('unhandledrejection', function(event) {
+    if (window.HansonOS && window.HansonOS.reportError) {
+        window.HansonOS.reportError(JSON.stringify({ type: 'unhandled_rejection', reason: String(event.reason) }));
+    }
+});
+</script>
 </head>
 <body>
   <div class="board">
@@ -835,6 +1090,10 @@ class UniversalNexusEngine(
   :root { --bg: #FFFFFF; --sub: #F4F4F5; --ink: #09090B; --muted: #71717A; --line: #E4E4E7; }
   @media (prefers-color-scheme: dark) { :root { --bg: #121214; --sub: #18181B; --ink: #FAFAFA; --muted: #A1A1AA; --line: #27272A; } }
   * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, monospace; }
+  html, body {
+    filter: grayscale(100%) !important;
+    -webkit-filter: grayscale(100%) !important;
+  }
   body { background: transparent; color: var(--ink); padding: 4px; }
   .card { background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
   .title { font-size: 12px; font-weight: 800; margin-bottom: 10px; display: flex; justify-content: space-between; }
@@ -844,6 +1103,18 @@ class UniversalNexusEngine(
   .fill { height: 100%; background: var(--ink); border-radius: 999px; transition: width 0.4s cubic-bezier(.2,.8,.2,1); }
   .foot { font-size: 10px; color: var(--muted); margin-top: 8px; text-align: right; }
 </style>
+<script>
+window.onerror = function(msg, url, line, col, error) {
+    if (window.HansonOS && window.HansonOS.reportError) {
+        window.HansonOS.reportError(JSON.stringify({ type: 'runtime_error', message: String(msg), line: line, column: col }));
+    }
+};
+window.addEventListener('unhandledrejection', function(event) {
+    if (window.HansonOS && window.HansonOS.reportError) {
+        window.HansonOS.reportError(JSON.stringify({ type: 'unhandled_rejection', reason: String(event.reason) }));
+    }
+});
+</script>
 </head>
 <body>
   <div class="card" onclick="randomizeBars()">
@@ -898,11 +1169,27 @@ class UniversalNexusEngine(
   :root { --bg: #FFFFFF; --ink: #09090B; --line: #E4E4E7; }
   @media (prefers-color-scheme: dark) { :root { --bg: #121214; --ink: #FAFAFA; --line: #27272A; } }
   * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, sans-serif; }
+  html, body {
+    filter: grayscale(100%) !important;
+    -webkit-filter: grayscale(100%) !important;
+  }
   body { background: transparent; color: var(--ink); padding: 4px; }
   .frame { background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 8px; text-align: center; }
   img { max-width: 100%; max-height: 220px; border-radius: 8px; object-fit: contain; }
   .cap { font-size: 11px; font-weight: 600; margin-top: 6px; }
 </style>
+<script>
+window.onerror = function(msg, url, line, col, error) {
+    if (window.HansonOS && window.HansonOS.reportError) {
+        window.HansonOS.reportError(JSON.stringify({ type: 'runtime_error', message: String(msg), line: line, column: col }));
+    }
+};
+window.addEventListener('unhandledrejection', function(event) {
+    if (window.HansonOS && window.HansonOS.reportError) {
+        window.HansonOS.reportError(JSON.stringify({ type: 'unhandled_rejection', reason: String(event.reason) }));
+    }
+});
+</script>
 </head>
 <body>
   <div class="frame">
@@ -927,12 +1214,28 @@ class UniversalNexusEngine(
   :root { --bg: #FFFFFF; --ink: #09090B; --muted: #71717A; --line: #E4E4E7; }
   @media (prefers-color-scheme: dark) { :root { --bg: #121214; --ink: #FAFAFA; --muted: #A1A1AA; --line: #27272A; } }
   * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, monospace; }
+  html, body {
+    filter: grayscale(100%) !important;
+    -webkit-filter: grayscale(100%) !important;
+  }
   body { background: transparent; color: var(--ink); padding: 4px; user-select: none; }
   .wrap { background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 8px; position: relative; }
   canvas { width: 100%; height: 210px; display: block; border-radius: 8px; cursor: pointer; }
   .meta { display: flex; justify-content: space-between; align-items: center; font-size: 10.5px; margin-top: 6px; font-weight: 700; }
   .pill { padding: 2px 7px; border: 1px solid var(--line); border-radius: 999px; font-size: 9.5px; }
 </style>
+<script>
+window.onerror = function(msg, url, line, col, error) {
+    if (window.HansonOS && window.HansonOS.reportError) {
+        window.HansonOS.reportError(JSON.stringify({ type: 'runtime_error', message: String(msg), line: line, column: col }));
+    }
+};
+window.addEventListener('unhandledrejection', function(event) {
+    if (window.HansonOS && window.HansonOS.reportError) {
+        window.HansonOS.reportError(JSON.stringify({ type: 'unhandled_rejection', reason: String(event.reason) }));
+    }
+});
+</script>
 </head>
 <body>
   <div class="wrap" onclick="nextSeed()">

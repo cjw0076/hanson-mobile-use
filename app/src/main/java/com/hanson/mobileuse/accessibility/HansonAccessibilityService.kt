@@ -39,12 +39,15 @@ class HansonAccessibilityService : AccessibilityService() {
 
         @Volatile
         var instance: HansonAccessibilityService? = null
-            private set
 
         private val _engineState = MutableStateFlow(AccessibilityEngineState())
         val engineState: StateFlow<AccessibilityEngineState> = _engineState.asStateFlow()
 
         fun isServiceActive(): Boolean = instance != null && _engineState.value.isConnected
+
+        fun initiateSelfHealing(context: android.content.Context): Boolean {
+            return com.hanson.mobileuse.service.HansonForegroundService.initiateAccessibilitySelfHealing(context)
+        }
     }
 
     private var commandServer: ArtemisCommandServer? = null

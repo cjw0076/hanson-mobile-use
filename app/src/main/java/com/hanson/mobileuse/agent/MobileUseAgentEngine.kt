@@ -14,6 +14,8 @@ import com.hanson.mobileuse.paradigm.SemanticTeleportRouter
 import com.hanson.mobileuse.paradigm.WorldModelGraph
 import com.hanson.mobileuse.service.FloatingHudService
 import com.hanson.mobileuse.service.HansonForegroundService
+import com.hanson.mobileuse.ui.components.CanvasErrorTelemetry
+import com.hanson.mobileuse.ui.components.GenerativeUiStateHolder
 import com.hanson.mobileuse.ui.theme.ObsidianColors
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -123,6 +125,9 @@ class MobileUseAgentEngine(
         FloatingHudService.onSendLiveChatMessage = { userMsg -> sendChatMessage(userMsg) }
         LiveVoiceSessionManager.ensureInitialized(context) { spoken ->
             sendChatMessage(spoken)
+        }
+        GenerativeUiStateHolder.addErrorListener { telemetry ->
+            onCanvasExecutionError(telemetry.rawJson.ifBlank { telemetry.toJsonString() })
         }
     }
 
@@ -992,8 +997,9 @@ class MobileUseAgentEngine(
                 fastSnapshot!!
             }
 
+            val taskComplexity = aiInfrastructureRouter.estimateTaskComplexity(currentGoal, snapshot)
             _currentSession.update { it.copy(status = AgentRunStatus.THINKING) }
-            FloatingHudService.updateHudStatus("S1/S2 계층 분기 중", currentGoal.take(28), true)
+            FloatingHudService.updateHudStatus("S1/S2 계층 분기 [${taskComplexity.name}]", currentGoal.take(28), true)
 
             val stepStartMs = System.currentTimeMillis()
             val prevSteps = _currentSession.value.steps
@@ -1406,6 +1412,39 @@ class MobileUseAgentEngine(
         speakIfEnabled(maxMsg)
         FloatingHudService.updateHudStatus("소통 및 제어 대기", "다음 명령 대기", false)
     }
+
+    /**
+     * Intercepts Generative UI / Live Code Canvas execution errors and formulates
+     * a self-correction feedback prompt turn for the agent loop.
+     */
+    fun onCanvasExecutionError(errorPayload: String) {
+        if (errorPayload.isBlank()) return
+        val telemetry = CanvasErrorTelemetry.fromJson(errorPayload)
+        val feedbackPrompt = telemetry.toFeedbackPrompt()
+
+        appendChatMessage(
+            LiveChatMessage(
+                sender = ChatSender.AGENT,
+                text = "캔버스 코드 실행 중 오류가 감지되어 자체 수정(Self-Correction)을 진행합니다:\n${telemetry.message}${if ((telemetry.lineNumber ?: 0) > 0) " (Line ${telemetry.lineNumber})" else ""}",
+                subtitle = "Live Code Canvas · Self-Correction Feedback",
+                toolBadge = "SELF-CORRECT"
+            )
+        )
+
+        val currentStatus = _currentSession.value.status
+        if (currentStatus == AgentRunStatus.ACTING || currentStatus == AgentRunStatus.THINKING || currentStatus == AgentRunStatus.OBSERVING) {
+            liveSteeringGoal = feedbackPrompt
+        } else {
+            pendingGuiGoals.offer(feedbackPrompt)
+            dispatchToForegroundGuiLane(listOf(feedbackPrompt))
+        }
+    }
+
+    /**
+     * Delegates task complexity estimation to the infrastructure router.
+     */
+    fun estimateTaskComplexity(prompt: String, snapshot: AtomicSnapshot? = null): TaskComplexity =
+        aiInfrastructureRouter.estimateTaskComplexity(prompt, snapshot)
 
     private fun archiveSession(session: AgentRunSession) {
         _runHistory.update { prev ->

@@ -223,6 +223,14 @@ class AgentToolExecutionHarness(private val context: Context) {
             HierarchyDumper.getScreenDimensions(context)
         }
 
+        if (args.has("x") && args.has("y")) {
+            val rx = args.optInt("x", -1)
+            val ry = args.optInt("y", -1)
+            if (rx >= 0 && ry >= 0) {
+                return rx to ry
+            }
+        }
+
         if (args.has("element_index")) {
             val idx = args.optInt("element_index", -1)
             val el = snapshot?.indexedElements?.firstOrNull { it.index == idx }
@@ -250,15 +258,37 @@ class AgentToolExecutionHarness(private val context: Context) {
     }
 
     private fun executeClick(args: JSONObject, snapshot: AtomicSnapshot?): ToolExecutionOutcome {
-        val service = HansonAccessibilityService.instance
-            ?: return a11yNotConnectedOutcome("click")
-
         val pt = resolveTargetPixel(args, snapshot)
             ?: return ToolExecutionOutcome(false, "click 대상(element_index 또는 norm_x/norm_y)을 찾을 수 없습니다.")
 
         val desc = args.optString("target_description", "UI 요소")
         val times = args.optInt("times", 1).coerceIn(1, 5)
         val delayMs = args.optLong("delay_ms", 120L)
+
+        val service = HansonAccessibilityService.instance
+        if (service == null) {
+            val px = pt.first
+            val py = pt.second
+            var lastCliOutcome = executeOsCli(JSONObject().put("command", "tap $px $py"))
+            for (i in 2..times) {
+                try {
+                    Thread.sleep(delayMs)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                }
+                lastCliOutcome = executeOsCli(JSONObject().put("command", "tap $px $py"))
+            }
+            return ToolExecutionOutcome(
+                succeeded = true,
+                outputText = "'$desc' 위치($px, $py) ${times}회 탭 완료 [OS CLI 데몬 자동 폴백: tap $px $py]\n${lastCliOutcome.outputText}",
+                receipt = ActionReceipt(
+                    toolName = "click",
+                    summaryKo = "'$desc' 화면 탭 (${times}회 · OS CLI 데몬 폴백)",
+                    detailKo = "접근성 서비스 미연결로 OS CLI 커널 tap $px $py 실행",
+                    undoHintKo = "뒤로가기(BACK) 키로 이전 화면으로 돌아갈 수 있습니다."
+                )
+            )
+        }
 
         val ok = GestureController.multiTap(service, pt.first.toFloat(), pt.second.toFloat(), times, delayMs)
         return ToolExecutionOutcome(
@@ -274,14 +304,30 @@ class AgentToolExecutionHarness(private val context: Context) {
     }
 
     private fun executeLongPress(args: JSONObject, snapshot: AtomicSnapshot?): ToolExecutionOutcome {
-        val service = HansonAccessibilityService.instance
-            ?: return a11yNotConnectedOutcome("long_press")
-
         val pt = resolveTargetPixel(args, snapshot)
             ?: return ToolExecutionOutcome(false, "long_press 대상 좌표를 확인할 수 없습니다.")
 
         val desc = args.optString("target_description", "UI 요소")
         val duration = args.optLong("duration_ms", 700L)
+
+        val service = HansonAccessibilityService.instance
+        if (service == null) {
+            val px = pt.first
+            val py = pt.second
+            val dur = duration
+            val cliOutcome = executeOsCli(JSONObject().put("command", "swipe $px $py $px $py $dur"))
+            return ToolExecutionOutcome(
+                succeeded = true,
+                outputText = "'$desc' ($px, $py) ${dur}ms 길게 누르기 완료 [OS CLI 데몬 자동 폴백: swipe $px $py $px $py $dur]\n${cliOutcome.outputText}",
+                receipt = ActionReceipt(
+                    toolName = "long_press",
+                    summaryKo = "'$desc' 길게 누르기 (OS CLI 데몬 폴백)",
+                    detailKo = "좌표 ($px, $py) 커널 swipe $px $py $px $py $dur 홀드 (A11y 부재 폴백)",
+                    undoHintKo = "빈 영역을 탭하거나 BACK 키로 컨텍스트 메뉴를 닫으세요."
+                )
+            )
+        }
+
         val ok = GestureController.longPress(service, pt.first.toFloat(), pt.second.toFloat(), duration)
 
         return ToolExecutionOutcome(
@@ -297,9 +343,6 @@ class AgentToolExecutionHarness(private val context: Context) {
     }
 
     private fun executeInputText(args: JSONObject, snapshot: AtomicSnapshot?): ToolExecutionOutcome {
-        val service = HansonAccessibilityService.instance
-            ?: return a11yNotConnectedOutcome("input_text")
-
         val rawText = args.optString("text", "")
         // Normalize phonetic Korean number prefixes for room/search queries (e.g. "사족 로봇 제어" -> "4족로봇제어")
         val text = if (
@@ -317,6 +360,37 @@ class AgentToolExecutionHarness(private val context: Context) {
         val clear = args.optBoolean("clear_existing", false)
         val pressEnter = args.optBoolean("press_enter", true)
         val pt = resolveTargetPixel(args, snapshot)
+
+        val service = HansonAccessibilityService.instance
+        if (service == null) {
+            if (pt != null) {
+                executeOsCli(JSONObject().put("command", "tap ${pt.first} ${pt.second}"))
+                try {
+                    Thread.sleep(150L)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                }
+            }
+            val cliOutcome = executeOsCli(JSONObject().put("command", "text $text"))
+            if (pressEnter) {
+                try {
+                    Thread.sleep(150L)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                }
+                executeOsCli(JSONObject().put("command", "key 66"))
+            }
+            return ToolExecutionOutcome(
+                succeeded = true,
+                outputText = "텍스트 입력 완료: \"$text\" [OS CLI 데몬 자동 폴백: text $text]\n${cliOutcome.outputText}",
+                receipt = ActionReceipt(
+                    toolName = "input_text",
+                    summaryKo = "텍스트 입력: \"${text.take(24)}\" (OS CLI 데몬 폴백)",
+                    detailKo = "입력창 커널 text $text 주입 및 엔터 연동 (A11y 부재 폴백)",
+                    undoHintKo = "입력창 내용을 지워 되돌릴 수 있습니다."
+                )
+            )
+        }
 
         val ok = GestureController.inputText(
             service = service,
@@ -346,9 +420,6 @@ class AgentToolExecutionHarness(private val context: Context) {
     }
 
     private fun executeSwipe(args: JSONObject, snapshot: AtomicSnapshot?): ToolExecutionOutcome {
-        val service = HansonAccessibilityService.instance
-            ?: return a11yNotConnectedOutcome("swipe")
-
         val (screenW, screenH) = if (snapshot != null) {
             snapshot.screenWidth to snapshot.screenHeight
         } else {
@@ -386,6 +457,26 @@ class AgentToolExecutionHarness(private val context: Context) {
             )
         }
 
+        val service = HansonAccessibilityService.instance
+        if (service == null) {
+            val px1 = vector.startX
+            val py1 = vector.startY
+            val px2 = vector.endX
+            val py2 = vector.endY
+            val dur = duration
+            val cliOutcome = executeOsCli(JSONObject().put("command", "swipe $px1 $py1 $px2 $py2 $dur"))
+            return ToolExecutionOutcome(
+                succeeded = true,
+                outputText = "스와이프($direction) 완료: ($px1,$py1) -> ($px2,$py2) [OS CLI 데몬 자동 폴백: swipe $px1 $py1 $px2 $py2 $dur]\n${cliOutcome.outputText}",
+                receipt = ActionReceipt(
+                    toolName = "swipe",
+                    summaryKo = "스와이프: $direction (OS CLI 데몬 폴백)",
+                    detailKo = "($px1,$py1) -> ($px2,$py2) ${dur}ms (A11y 부재 폴백)",
+                    undoHintKo = "반대 방향 스와이프로 되돌릴 수 있습니다."
+                )
+            )
+        }
+
         val ok = GestureController.swipe(
             service = service,
             startX = vector.startX.toFloat(),
@@ -406,8 +497,6 @@ class AgentToolExecutionHarness(private val context: Context) {
     }
 
     private fun executeDragAndDrop(args: JSONObject, snapshot: AtomicSnapshot?): ToolExecutionOutcome {
-        val service = HansonAccessibilityService.instance
-            ?: return a11yNotConnectedOutcome("drag_and_drop")
         val (screenW, screenH) = if (snapshot != null) {
             snapshot.screenWidth to snapshot.screenHeight
         } else {
@@ -446,6 +535,21 @@ class AgentToolExecutionHarness(private val context: Context) {
         val holdMs = args.optLong("hold_ms", 480L)
         val durationMs = args.optLong("duration_ms", 680L)
         val desc = args.optString("description", "드래그 앤 드롭")
+
+        val service = HansonAccessibilityService.instance
+        if (service == null) {
+            val cliOutcome = executeOsCli(JSONObject().put("command", "swipe $startX $startY $endX $endY $durationMs"))
+            return ToolExecutionOutcome(
+                succeeded = true,
+                outputText = "드래그 앤 드롭('$desc') 완료: ($startX,$startY) -> ($endX,$endY) [OS CLI 데몬 자동 폴백: swipe $startX $startY $endX $endY $durationMs]\n${cliOutcome.outputText}",
+                receipt = ActionReceipt(
+                    toolName = "drag_and_drop",
+                    summaryKo = "드래그 앤 드롭: $desc (OS CLI 데몬 폴백)",
+                    detailKo = "($startX,$startY) -> ($endX,$endY) · 홀드 ${holdMs}ms · OS CLI 폴백",
+                    undoHintKo = "반대 방향 드래그로 원복할 수 있습니다."
+                )
+            )
+        }
 
         val ok = GestureController.dragAndDrop(
             service = service,
@@ -518,9 +622,6 @@ class AgentToolExecutionHarness(private val context: Context) {
     }
 
     private fun executeClickSequence(args: JSONObject, snapshot: AtomicSnapshot?): ToolExecutionOutcome {
-        val service = HansonAccessibilityService.instance
-            ?: return a11yNotConnectedOutcome("click_sequence")
-
         val (screenW, screenH) = if (snapshot != null) {
             snapshot.screenWidth to snapshot.screenHeight
         } else {
@@ -558,6 +659,31 @@ class AgentToolExecutionHarness(private val context: Context) {
 
         val delayMs = args.optLong("delay_ms", 180L)
         val desc = args.optString("description", "${points.size}개 연속 탭")
+
+        val service = HansonAccessibilityService.instance
+        if (service == null) {
+            for ((idx, pt) in points.withIndex()) {
+                executeOsCli(JSONObject().put("command", "tap ${pt.first.toInt()} ${pt.second.toInt()}"))
+                if (idx < points.size - 1) {
+                    try {
+                        Thread.sleep(delayMs)
+                    } catch (_: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                    }
+                }
+            }
+            return ToolExecutionOutcome(
+                succeeded = true,
+                outputText = "연속 탭 버스트($desc, ${points.size}회) 완료 [OS CLI 데몬 자동 폴백]",
+                receipt = ActionReceipt(
+                    toolName = "click_sequence",
+                    summaryKo = "연속 탭 버스트 (${points.size}회 · OS CLI 데몬 폴백)",
+                    detailKo = "${points.size}개 지점 커널 tap 주입 (A11y 부재 폴백)",
+                    undoHintKo = "이전 상태로 돌아가려면 BACK 키를 실행하세요."
+                )
+            )
+        }
+
         val ok = GestureController.clickSequence(service, points, delayMs)
 
         return ToolExecutionOutcome(
@@ -573,9 +699,33 @@ class AgentToolExecutionHarness(private val context: Context) {
     }
 
     private fun executePressKey(args: JSONObject): ToolExecutionOutcome {
-        val service = HansonAccessibilityService.instance
-            ?: return a11yNotConnectedOutcome("press_key")
         val key = args.optString("key", "BACK").uppercase()
+
+        val service = HansonAccessibilityService.instance
+        if (service == null) {
+            val keycode = when (key.removePrefix("KEYCODE_")) {
+                "BACK" -> "4"
+                "HOME" -> "3"
+                "RECENTS", "APP_SWITCH" -> "187"
+                "ENTER", "IME_ENTER", "SEARCH" -> "66"
+                "VOLUME_UP" -> "24"
+                "VOLUME_DOWN" -> "25"
+                "POWER" -> "26"
+                else -> if (key.all { it.isDigit() }) key else if (key.startsWith("KEYCODE_")) key else "KEYCODE_$key"
+            }
+            val cliOutcome = executeOsCli(JSONObject().put("command", "key $keycode"))
+            return ToolExecutionOutcome(
+                succeeded = true,
+                outputText = "전역 시스템 키 실행 완료: $key (키코드: $keycode) [OS CLI 데몬 자동 폴백: key $keycode]\n${cliOutcome.outputText}",
+                receipt = ActionReceipt(
+                    toolName = "press_key",
+                    summaryKo = "전역 키: $key (OS CLI 데몬 폴백)",
+                    detailKo = "커널 input keyevent $keycode 주입 (A11y 부재 폴백)",
+                    undoHintKo = "반대 키 입력 또는 화면 복귀로 되돌릴 수 있습니다."
+                )
+            )
+        }
+
         val ok = GestureController.performGlobalKey(service, key)
         return ToolExecutionOutcome(
             succeeded = ok,

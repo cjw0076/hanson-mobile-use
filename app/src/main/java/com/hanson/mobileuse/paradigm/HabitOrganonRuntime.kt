@@ -151,12 +151,12 @@ class HabitOrganonRuntime(
         }
 
         // Rule 2: Check Latest-Per-Slot Prototype Memory (Organon 96.43% fast-state control)
-        val proto = slotPrototypes[slotKey]
-        if (proto != null && proto.cumulativeCredit >= 0.6f) {
+        val proto = slotPrototypes[slotKey] ?: findFuzzyMatchingPrototype(snapshot.activePackage, goal, currentHash)
+        if (proto != null && proto.cumulativeCredit >= 0.55f) {
             val s1Prob = (1f / (1f + exp(-proto.cumulativeCredit.toDouble()))).toFloat().coerceIn(0.1f, 0.98f)
             val expectedS2Gain = (1.0f - s1Prob)
-            val s2Cost = 0.25f
-            if (expectedS2Gain < s2Cost) {
+            val s2Cost = 0.40f // Cost of calling large S2 model vs <15ms 0-token S1 fast-path
+            if (expectedS2Gain < s2Cost || proto.cumulativeCredit >= 0.60f) {
                 totalS1Calls++
                 val argsObj = instantiateParameterizedArgs(proto.toolName, proto.toolArgsTemplateJson, goal, snapshot)
                 return DeferralGateDecision(
@@ -396,12 +396,43 @@ class HabitOrganonRuntime(
 
     private fun buildSlotKey(pkg: String, goal: String, stateHash: String): String {
         val intentVerb = when {
-            goal.contains("검색") -> "SEARCH"
-            goal.contains("드래그") || goal.contains("슬라이더") -> "DRAG"
-            goal.contains("답장") -> "REPLY"
+            goal.contains("검색") || goal.contains("찾아") || goal.contains("조회") -> "SEARCH"
+            goal.contains("드래그") || goal.contains("슬라이더") || goal.contains("스크롤") || goal.contains("내려") || goal.contains("올려") -> "DRAG"
+            goal.contains("답장") || goal.contains("보내") || goal.contains("전송") || goal.contains("입력") || goal.contains("작성") -> "REPLY"
+            goal.contains("열어") || goal.contains("실행") || goal.contains("켜줘") || goal.contains("들어가") || goal.contains("시작") -> "NAV"
             else -> "NAV"
         }
         return "${pkg.substringAfterLast('.')}|$intentVerb|$stateHash"
+    }
+
+    private fun findFuzzyMatchingPrototype(pkg: String, goal: String, stateHash: String): SlotPrototypeBinding? {
+        val shortPkg = pkg.substringAfterLast('.')
+        // 1. Same package and exact stateHash match
+        val stateMatch = slotPrototypes.values.firstOrNull {
+            it.stateHash == stateHash && it.intentSlotKey.startsWith("$shortPkg|") && it.cumulativeCredit >= 0.55f
+        }
+        if (stateMatch != null) return stateMatch
+
+        // 2. Exact stateHash match across any package
+        return slotPrototypes.values.firstOrNull {
+            it.stateHash == stateHash && it.cumulativeCredit >= 0.60f
+        }
+    }
+
+    /**
+     * Checks whether a task/screen pair is already habituated and ready for sub-15ms 0-token S1 execution.
+     */
+    fun isHabituated(goal: String, snapshot: AtomicSnapshot): Boolean {
+        val currentHash = WorldModelGraph.computeStateHash(snapshot)
+        val slotKey = buildSlotKey(snapshot.activePackage, goal, currentHash)
+        val proto = slotPrototypes[slotKey] ?: findFuzzyMatchingPrototype(snapshot.activePackage, goal, currentHash)
+        return proto != null && proto.cumulativeCredit >= 0.55f
+    }
+
+    fun getHabituatedPrototype(goal: String, snapshot: AtomicSnapshot): SlotPrototypeBinding? {
+        val currentHash = WorldModelGraph.computeStateHash(snapshot)
+        val slotKey = buildSlotKey(snapshot.activePackage, goal, currentHash)
+        return slotPrototypes[slotKey] ?: findFuzzyMatchingPrototype(snapshot.activePackage, goal, currentHash)
     }
 
     private fun loadFromDisk() {
