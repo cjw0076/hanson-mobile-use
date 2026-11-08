@@ -39,6 +39,15 @@ data class ToolSpec(
                 requiredArr.put(param.name)
             }
         }
+        if (!properties.has("spoken_reply")) {
+            properties.put(
+                "spoken_reply",
+                JSONObject().apply {
+                    put("type", "STRING")
+                    put("description", "Natural 1~2 sentence Korean conversational message spoken aloud to the user while executing this action")
+                }
+            )
+        }
 
         val schema = JSONObject().apply {
             put("type", "OBJECT")
@@ -211,12 +220,12 @@ object ToolSpecRegistry {
         ),
         ToolSpec(
             name = "manage_app",
-            description = "Launch an installed app by its Korean/English name or package name (uses QUERY_ALL_PACKAGES), or list matching installed apps.",
+            description = "Launch an installed app by its Korean/English name or package name, search matching apps, or scan all installed games/apps ('launch', 'search', 'list_games', 'list_all').",
             riskTier = ToolRiskTier.STATEFUL,
             capability = AgentCapability.APP_LAUNCH,
             parameters = listOf(
-                ToolParamSpec("action", "STRING", "'launch' to open an app, or 'search' to list matching installed packages", required = true),
-                ToolParamSpec("app_name", "STRING", "App name (e.g. '카카오톡', '유튜브', '설정', 'Chrome') or package name", required = true)
+                ToolParamSpec("action", "STRING", "'launch' to open an app, 'search' to search installed apps, 'list_games' to find all installed games on the device, or 'list_all' to list installed user apps", required = true),
+                ToolParamSpec("app_name", "STRING", "App name (e.g. '카카오톡', '유튜브', '설정', 'Chrome'), package name, or search keyword (optional for 'list_games'/'list_all')", required = false)
             )
         ),
         ToolSpec(

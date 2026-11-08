@@ -98,12 +98,6 @@ class HansonNotificationListenerService : NotificationListenerService() {
         )
 
         RemoteInputSessionCache.put(intercepted)
-        try {
-            com.hanson.mobileuse.agent.HansonRuntimeHolder
-                .getAgentEngine(applicationContext)
-                .postIncomingNotificationToLiveChat(intercepted)
-        } catch (_: Exception) {
-        }
     }
 
     private fun resolveAppLabel(pkg: String): String {

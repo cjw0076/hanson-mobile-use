@@ -367,7 +367,15 @@ Conversational Full-Control Rules:
             )
         }.getOrNull()
         if (interactionsDecision != null) {
-            return interactionsDecision
+            return rescueActionPromiseDecision(
+                decision = interactionsDecision,
+                goal = goal,
+                iteration = iteration,
+                snapshot = snapshot,
+                historySteps = historySteps,
+                previousPlan = previousPlan,
+                chatHistory = chatHistory
+            )
         }
 
         val url = "https://generativelanguage.googleapis.com/v1beta/models/$modelName:generateContent?key=$apiKey"
@@ -405,6 +413,13 @@ Conversational Full-Control Rules:
                 )
             )
             put("tools", ToolSpecRegistry.toGeminiToolsJson())
+            put(
+                "toolConfig",
+                JSONObject().put(
+                    "functionCallingConfig",
+                    JSONObject().put("mode", "ANY")
+                )
+            )
             put(
                 "generationConfig",
                 JSONObject().apply {
@@ -451,8 +466,10 @@ Conversational Full-Control Rules:
                 }
             }
 
-            val (spoken, obs, updatedPlan) = parseSpokenObservationAndPlan(textOut, previousPlan)
-            return if (fnName != null) {
+            val (parsedSpoken, obs, updatedPlan) = parseSpokenObservationAndPlan(textOut, previousPlan)
+            val argSpoken = fnArgs.optString("spoken_reply", "").trim()
+            val spoken = argSpoken.ifBlank { parsedSpoken }
+            val rawDecision = if (fnName != null) {
                 ModelTurnDecision(
                     observation = obs,
                     subGoals = updatedPlan,
@@ -469,6 +486,120 @@ Conversational Full-Control Rules:
                     spokenReply = spoken
                 )
             }
+            return rescueActionPromiseDecision(
+                decision = rawDecision,
+                goal = goal,
+                iteration = iteration,
+                snapshot = snapshot,
+                historySteps = historySteps,
+                previousPlan = previousPlan,
+                chatHistory = chatHistory
+            )
+        }
+    }
+
+    /**
+     * Prevents "Talk-Only Stop" failures where a model says "네, '4족로봇제어' 카톡방으로 바로 들어갈게요."
+     * or "설치된 앱 중에서 어떤 게임들이 있는지 전부 확인해 드릴게요. 잠시만요!" on Step 1
+     * without emitting the actual tool call (or prematurely calling `complete_task`).
+     */
+    private fun rescueActionPromiseDecision(
+        decision: ModelTurnDecision,
+        goal: String,
+        iteration: Int,
+        snapshot: AtomicSnapshot,
+        historySteps: List<AgentStepLog>,
+        previousPlan: List<SubGoalItem>,
+        chatHistory: List<LiveChatMessage>
+    ): ModelTurnDecision {
+        if (decision.toolName != "complete_task") {
+            return decision
+        }
+        val gLower = goal.lowercase()
+        val spokenText = decision.spokenReply.ifBlank { decision.toolArgs.optString("summary", "") }
+        val promisesAction = spokenText.contains("들어갈게요") ||
+            spokenText.contains("열어볼게요") ||
+            spokenText.contains("열어드릴게요") ||
+            spokenText.contains("확인해 드릴게요") ||
+            spokenText.contains("확인해 볼게요") ||
+            spokenText.contains("찾아볼게요") ||
+            spokenText.contains("찾아드릴게요") ||
+            spokenText.contains("눌러볼게요") ||
+            spokenText.contains("누를게요") ||
+            spokenText.contains("잠시만요") ||
+            spokenText.contains("실행할게요")
+
+        val isActionGoalOnStep1 = iteration == 1 && historySteps.isEmpty() && (
+            promisesAction ||
+                gLower.contains("들어가") ||
+                gLower.contains("눌러") ||
+                gLower.contains("찾아봐") ||
+                gLower.contains("찾아줘") ||
+                gLower.contains("열어") ||
+                gLower.contains("실행") ||
+                gLower.contains("틀어")
+            )
+
+        if (!isActionGoalOnStep1) {
+            return decision
+        }
+
+        // 1. Game / Installed App Discovery rescue
+        if ((gLower.contains("게임") || gLower.contains("내 앱") || gLower.contains("설치된 앱") || gLower.contains("깔린")) &&
+            (gLower.contains("찾아") || gLower.contains("뭐 있") || gLower.contains("무슨") || gLower.contains("알려") || gLower.contains("확인"))
+        ) {
+            return ModelTurnDecision(
+                observation = "기기 설치 게임 및 앱 패키지 스캔",
+                subGoals = listOf(SubGoalItem("설치된 게임 및 앱 전체 스캔", SubGoalStatus.IN_PROGRESS)),
+                toolName = "manage_app",
+                toolArgs = JSONObject().put("action", "list_games").put("app_name", "게임"),
+                spokenReply = spokenText.ifBlank { "기기에 설치된 게임과 앱 목록을 바로 스캔해서 알려드릴게요." }
+            )
+        }
+
+        // 2. Quoted target in model's own spoken reply (e.g. "네, '4족로봇제어' 카톡방으로 바로 들어갈게요.")
+        val quotedTarget = Regex("'([^']{2,30})'|\"([^\"]{2,30})\"").find(spokenText)?.let { m ->
+            m.groupValues[1].ifBlank { m.groupValues[2] }
+        }
+        if (!quotedTarget.isNullOrBlank()) {
+            val matchedFromQuote = AgentToolExecutionHarness.findBestMatchingElement(snapshot, quotedTarget)
+            if (matchedFromQuote != null) {
+                val label = matchedFromQuote.text.ifBlank { matchedFromQuote.contentDesc }.take(24)
+                return ModelTurnDecision(
+                    observation = "'$label' 요소 탭 실행",
+                    subGoals = listOf(SubGoalItem("'$label' 진입", SubGoalStatus.IN_PROGRESS)),
+                    toolName = "click",
+                    toolArgs = JSONObject().apply {
+                        put("element_index", matchedFromQuote.index)
+                        put("target_description", label)
+                    },
+                    spokenReply = spokenText
+                )
+            }
+        }
+
+        // 3. Fuzzy match user goal against current screen elements (handles "사족 로봇 제어" -> "4족로봇제어")
+        val fuzzyScreenMatch = AgentToolExecutionHarness.findBestMatchingElement(snapshot, goal)
+        if (fuzzyScreenMatch != null) {
+            val label = fuzzyScreenMatch.text.ifBlank { fuzzyScreenMatch.contentDesc }.take(24)
+            return ModelTurnDecision(
+                observation = "'$label' 요소 탭 실행",
+                subGoals = listOf(SubGoalItem("'$label' 선택", SubGoalStatus.IN_PROGRESS)),
+                toolName = "click",
+                toolArgs = JSONObject().apply {
+                    put("element_index", fuzzyScreenMatch.index)
+                    put("target_description", label)
+                },
+                spokenReply = spokenText.ifBlank { "네, '$label' 항목으로 바로 들어갈게요." }
+            )
+        }
+
+        // 4. Fallback to deterministic local action inference
+        val localRescue = inferLocalOnDeviceAction(goal, iteration, snapshot, historySteps, previousPlan, chatHistory)
+        return if (localRescue.toolName != "complete_task" && localRescue.toolName != "ask_user") {
+            localRescue.copy(spokenReply = spokenText.ifBlank { localRescue.spokenReply })
+        } else {
+            decision
         }
     }
 
@@ -790,6 +921,47 @@ Conversational Full-Control Rules:
         val targetAppName = matchedAppEntry?.key
         val targetPkg = matchedAppEntry?.value
 
+        // 5-B. Chat room entry flow ("사족 로봇 제어 카톡방 들어가 봐"):
+        // Launch KakaoTalk if not in foreground; once in KakaoTalk, fuzzy-match the room title ("4족로봇제어") and click it!
+        if ((gLower.contains("카톡방") || gLower.contains("대화방") || gLower.contains("채팅방") || gLower.contains("단톡방")) &&
+            (gLower.contains("들어가") || gLower.contains("열어") || gLower.contains("눌러") || gLower.contains("보여") || gLower.contains("확인"))
+        ) {
+            val hasClickedRoom = historySteps.any { it.toolName == "click" }
+            if (!hasClickedRoom) {
+                if (snapshot.activePackage != "com.kakao.talk" && !historySteps.any { it.toolName == "manage_app" }) {
+                    val spoken = "네, 먼저 카카오톡을 열고 말씀하신 대화방을 찾아볼게요."
+                    return ModelTurnDecision(
+                        observation = "카카오톡 실행",
+                        subGoals = listOf(
+                            SubGoalItem("카카오톡 열기", SubGoalStatus.IN_PROGRESS),
+                            SubGoalItem("대화방 진입", SubGoalStatus.PENDING)
+                        ),
+                        toolName = "manage_app",
+                        toolArgs = JSONObject().put("action", "launch").put("app_name", "카카오톡"),
+                        spokenReply = spoken
+                    )
+                }
+                val roomElement = AgentToolExecutionHarness.findBestMatchingElement(snapshot, g)
+                if (roomElement != null) {
+                    val label = roomElement.text.ifBlank { roomElement.contentDesc }.take(24)
+                    val spoken = "네, '$label' 카톡방으로 바로 들어갈게요."
+                    return ModelTurnDecision(
+                        observation = "'$label' 대화방 탭 진입",
+                        subGoals = listOf(
+                            SubGoalItem("카카오톡 열기", SubGoalStatus.COMPLETED),
+                            SubGoalItem("'$label' 대화방 진입", SubGoalStatus.IN_PROGRESS)
+                        ),
+                        toolName = "click",
+                        toolArgs = JSONObject().apply {
+                            put("element_index", roomElement.index)
+                            put("target_description", label)
+                        },
+                        spokenReply = spoken
+                    )
+                }
+            }
+        }
+
         val directScreenElementMatch = snapshot.indexedElements.firstOrNull { el ->
             (el.text.length >= 2 && g.contains(el.text, ignoreCase = true) && (gLower.contains("눌러") || gLower.contains("선택") || gLower.contains("열어") || gLower.contains("클릭"))) ||
                 (el.contentDesc.length >= 2 && g.contains(el.contentDesc, ignoreCase = true) && (gLower.contains("눌러") || gLower.contains("선택") || gLower.contains("열어") || gLower.contains("클릭")))
@@ -1086,14 +1258,28 @@ Conversational Full-Control Rules:
             )
         }
 
-        // 9. Match any visible UI element on the current screen by text/description
+        // 8-B. Installed Game / App Inventory Scan ("내 앱에서 무슨 게임 있는지 찾아봐", "설치된 앱 알려줘")
+        if ((gLower.contains("게임") || gLower.contains("내 앱") || gLower.contains("설치된 앱") || gLower.contains("깔린")) &&
+            (gLower.contains("찾아") || gLower.contains("뭐 있") || gLower.contains("무슨") || gLower.contains("알려") || gLower.contains("확인") || gLower.contains("목록"))
+        ) {
+            val spoken = "기기에 설치된 게임과 앱들을 바로 스캔해서 알려드릴게요."
+            return ModelTurnDecision(
+                observation = "설치된 게임 및 앱 패키지 스캔",
+                subGoals = listOf(SubGoalItem("설치된 게임/앱 조회", SubGoalStatus.IN_PROGRESS)),
+                toolName = "manage_app",
+                toolArgs = JSONObject().put("action", if (gLower.contains("게임")) "list_games" else "list_all").put("app_name", "게임"),
+                spokenReply = spoken
+            )
+        }
+
+        // 9. Match any visible UI element on the current screen by text/description (including Korean number/phonetic fuzzy match)
         val matchedElement = snapshot.indexedElements.firstOrNull { el ->
             (el.text.length >= 2 && g.contains(el.text, ignoreCase = true)) ||
                 (el.contentDesc.length >= 2 && g.contains(el.contentDesc, ignoreCase = true))
-        }
+        } ?: AgentToolExecutionHarness.findBestMatchingElement(snapshot, g)
         if (matchedElement != null) {
             val label = matchedElement.text.ifBlank { matchedElement.contentDesc }.take(24)
-            val spoken = "네, 화면에 보이는 '$label' 항목을 누를게요."
+            val spoken = "네, 화면에 보이는 '$label' 항목으로 바로 들어갈게요."
             return ModelTurnDecision(
                 observation = "'$label' 요소 탭",
                 subGoals = listOf(SubGoalItem("'$label' 탭 실행", SubGoalStatus.IN_PROGRESS)),

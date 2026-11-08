@@ -95,6 +95,7 @@ fun CommandCenterScreen(
     val context = LocalContext.current
     var promptInput by rememberSaveable { mutableStateOf("") }
     var selectedModeIdx by rememberSaveable { mutableIntStateOf(0) }
+    var selectedLaneIdx by rememberSaveable { mutableIntStateOf(0) } // 0=AUTO, 1=FG(포그라운드), 2=BG(백그라운드)
     var showOverflowMenu by remember { mutableStateOf(false) }
 
     val voiceState by LiveVoiceSessionManager.state.collectAsState()
@@ -622,10 +623,39 @@ fun CommandCenterScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
+                        // 1-Touch Lane Selector Pill: AUTO <-> FG (포그라운드) <-> BG (백그라운드)
+                        val laneBadgeText = when (selectedLaneIdx) {
+                            1 -> "FG"
+                            2 -> "BG"
+                            else -> "AUTO"
+                        }
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(999.dp))
+                                .background(if (selectedLaneIdx == 0) ObsidianColors.SurfaceHigh else ObsidianColors.Accent)
+                                .border(1.dp, ObsidianColors.GlassBorder, RoundedCornerShape(999.dp))
+                                .clickable { selectedLaneIdx = (selectedLaneIdx + 1) % 3 }
+                                .padding(horizontal = 9.dp, vertical = 6.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = laneBadgeText,
+                                color = if (selectedLaneIdx == 0) ObsidianColors.TextPrimary else ObsidianColors.OnAccent,
+                                fontSize = 10.5.sp,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.ExtraBold
+                            )
+                        }
+
                         Box(modifier = Modifier.weight(1f)) {
                             if (promptInput.isEmpty()) {
+                                val hintText = when (selectedLaneIdx) {
+                                    1 -> "[FG 포그라운드] 화면 직접 제어 지시..."
+                                    2 -> "[BG 백그라운드] 화면 전환 없이 병렬 실행..."
+                                    else -> "할 일을 말하거나 설정을 지시하세요..."
+                                }
                                 Text(
-                                    text = "할 일을 말하거나 설정을 지시하세요...",
+                                    text = hintText,
                                     color = ObsidianColors.TextMuted,
                                     fontSize = 14.sp
                                 )
@@ -645,8 +675,13 @@ fun CommandCenterScreen(
                                     onSend = {
                                         val text = promptInput.trim()
                                         if (text.isNotEmpty()) {
+                                            val prefix = when (selectedLaneIdx) {
+                                                1 -> "[FG] "
+                                                2 -> "[BG] "
+                                                else -> ""
+                                            }
                                             promptInput = ""
-                                            onSendChatMessage(text)
+                                            onSendChatMessage("$prefix$text")
                                         }
                                     }
                                 ),
@@ -684,8 +719,13 @@ fun CommandCenterScreen(
                                 .clickable {
                                     val text = promptInput.trim()
                                     if (text.isNotEmpty()) {
+                                        val prefix = when (selectedLaneIdx) {
+                                            1 -> "[FG] "
+                                            2 -> "[BG] "
+                                            else -> ""
+                                        }
                                         promptInput = ""
-                                        onSendChatMessage(text)
+                                        onSendChatMessage("$prefix$text")
                                     }
                                 }
                                 .padding(horizontal = 14.dp, vertical = 7.dp),

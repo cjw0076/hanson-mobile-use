@@ -27,6 +27,21 @@ import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
+
+enum class ExecutionLaneMode(val labelKo: String, val badge: String) {
+    AUTO("자동 분기", "AUTO"),
+    FOREGROUND("포그라운드", "FG"),
+    BACKGROUND("백그라운드", "BG")
+}
+
+data class ParallelTaskSlot(
+    val taskId: String,
+    val lane: String, // "FG" or "BG"
+    val goal: String,
+    val startedAtMs: Long = System.currentTimeMillis()
+)
 
 data class AgentEngineConfig(
     val apiKey: String = "",
@@ -72,9 +87,15 @@ class MobileUseAgentEngine(
 
     private var activeJob: Job? = null
     private var approvalDeferred: CompletableDeferred<Boolean>? = null
+    private val concurrentBackgroundJobs = ConcurrentHashMap<String, Job>()
+    private val pendingGuiGoals = ConcurrentLinkedQueue<String>()
+    private val craftAnythingEngine = CraftAnythingMobileEngine(context)
 
     @Volatile
     private var liveSteeringGoal: String? = null
+
+    private val _activeParallelTasks = MutableStateFlow<List<ParallelTaskSlot>>(emptyList())
+    val activeParallelTasks: StateFlow<List<ParallelTaskSlot>> = _activeParallelTasks.asStateFlow()
 
     private val _config = MutableStateFlow(loadConfig())
     val config: StateFlow<AgentEngineConfig> = _config.asStateFlow()
@@ -165,11 +186,13 @@ class MobileUseAgentEngine(
             val list = mutableListOf<LiveChatMessage>()
             for (i in 0 until arr.length()) {
                 val obj = arr.optJSONObject(i) ?: continue
+                val sender = runCatching { ChatSender.valueOf(obj.optString("sender", "AGENT")) }
+                    .getOrDefault(ChatSender.AGENT)
+                if (sender == ChatSender.NOTIFICATION) continue
                 list.add(
                     LiveChatMessage(
                         id = obj.optString("id", "msg_$i"),
-                        sender = runCatching { ChatSender.valueOf(obj.optString("sender", "AGENT")) }
-                            .getOrDefault(ChatSender.AGENT),
+                        sender = sender,
                         text = obj.optString("text", ""),
                         subtitle = obj.optString("subtitle", ""),
                         toolBadge = obj.optString("toolBadge").takeIf { it.isNotBlank() },
@@ -408,27 +431,294 @@ class MobileUseAgentEngine(
         startRun(trimmed, appendUserBubble = false)
     }
 
-    /**
-     * Starts a new conversational control run OR steers an active run in real time if the user
-     * speaks mid-execution ("잠깐 멈춰", "아니 두 번째 거 눌러줘", "좀 더 내려봐").
-     */
-    fun startRun(goalPrompt: String, appendUserBubble: Boolean = true) {
-        val trimmedGoal = goalPrompt.trim()
-        if (trimmedGoal.isEmpty()) return
+    private fun registerParallelSlot(slot: ParallelTaskSlot) {
+        _activeParallelTasks.update { prev -> prev.filterNot { it.taskId == slot.taskId } + slot }
+    }
+
+    private fun unregisterParallelSlot(taskId: String) {
+        _activeParallelTasks.update { prev -> prev.filterNot { it.taskId == taskId } }
+    }
+
+    private fun splitCompoundParallelGoals(rawGoal: String): List<String> {
+        val g = rawGoal.trim()
+        if (g.isEmpty()) return emptyList()
+        val splitRegex = Regex("\\s*(?:\\|\\||;|동시에|하면서\\s*동시에|하면서|그리고\\s*동시에|그리고\\s*(?=내\\s*앱|무슨\\s*게임|설치된|알림|볼륨|소리|밝기|크래프트))\\s*")
+        val parts = g.split(splitRegex)
+            .map { it.trim() }
+            .filter { it.length >= 2 }
+        return if (parts.size >= 2) parts else listOf(g)
+    }
+
+    private fun isBackgroundParallelizableGoal(goal: String): Boolean {
+        val gLower = goal.lowercase(Locale.ROOT).trim()
+        val isGameOrAppInventory = (gLower.contains("게임") || gLower.contains("내 앱") || gLower.contains("설치된 앱") || gLower.contains("깔린 앱") || gLower.contains("깔린 게임")) &&
+            (gLower.contains("찾아") || gLower.contains("뭐 있") || gLower.contains("무슨") || gLower.contains("알려") || gLower.contains("확인") || gLower.contains("목록") || gLower.contains("스캔"))
+        val isCraftBlueprint = gLower.contains("크래프트") || gLower.contains("craft") || gLower.contains("클린룸") || gLower.contains("구조 분석") || gLower.contains("리버스 엔지니어링")
+        val isNotifCheckOrReply = gLower.contains("알림") || gLower.contains("답장") || (gLower.contains("카톡") && (gLower.contains("왔어") || gLower.contains("요약")))
+        val isDeviceSetting = gLower.contains("밝기") || gLower.contains("볼륨") || gLower.contains("소리") || gLower.contains("방해금지")
+        val isScreenOrStatusInquiry = (gLower.contains("화면") && (gLower.contains("뭐") || gLower.contains("설명") || gLower.contains("브리핑"))) ||
+            gLower.contains("무슨 작업 중") || gLower.contains("병렬 상태")
+        return isGameOrAppInventory || isCraftBlueprint || isNotifCheckOrReply || isDeviceSetting || isScreenOrStatusInquiry
+    }
+
+    private fun launchParallelBackgroundTask(bgGoal: String) {
+        val taskId = "bg_${System.currentTimeMillis()}_${(100..999).random()}"
+        val slot = ParallelTaskSlot(taskId = taskId, lane = "BG", goal = bgGoal)
+        registerParallelSlot(slot)
+
+        val job = scope.launch(Dispatchers.IO) {
+            try {
+                val gLower = bgGoal.lowercase(Locale.ROOT).trim()
+                val snapshot = HansonAccessibilityService.instance?.captureSnapshotNow(includeScreenshot = false)
+
+                when {
+                    (gLower.contains("게임") || gLower.contains("내 앱") || gLower.contains("설치된 앱") || gLower.contains("깔린")) -> {
+                        val wantsGames = gLower.contains("게임")
+                        val report = toolHarness.scanInstalledGamesAndApps(
+                            query = "",
+                            prioritizeGames = wantsGames
+                        )
+                        appendChatMessage(
+                            LiveChatMessage(
+                                sender = ChatSender.AGENT,
+                                text = report,
+                                subtitle = "병렬 백그라운드 스캔 완료 (${_activeParallelTasks.value.size}개 레인)",
+                                toolBadge = "병렬완료 · 앱/게임 스캔"
+                            )
+                        )
+                        speakIfEnabled(report)
+                    }
+                    (gLower.contains("크래프트") || gLower.contains("craft") || gLower.contains("클린룸") || gLower.contains("구조 분석") || gLower.contains("리버스 엔지니어링")) -> {
+                        val snap = snapshot ?: AtomicSnapshot(
+                            screenWidth = 1080,
+                            screenHeight = 2340,
+                            activePackage = context.packageName,
+                            activeWindowTitle = "Hanson Board"
+                        )
+                        val decision = craftAnythingEngine.runCraftAnythingWorkflow(bgGoal, snap)
+                        val summary = decision.spokenReply.ifBlank {
+                            decision.toolArgs.optString("summary", "크래프트 클린룸 분석을 완료했어요.")
+                        }
+                        appendChatMessage(
+                            LiveChatMessage(
+                                sender = ChatSender.AGENT,
+                                text = summary,
+                                subtitle = "병렬 백그라운드 · CRAFT-ANYTHING",
+                                toolBadge = "병렬완료 · CRAFT-ANYTHING"
+                            )
+                        )
+                        speakIfEnabled(summary)
+                    }
+                    (gLower.contains("답장") || (gLower.contains("알림") && gLower.contains("보내"))) -> {
+                        val replyMsg = bgGoal.substringAfter("\"", "").substringBefore("\"", "")
+                            .ifBlank { bgGoal.substringAfter("'", "").substringBefore("'", "") }
+                            .ifBlank { bgGoal.replace("답장해줘", "").replace("답장", "").trim() }
+                        val outcome = toolHarness.execute(
+                            toolName = "reply_notification",
+                            args = JSONObject().put("target", "").put("message", replyMsg),
+                            latestSnapshot = snapshot
+                        )
+                        appendChatMessage(
+                            LiveChatMessage(
+                                sender = ChatSender.AGENT,
+                                text = outcome.outputText,
+                                subtitle = "병렬 백그라운드 · RemoteInput",
+                                toolBadge = "병렬완료 · 즉시답장"
+                            )
+                        )
+                        speakIfEnabled(outcome.outputText)
+                    }
+                    (gLower.contains("알림") || (gLower.contains("카톡") && (gLower.contains("왔어") || gLower.contains("요약")))) -> {
+                        val outcome = toolHarness.execute(
+                            toolName = "list_notifications",
+                            args = JSONObject().put("only_replyable", false).put("limit", 8),
+                            latestSnapshot = snapshot
+                        )
+                        val notifSummary = if (outcome.outputText.contains("없습니다") || outcome.outputText.isBlank()) {
+                            "백그라운드에서 확인해 보니 현재 새로 쌓인 알림 세션이 없어요."
+                        } else {
+                            val lines = outcome.outputText.lines().filter { it.isNotBlank() }.take(4)
+                            "백그라운드 병렬 알림 확인 결과: ${lines.joinToString(" / ")}"
+                        }
+                        appendChatMessage(
+                            LiveChatMessage(
+                                sender = ChatSender.AGENT,
+                                text = notifSummary,
+                                subtitle = "병렬 백그라운드 · 알림 브리핑",
+                                toolBadge = "병렬완료 · 알림브리핑"
+                            )
+                        )
+                        speakIfEnabled(notifSummary)
+                    }
+                    (gLower.contains("밝기") || gLower.contains("볼륨") || gLower.contains("소리") || gLower.contains("방해금지")) -> {
+                        val settingArgs = when {
+                            gLower.contains("밝기") -> {
+                                val num = Regex("\\d+").find(bgGoal)?.value?.toIntOrNull()
+                                    ?: if (gLower.contains("낮") || gLower.contains("줄") || gLower.contains("어둡")) 80 else 200
+                                JSONObject().put("setting", "brightness").put("value", num.toString())
+                            }
+                            gLower.contains("방해금지") -> {
+                                val on = !(gLower.contains("꺼") || gLower.contains("해제"))
+                                JSONObject().put("setting", "dnd").put("value", if (on) "on" else "off")
+                            }
+                            else -> {
+                                val num = Regex("\\d+").find(bgGoal)?.value?.toIntOrNull()
+                                    ?: if (gLower.contains("낮") || gLower.contains("줄") || gLower.contains("작게")) 25 else 60
+                                JSONObject().put("setting", "volume_media").put("value", num.toString())
+                            }
+                        }
+                        val outcome = toolHarness.execute("control_device_setting", settingArgs, snapshot)
+                        appendChatMessage(
+                            LiveChatMessage(
+                                sender = ChatSender.AGENT,
+                                text = outcome.outputText,
+                                subtitle = "병렬 백그라운드 · OS Fast-Lane",
+                                toolBadge = "병렬완료 · OS제어"
+                            )
+                        )
+                        speakIfEnabled(outcome.outputText)
+                    }
+                    // 5. Headless Contacts / Calendar / Notes / OS CLI / General Background Task Execution
+                    gLower.contains("연락처") || gLower.contains("전화번호") -> {
+                        val q = bgGoal.replace("연락처", "").replace("전화번호", "").replace("찾아줘", "").replace("찾아", "").replace("알려줘", "").trim()
+                        val outcome = toolHarness.execute("search_contacts", JSONObject().put("query", q), snapshot)
+                        appendChatMessage(
+                            LiveChatMessage(
+                                sender = ChatSender.AGENT,
+                                text = outcome.outputText,
+                                subtitle = "병렬 백그라운드 · 연락처 조회",
+                                toolBadge = "병렬완료 · BG연락처"
+                            )
+                        )
+                        speakIfEnabled(outcome.outputText)
+                    }
+                    gLower.contains("일정") || gLower.contains("캘린더") -> {
+                        val outcome = toolHarness.execute("manage_calendar", JSONObject().put("action", "list"), snapshot)
+                        appendChatMessage(
+                            LiveChatMessage(
+                                sender = ChatSender.AGENT,
+                                text = outcome.outputText,
+                                subtitle = "병렬 백그라운드 · 캘린더 조회",
+                                toolBadge = "병렬완료 · BG캘린더"
+                            )
+                        )
+                        speakIfEnabled(outcome.outputText)
+                    }
+                    gLower.contains("메모") || gLower.contains("노트") -> {
+                        val outcome = if (gLower.contains("저장") || gLower.contains("기억")) {
+                            toolHarness.execute("save_note", JSONObject().put("key", "bg_note").put("content", bgGoal), snapshot)
+                        } else {
+                            toolHarness.execute("read_note", JSONObject().put("key", ""), snapshot)
+                        }
+                        appendChatMessage(
+                            LiveChatMessage(
+                                sender = ChatSender.AGENT,
+                                text = outcome.outputText,
+                                subtitle = "병렬 백그라운드 · 메모리 노트",
+                                toolBadge = "병렬완료 · BG노트"
+                            )
+                        )
+                        speakIfEnabled(outcome.outputText)
+                    }
+                    else -> {
+                        val snap = snapshot ?: AtomicSnapshot(
+                            screenWidth = 1080,
+                            screenHeight = 2340,
+                            activePackage = context.packageName,
+                            activeWindowTitle = "Hanson Board"
+                        )
+                        val cfg = _config.value
+                        val decision = aiInfrastructureRouter.routeAndDecide(
+                            apiKey = cfg.apiKey,
+                            modelName = cfg.modelName,
+                            goal = bgGoal,
+                            iteration = 1,
+                            snapshot = snap,
+                            historySteps = emptyList(),
+                            previousPlan = emptyList(),
+                            chatHistory = _chatMessages.value
+                        )
+                        val headlessSafeTools = setOf(
+                            "list_notifications", "reply_notification", "control_device_setting",
+                            "search_contacts", "manage_calendar", "set_alarm", "save_note", "read_note",
+                            "os_cli_exec", "reverse_engineer_app", "learn_app_skill", "render_generative_ui"
+                        )
+                        val resultText = if (decision.toolName in headlessSafeTools ||
+                            (decision.toolName == "manage_app" && decision.toolArgs.optString("action") != "launch")
+                        ) {
+                            val outcome = toolHarness.execute(decision.toolName, decision.toolArgs, snap)
+                            outcome.outputText.ifBlank { decision.spokenReply }
+                        } else {
+                            decision.spokenReply.ifBlank {
+                                decision.toolArgs.optString("summary", decision.observation)
+                            }
+                        }
+                        appendChatMessage(
+                            LiveChatMessage(
+                                sender = ChatSender.AGENT,
+                                text = resultText,
+                                subtitle = "병렬 백그라운드 (BG Lane)",
+                                toolBadge = "병렬완료 · BG실행"
+                            )
+                        )
+                        speakIfEnabled(resultText)
+                    }
+                }
+            } finally {
+                concurrentBackgroundJobs.remove(taskId)
+                unregisterParallelSlot(taskId)
+            }
+        }
+        concurrentBackgroundJobs[taskId] = job
+    }
+
+    private fun extractExplicitLanePrefix(rawGoal: String): Pair<ExecutionLaneMode, String> {
+        val trimmed = rawGoal.trim()
+        val lower = trimmed.lowercase(Locale.ROOT)
+        return when {
+            lower.startsWith("[bg]") -> ExecutionLaneMode.BACKGROUND to trimmed.substring(4).trim()
+            lower.startsWith("/bg ") -> ExecutionLaneMode.BACKGROUND to trimmed.substring(4).trim()
+            lower.startsWith("백그라운드로 ") -> ExecutionLaneMode.BACKGROUND to trimmed.removePrefix("백그라운드로 ").trim()
+            lower.startsWith("백그라운드에서 ") -> ExecutionLaneMode.BACKGROUND to trimmed.removePrefix("백그라운드에서 ").trim()
+            lower.startsWith("뒤에서 ") -> ExecutionLaneMode.BACKGROUND to trimmed.removePrefix("뒤에서 ").trim()
+            lower.startsWith("[fg]") -> ExecutionLaneMode.FOREGROUND to trimmed.substring(4).trim()
+            lower.startsWith("/fg ") -> ExecutionLaneMode.FOREGROUND to trimmed.substring(4).trim()
+            lower.startsWith("포그라운드로 ") -> ExecutionLaneMode.FOREGROUND to trimmed.removePrefix("포그라운드로 ").trim()
+            lower.startsWith("포그라운드에서 ") -> ExecutionLaneMode.FOREGROUND to trimmed.removePrefix("포그라운드에서 ").trim()
+            lower.startsWith("화면에서 ") -> ExecutionLaneMode.FOREGROUND to trimmed.removePrefix("화면에서 ").trim()
+            else -> ExecutionLaneMode.AUTO to trimmed
+        }
+    }
+
+    fun startRun(
+        goalPrompt: String,
+        appendUserBubble: Boolean = true,
+        laneMode: ExecutionLaneMode = ExecutionLaneMode.AUTO
+    ) {
+        val rawTrimmed = goalPrompt.trim()
+        if (rawTrimmed.isEmpty()) return
+
+        val (prefixLane, cleanedGoal) = extractExplicitLanePrefix(rawTrimmed)
+        val effectiveLane = if (laneMode != ExecutionLaneMode.AUTO) laneMode else prefixLane
+        val trimmedGoal = cleanedGoal.ifBlank { rawTrimmed }
 
         if (appendUserBubble) {
+            val prefixTag = when (effectiveLane) {
+                ExecutionLaneMode.BACKGROUND -> "[BG] "
+                ExecutionLaneMode.FOREGROUND -> "[FG] "
+                ExecutionLaneMode.AUTO -> ""
+            }
             appendChatMessage(
                 LiveChatMessage(
                     sender = ChatSender.USER,
-                    text = trimmedGoal
+                    text = "$prefixTag$trimmedGoal"
                 )
             )
         }
 
         val lower = trimmedGoal.lowercase(Locale.ROOT)
-        // Immediate stop/cancel intent by voice or text
         if (lower in listOf("멈춰", "스톱", "그만", "정지", "취소", "잠깐만 멈춰", "멈춰줘", "그만해")) {
-            stopRun("네, 바로 멈췄어요. 다음엔 어떻게 할까요?")
+            stopRun("네, 모든 병렬 및 화면 작업을 바로 멈췄어요. 다음엔 어떻게 할까요?")
             return
         }
 
@@ -436,49 +726,137 @@ class MobileUseAgentEngine(
             return
         }
 
-        // If the agent is currently waiting for approval and the user says "응/그래/승인/해줘"
         if (_currentSession.value.status == AgentRunStatus.AWAITING_APPROVAL && approvalDeferred != null) {
             val approve = !(lower.contains("아니") || lower.contains("취소") || lower.contains("거절") || lower.contains("마"))
             resolvePendingApproval(approve, alwaysAllowCapability = approve)
             return
         }
 
-        // Live Mid-Execution Steering: if a multi-step trajectory is currently running, steer it in-place!
-        if (activeJob?.isActive == true &&
-            (_currentSession.value.status == AgentRunStatus.OBSERVING ||
-                _currentSession.value.status == AgentRunStatus.THINKING ||
-                _currentSession.value.status == AgentRunStatus.ACTING)
-        ) {
-            liveSteeringGoal = trimmedGoal
-            _currentSession.update { it.copy(goal = trimmedGoal) }
-            FloatingHudService.updateHudStatus("실시간 방향 수정", trimmedGoal.take(30), true)
+        // Explicit BACKGROUND dispatch: force all sub-goals into the non-blocking Background Lane!
+        if (effectiveLane == ExecutionLaneMode.BACKGROUND) {
+            val subGoals = splitCompoundParallelGoals(trimmedGoal)
+            subGoals.forEach { launchParallelBackgroundTask(it) }
             return
         }
 
+        // Explicit FOREGROUND dispatch: force into the Foreground GUI Lane!
+        if (effectiveLane == ExecutionLaneMode.FOREGROUND) {
+            dispatchToForegroundGuiLane(listOf(trimmedGoal))
+            return
+        }
+
+        // AUTO smart lane splitting: fan out compound goals into BG and FG lanes simultaneously!
+        val subGoals = splitCompoundParallelGoals(trimmedGoal)
+        val bgSubGoals = mutableListOf<String>()
+        val guiSubGoals = mutableListOf<String>()
+
+        for (sg in subGoals) {
+            val (sgLane, sgClean) = extractExplicitLanePrefix(sg)
+            when {
+                sgLane == ExecutionLaneMode.BACKGROUND -> bgSubGoals.add(sgClean)
+                sgLane == ExecutionLaneMode.FOREGROUND -> guiSubGoals.add(sgClean)
+                isBackgroundParallelizableGoal(sgClean) -> bgSubGoals.add(sgClean)
+                else -> guiSubGoals.add(sgClean)
+            }
+        }
+
+        for (bgGoal in bgSubGoals) {
+            launchParallelBackgroundTask(bgGoal)
+        }
+
+        if (guiSubGoals.isEmpty()) {
+            return
+        }
+
+        dispatchToForegroundGuiLane(guiSubGoals)
+    }
+
+    private fun dispatchToForegroundGuiLane(guiSubGoals: List<String>) {
+        if (guiSubGoals.isEmpty()) return
+        val primaryGuiGoal = guiSubGoals.first()
+        val extraGuiGoals = guiSubGoals.drop(1)
+        extraGuiGoals.forEach { pendingGuiGoals.offer(it) }
+
+        val isGuiLaneBusy = activeJob?.isActive == true &&
+            (_currentSession.value.status == AgentRunStatus.OBSERVING ||
+                _currentSession.value.status == AgentRunStatus.THINKING ||
+                _currentSession.value.status == AgentRunStatus.ACTING)
+
+        if (isGuiLaneBusy) {
+            val pLower = primaryGuiGoal.lowercase(Locale.ROOT)
+            val isMidFlightSteering = pLower.startsWith("아니") ||
+                pLower.startsWith("잠깐") ||
+                pLower.contains("그거 말고") ||
+                pLower.contains("대신") ||
+                pLower.contains("더 내려") ||
+                pLower.contains("위로 올려") ||
+                pLower.contains("첫 번째") ||
+                pLower.contains("두 번째") ||
+                pLower.contains("뒤로")
+
+            if (isMidFlightSteering) {
+                liveSteeringGoal = primaryGuiGoal
+                _currentSession.update { it.copy(goal = primaryGuiGoal) }
+                FloatingHudService.updateHudStatus("실시간 방향 수정", primaryGuiGoal.take(30), true)
+                return
+            } else {
+                pendingGuiGoals.offer(primaryGuiGoal)
+                val queueSize = pendingGuiGoals.size
+                appendChatMessage(
+                    LiveChatMessage(
+                        sender = ChatSender.AGENT,
+                        text = "현재 화면 제어 작업과 병렬로 대기열(${queueSize}건)에 등록했어요. 지금 단계가 끝나자마자 이어서 '$primaryGuiGoal' 작업을 바로 실행할게요!",
+                        subtitle = "Parallel GUI Queue · $queueSize pending",
+                        toolBadge = "병렬큐 등록"
+                    )
+                )
+                return
+            }
+        }
+
+        startGuiLaneLoop(primaryGuiGoal)
+    }
+
+    private fun startGuiLaneLoop(guiGoal: String) {
         activeJob?.cancel()
         approvalDeferred?.complete(false)
         liveSteeringGoal = null
 
         val cfg = _config.value
         val initialSession = AgentRunSession(
-            goal = trimmedGoal,
+            goal = guiGoal,
             status = AgentRunStatus.OBSERVING,
             maxIterations = cfg.maxIterations,
-            subGoals = listOf(SubGoalItem("화면 확인 및 실행", SubGoalStatus.IN_PROGRESS))
+            subGoals = listOf(SubGoalItem("화면 확인 및 병렬 실행", SubGoalStatus.IN_PROGRESS))
         )
         _currentSession.value = initialSession
 
         if (cfg.autoShowFloatingHud) {
             FloatingHudService.startIfPermitted(context)
         }
-        FloatingHudService.updateHudStatus("한슨 생각 중", trimmedGoal.take(30), true)
+        FloatingHudService.updateHudStatus("한슨 병렬 제어 중", guiGoal.take(30), true)
+
+        val guiTaskId = "gui_${initialSession.runId}"
+        registerParallelSlot(ParallelTaskSlot(taskId = guiTaskId, lane = "GUI", goal = guiGoal))
 
         activeJob = scope.launch {
-            runLoop(trimmedGoal, cfg)
+            try {
+                runLoop(guiGoal, cfg)
+            } finally {
+                unregisterParallelSlot(guiTaskId)
+                val nextQueuedGui = pendingGuiGoals.poll()
+                if (!nextQueuedGui.isNullOrBlank()) {
+                    startGuiLaneLoop(nextQueuedGui)
+                }
+            }
         }
     }
 
     fun stopRun(reason: String = "네, 현재 작업을 멈췄어요. 이어서 무엇을 도와드릴까요?") {
+        pendingGuiGoals.clear()
+        concurrentBackgroundJobs.values.forEach { it.cancel() }
+        concurrentBackgroundJobs.clear()
+        _activeParallelTasks.value = emptyList()
         activeJob?.cancel()
         activeJob = null
         liveSteeringGoal = null
@@ -715,7 +1093,29 @@ class MobileUseAgentEngine(
                 latestSnapshot = snapshot
             )
 
-            // If `list_notifications` was called, immediately summarize the notifications in natural Korean!
+            val manageAppAction = decision.toolArgs.optString("action", "").lowercase()
+            if (decision.toolName == "manage_app" && manageAppAction in listOf("search", "list", "list_games", "list_all")) {
+                val appSummary = outcome.outputText
+                _currentSession.update { prev ->
+                    prev.copy(
+                        status = AgentRunStatus.COMPLETED,
+                        finalSummary = appSummary,
+                        finishedAtMs = System.currentTimeMillis()
+                    )
+                }
+                appendChatMessage(
+                    LiveChatMessage(
+                        sender = ChatSender.AGENT,
+                        text = appSummary,
+                        subtitle = backendBadge,
+                        toolBadge = "앱/게임 스캔"
+                    )
+                )
+                speakIfEnabled(appSummary)
+                FloatingHudService.updateHudStatus("소통 및 제어 대기", appSummary.take(28), false)
+                return
+            }
+
             if (decision.toolName == "list_notifications") {
                 val notifSummary = if (outcome.outputText.contains("수신된 알림이 없습니다") || outcome.outputText.isBlank()) {
                     "지금 새로 도착한 알림이 없어요."
@@ -742,7 +1142,7 @@ class MobileUseAgentEngine(
                 return
             }
 
-            delay(450L)
+            delay(260L)
             val postSnapshot: AtomicSnapshot = HansonAccessibilityService.instance?.captureSnapshotNow(
                 includeScreenshot = false
             ) ?: snapshot
@@ -753,16 +1153,6 @@ class MobileUseAgentEngine(
                 initialOutcomeSucceeded = outcome.succeeded,
                 preSnapshot = snapshot,
                 postSnapshot = postSnapshot
-            )
-
-            worldModelGraph.recordTransition(
-                preSnapshot = snapshot,
-                postSnapshot = verification.finalSnapshot,
-                toolName = decision.toolName,
-                toolArgsJson = decision.toolArgs.toString(),
-                verifiedSuccess = verification.verifiedSuccess,
-                uiDeltaRatio = verification.treeDeltaRatio,
-                selfHealRecipe = verification.recoveryActionKo
             )
 
             val stepLog = AgentStepLog(
@@ -789,13 +1179,25 @@ class MobileUseAgentEngine(
                 )
             }
 
-            LiquidUiSynthesizer.updateLiveTrajectoryHud(
-                goal = currentGoal,
-                steps = _currentSession.value.steps,
-                worldGraph = worldModelGraph
-            )
+            val updatedSteps = _currentSession.value.steps
+            scope.launch(Dispatchers.IO) {
+                worldModelGraph.recordTransition(
+                    preSnapshot = snapshot,
+                    postSnapshot = verification.finalSnapshot,
+                    toolName = decision.toolName,
+                    toolArgsJson = decision.toolArgs.toString(),
+                    verifiedSuccess = verification.verifiedSuccess,
+                    uiDeltaRatio = verification.treeDeltaRatio,
+                    selfHealRecipe = verification.recoveryActionKo
+                )
+                LiquidUiSynthesizer.updateLiveTrajectoryHud(
+                    goal = currentGoal,
+                    steps = updatedSteps,
+                    worldGraph = worldModelGraph
+                )
+            }
 
-            delay(650L)
+            delay(180L)
         }
 
         val maxMsg = "여기까지 실행을 마쳤어요. 지금 화면에서 이어서 할 작업을 말씀해 주세요."

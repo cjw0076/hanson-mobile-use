@@ -5,6 +5,7 @@ import com.hanson.mobileuse.accessibility.CoordinateNormalizer
 import com.hanson.mobileuse.accessibility.IndexedUiElement
 import com.hanson.mobileuse.agent.ActionTrajectoryVerifierAndHealer
 import com.hanson.mobileuse.agent.AgentStepLog
+import com.hanson.mobileuse.agent.AgentToolExecutionHarness
 import com.hanson.mobileuse.agent.GeminiMultimodalClient
 import com.hanson.mobileuse.agent.SkillCatalog
 import com.hanson.mobileuse.agent.SubGoalStatus
@@ -305,5 +306,75 @@ class MobileUseHarnessTest {
         val firstTool = interactionsTools.getJSONObject(0)
         assertEquals("function", firstTool.getString("type"))
         assertEquals("object", firstTool.getJSONObject("parameters").getString("type"))
+    }
+
+    @Test
+    fun koreanFuzzyElementMatcherAndGameInventory_resolvesS25RealWorldTranscripts() {
+        val roomElement = IndexedUiElement(
+            index = 5,
+            shortClass = "TextView",
+            className = "android.widget.TextView",
+            packageName = "com.kakao.talk",
+            text = "4족로봇제어",
+            contentDesc = "",
+            resourceId = "com.kakao.talk:id/title",
+            left = 200,
+            top = 600,
+            right = 800,
+            bottom = 720,
+            centerX = 500,
+            centerY = 660,
+            normX = 463,
+            normY = 275,
+            clickable = true,
+            longClickable = true,
+            scrollable = false,
+            editable = false,
+            checkable = false,
+            checked = false,
+            focused = false,
+            enabled = true,
+            windowType = "APPLICATION",
+            windowLayer = 0
+        )
+        val kakaoSnapshot = AtomicSnapshot(
+            screenWidth = 1080,
+            screenHeight = 2400,
+            activePackage = "com.kakao.talk",
+            indexedElements = listOf(roomElement)
+        )
+
+        // 1. Fuzzy Korean number/phonetic matching ("사족 로봇 제어" & STT typo "사정 로봇 제어" -> "4족로봇제어")
+        val match1 = AgentToolExecutionHarness.findBestMatchingElement(kakaoSnapshot, "사족 로봇 제어 카톡방 들어가 봐")
+        assertNotNull(match1)
+        assertEquals(5, match1?.index)
+        assertEquals("4족로봇제어", match1?.text)
+
+        val match2 = AgentToolExecutionHarness.findBestMatchingElement(kakaoSnapshot, "사정 로봇 제어 카톡방 한번 들어가 봐")
+        assertNotNull(match2)
+        assertEquals(5, match2?.index)
+
+        // 2. Local decision for entering "사족 로봇 제어 카톡방 들어가 봐" clicks index 5 directly
+        val client = GeminiMultimodalClient()
+        val roomDecision = client.inferLocalOnDeviceAction(
+            goal = "사족 로봇 제어 카톡방 들어가 봐",
+            iteration = 1,
+            snapshot = kakaoSnapshot,
+            historySteps = emptyList(),
+            previousPlan = emptyList()
+        )
+        assertEquals("click", roomDecision.toolName)
+        assertEquals(5, roomDecision.toolArgs.getInt("element_index"))
+
+        // 3. Local decision for "내 앱에서 그 게임 있는지 한번 찾아봐 볼래 무슨 게임 있는지 전부 찾아봐 줘" calls manage_app(list_games)
+        val gameDecision = client.inferLocalOnDeviceAction(
+            goal = "내 앱에서 그 게임 있는지 한번 찾아봐 볼래 무슨 게임 있는지 전부 찾아봐 줘",
+            iteration = 1,
+            snapshot = kakaoSnapshot,
+            historySteps = emptyList(),
+            previousPlan = emptyList()
+        )
+        assertEquals("manage_app", gameDecision.toolName)
+        assertEquals("list_games", gameDecision.toolArgs.getString("action"))
     }
 }

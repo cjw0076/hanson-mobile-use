@@ -7,6 +7,7 @@ import android.content.ClipboardManager
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.media.AudioManager
 import android.net.Uri
@@ -68,6 +69,88 @@ class AgentToolExecutionHarness(private val context: Context) {
             "카메라" to "com.sec.android.app.camera",
             "시계" to "com.sec.android.app.clockpackage"
         )
+
+        /**
+         * Normalizes Korean/English UI text and STT utterances so that
+         * "사족 로봇 제어", "사정 로봇 제어", and "4족로봇제어" normalize & match reliably.
+         */
+        fun normalizeKoreanUiToken(raw: String): String {
+            var s = raw.lowercase()
+                .replace(Regex("[\\s'\"`·•,\\-_.:;/\\\\()\\[\\]{}!?~]+"), "")
+            val numberMap = listOf(
+                "일족" to "1족", "이족" to "2족", "삼족" to "3족", "사족" to "4족", "사정" to "4족",
+                "오족" to "5족", "육족" to "6족", "팔족" to "8족",
+                "일번" to "1번", "이번" to "2번", "삼번" to "3번", "사번" to "4번", "오번" to "5번"
+            )
+            for ((k, v) in numberMap) {
+                s = s.replace(k, v)
+            }
+            if (s.startsWith("사") && s.contains("로봇")) {
+                s = "4" + s.removePrefix("사")
+            }
+            return s
+        }
+
+        fun computeTokenSimilarity(a: String, b: String): Double {
+            val na = normalizeKoreanUiToken(a)
+            val nb = normalizeKoreanUiToken(b)
+            if (na.isEmpty() || nb.isEmpty()) return 0.0
+            if (na == nb) return 1.0
+            if (na.contains(nb) || nb.contains(na)) {
+                val minLen = minOf(na.length, nb.length)
+                return if (minLen >= 2) 0.92 else 0.70
+            }
+            val charsA = na.toSet()
+            val charsB = nb.toSet()
+            val inter = charsA.intersect(charsB).size.toDouble()
+            val union = charsA.union(charsB).size.coerceAtLeast(1).toDouble()
+            return inter / union
+        }
+
+        fun findBestMatchingElement(
+            snapshot: AtomicSnapshot?,
+            rawQuery: String
+        ): com.hanson.mobileuse.accessibility.IndexedUiElement? {
+            if (snapshot == null) return null
+            val cleaned = rawQuery
+                .replace("카톡방", "")
+                .replace("대화방", "")
+                .replace("채팅방", "")
+                .replace("단톡방", "")
+                .replace("들어가봐", "")
+                .replace("들어가", "")
+                .replace("눌러봐", "")
+                .replace("눌러줘", "")
+                .replace("눌러", "")
+                .replace("열어봐", "")
+                .replace("열어줘", "")
+                .replace("열어", "")
+                .replace("한번", "")
+                .replace("바로", "")
+                .replace("좀", "")
+                .trim()
+            val qNorm = normalizeKoreanUiToken(cleaned)
+            if (qNorm.length < 2) return null
+
+            var bestEl: com.hanson.mobileuse.accessibility.IndexedUiElement? = null
+            var bestScore = 0.0
+
+            for (el in snapshot.indexedElements) {
+                val label = el.text.trim().ifBlank { el.contentDesc.trim() }
+                if (label.length < 2) continue
+                val lNorm = normalizeKoreanUiToken(label)
+                val score = when {
+                    lNorm == qNorm -> 1.0
+                    lNorm.contains(qNorm) || qNorm.contains(lNorm) -> 0.94
+                    else -> computeTokenSimilarity(cleaned, label)
+                }
+                if (score > bestScore) {
+                    bestScore = score
+                    bestEl = el
+                }
+            }
+            return if (bestScore >= 0.58) bestEl else null
+        }
     }
 
     private val notesPrefs = context.getSharedPreferences(NOTES_PREFS, Context.MODE_PRIVATE)
@@ -148,6 +231,14 @@ class AgentToolExecutionHarness(private val context: Context) {
             val ny = args.optInt("norm_y", -1)
             if (nx >= 0 && ny >= 0) {
                 return CoordinateNormalizer.normalizedToPixel(nx, ny, screenW, screenH)
+            }
+        }
+
+        val desc = args.optString("target_description", "").trim()
+        if (desc.isNotEmpty()) {
+            val fuzzyEl = findBestMatchingElement(snapshot, desc)
+            if (fuzzyEl != null) {
+                return fuzzyEl.centerX to fuzzyEl.centerY
             }
         }
         return null
@@ -479,14 +570,16 @@ class AgentToolExecutionHarness(private val context: Context) {
         val query = args.optString("app_name", "").trim()
         val pm = context.packageManager
 
-        if (action == "search" || action == "list") {
-            val matches = searchInstalledApps(pm, query).take(15)
-            val formatted = if (matches.isEmpty()) {
-                "'$query'와 일치하는 설치된 앱이 없습니다."
-            } else {
-                matches.joinToString("\n") { "- ${it.first} (${it.second})" }
-            }
-            return ToolExecutionOutcome(true, "설치된 앱 검색 결과:\n$formatted")
+        val wantsGameScan = action == "list_games" ||
+            query.contains("게임") ||
+            query.lowercase().contains("game")
+
+        if (wantsGameScan || action == "search" || action == "list" || action == "list_all") {
+            val report = scanInstalledGamesAndApps(
+                query = if (wantsGameScan || action == "list_all" || query == "전체" || query == "모두") "" else query,
+                prioritizeGames = wantsGameScan
+            )
+            return ToolExecutionOutcome(true, report)
         }
 
         // Launch app
@@ -526,6 +619,96 @@ class AgentToolExecutionHarness(private val context: Context) {
                 undoHintKo = "홈(HOME) 키로 복귀할 수 있습니다."
             )
         )
+    }
+
+    /**
+     * Scans the device's PackageManager in parallel-friendly read mode to identify
+     * all installed Games (`CATEGORY_GAME` / `FLAG_IS_GAME` / game engines & publishers)
+     * as well as user-installed applications.
+     */
+    fun scanInstalledGamesAndApps(query: String = "", prioritizeGames: Boolean = false): String {
+        val pm = context.packageManager
+        val q = query.lowercase().trim()
+        val apps = try {
+            pm.getInstalledApplications(PackageManager.GET_META_DATA)
+        } catch (_: Exception) {
+            try {
+                pm.getInstalledApplications(0)
+            } catch (_: Exception) {
+                emptyList()
+            }
+        }
+
+        val gameKeywords = listOf(
+            "game", "gaming", "playgames", "gamelauncher", "gamehome", "unity", "unreal",
+            "supercell", "nexon", "netmarble", "krafton", "ncsoft", "kakaogames", "com2us",
+            "devsisters", "hoyoverse", "mihoyo", "riotgames", "roblox", "brawl", "genshin",
+            "pubg", "minecraft", "chess", "puzzle", "arcade", "casino", "poker", "sudoku",
+            "solitaire", "emulator", "steam", "xbox", "playstation", "nintendo", "nikke",
+            "maple", "fifa", "fconline", "kart", "cookie", "stardew", "terraria", "pokemon"
+        )
+
+        val games = mutableListOf<Pair<String, String>>()
+        val userApps = mutableListOf<Pair<String, String>>()
+
+        for (appInfo in apps) {
+            val pkg = appInfo.packageName ?: continue
+            if (pkg == context.packageName) continue
+            val isLaunchable = pm.getLaunchIntentForPackage(pkg) != null
+            if (!isLaunchable) continue
+
+            val label = try {
+                pm.getApplicationLabel(appInfo).toString().trim()
+            } catch (_: Exception) {
+                pkg
+            }
+            val lowerPkg = pkg.lowercase()
+            val lowerLabel = label.lowercase()
+
+            if (q.isNotEmpty() && !lowerLabel.contains(q) && !lowerPkg.contains(q)) {
+                continue
+            }
+
+            val isCategoryGame = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                appInfo.category == ApplicationInfo.CATEGORY_GAME
+            } else {
+                false
+            }
+            @Suppress("DEPRECATION")
+            val isFlagGame = (appInfo.flags and ApplicationInfo.FLAG_IS_GAME) != 0
+            val matchesGameKeyword = gameKeywords.any { kw -> lowerPkg.contains(kw) || lowerLabel.contains(kw) }
+            val isSystemApp = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0 &&
+                (appInfo.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) == 0
+
+            if (isCategoryGame || isFlagGame || matchesGameKeyword) {
+                games.add(label to pkg)
+            } else if (!isSystemApp || q.isNotEmpty()) {
+                userApps.add(label to pkg)
+            }
+        }
+
+        val sortedGames = games.distinctBy { it.second }.sortedBy { it.first }
+        val sortedUserApps = userApps.distinctBy { it.second }.sortedBy { it.first }
+
+        return if (prioritizeGames) {
+            if (sortedGames.isNotEmpty()) {
+                val gameNames = sortedGames.joinToString(", ") { "${it.first}(${it.second.substringAfterLast('.')})" }
+                val extraUserApps = sortedUserApps.take(10).joinToString(", ") { it.first }
+                "기기 전체 패키지 스캔 결과, 게임/게임 관련 앱 ${sortedGames.size}개가 확인되었습니다: $gameNames. " +
+                    if (extraUserApps.isNotEmpty()) "(설치된 주요 사용자 앱 총 ${sortedUserApps.size}개: $extraUserApps 등)" else ""
+            } else {
+                val topUserApps = sortedUserApps.take(15).joinToString(", ") { it.first }
+                "기기에 설치된 전체 앱(${apps.size}개 패키지, 실행 가능한 사용자 앱 ${sortedUserApps.size}개)을 모두 스캔한 결과, 현재 설치된 모바일 게임(CATEGORY_GAME)은 없습니다. 설치되어 있는 주요 앱은 [$topUserApps] 입니다."
+            }
+        } else {
+            val combined = (sortedGames + sortedUserApps).distinctBy { it.second }
+            if (combined.isEmpty()) {
+                "'$query'와 일치하는 설치된 앱이 없습니다."
+            } else {
+                val preview = combined.take(18).joinToString(", ") { "${it.first}(${it.second})" }
+                "설치된 앱 확인 결과 (총 ${combined.size}개): $preview"
+            }
+        }
     }
 
     private fun searchInstalledApps(pm: PackageManager, query: String): List<Pair<String, String>> {

@@ -156,12 +156,24 @@ class ArtemisCommandServer(
         when (path) {
             "/ping", "/health" -> {
                 val engine = HansonRuntimeHolder.getAgentEngine(service.applicationContext)
+                val parallelArr = JSONArray()
+                engine.activeParallelTasks.value.forEach { slot ->
+                    parallelArr.put(
+                        JSONObject().apply {
+                            put("taskId", slot.taskId)
+                            put("lane", slot.lane)
+                            put("goal", slot.goal)
+                        }
+                    )
+                }
                 val resp = JSONObject().apply {
                     put("status", "ok")
-                    put("engine", "Hanson-Artemis-Hybrid-v1")
+                    put("engine", "Hanson-Artemis-Hybrid-v2-Parallel")
                     put("port", port)
                     put("requests", totalRequests.get())
                     put("agentStatus", engine.currentSession.value.status.name)
+                    put("activeParallelCount", parallelArr.length())
+                    put("activeParallelTasks", parallelArr)
                     put("chatMessageCount", engine.chatMessages.value.size)
                 }
                 onBridgeEvent?.invoke(path, "200 OK")
@@ -183,10 +195,16 @@ class ArtemisCommandServer(
                     val req = runCatching { JSONObject(body) }.getOrDefault(JSONObject())
                     val text = req.optString("text", req.optString("message", "")).trim()
                     val role = req.optString("role", "assistant").lowercase()
+                    val lane = req.optString("lane", "").uppercase()
                     val badge = req.optString("badge", "LAPTOP CLI")
                     if (text.isNotEmpty()) {
                         if (role == "user" || req.optBoolean("executeGoal", false)) {
-                            engine.sendChatMessage(text)
+                            val prefixedText = when (lane) {
+                                "BG", "BACKGROUND" -> "[BG] $text"
+                                "FG", "FOREGROUND", "GUI" -> "[FG] $text"
+                                else -> text
+                            }
+                            engine.sendChatMessage(prefixedText)
                         } else {
                             engine.injectExternalReply(text, badge)
                         }
