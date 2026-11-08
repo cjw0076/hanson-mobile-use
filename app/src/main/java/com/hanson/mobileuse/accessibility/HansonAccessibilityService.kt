@@ -22,7 +22,7 @@ data class AccessibilityEngineState(
     val bridgePort: Int = ArtemisCommandServer.DEFAULT_PORT,
     val bridgeRunning: Boolean = false,
     val bridgeToken: String = "",
-    val bridgeRequireToken: Boolean = false,
+    val bridgeRequireToken: Boolean = true,
     val bridgeRequestCount: Int = 0,
     val recentBridgeTraffic: List<BridgeTrafficEntry> = emptyList(),
     val latestSnapshot: AtomicSnapshot? = null
@@ -60,7 +60,7 @@ class HansonAccessibilityService : AccessibilityService() {
         val server = ArtemisCommandServer(
             service = this,
             port = ArtemisCommandServer.DEFAULT_PORT,
-            requireTokenAuth = false
+            requireTokenAuth = true
         ).apply {
             onBridgeEvent = { endpoint, status ->
                 _engineState.update { prev ->

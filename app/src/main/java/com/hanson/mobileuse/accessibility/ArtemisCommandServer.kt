@@ -14,6 +14,7 @@ import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -23,15 +24,34 @@ import java.util.concurrent.atomic.AtomicInteger
  * Google Artemis Loopback Bridge (`127.0.0.1:18888`)
  * Supports `/ping`, `/snapshot`, `/dump`, `/dump_xml`, `/elements`, `/action`, `/rpc`,
  * AND `/chat` for continuous runtime Live Chat synchronization with the Laptop CLI (Antigravity / Codex / Artemis).
+ *
+ * Security Model (v3.1 Hardened):
+ * - Token authentication (`requireTokenAuth = true`) is enabled by default using a 256-bit random token.
+ * - Constant-time token comparison via [MessageDigest.isEqual] on `X-Artemis-Token` or `Authorization: Bearer`.
+ * - Any request arriving through a tunnel/proxy (`CF-Connecting-IP`, `X-Forwarded-For`, `Ngrok-Trace-Id`, etc.)
+ *   or carrying browser cross-origin headers (`Origin`, `Referer`, `Sec-Fetch-Site`) ALWAYS enforces token auth
+ *   even if local ADB token-free mode was toggled in UI.
+ * - Wildcard CORS (`Access-Control-Allow-Origin: *`) is removed to prevent browser localhost hijacking.
  */
 class ArtemisCommandServer(
     private val service: AccessibilityService,
     val port: Int = DEFAULT_PORT,
-    var requireTokenAuth: Boolean = false
+    var requireTokenAuth: Boolean = true
 ) {
     companion object {
         private const val TAG = "ArtemisCommandServer"
         const val DEFAULT_PORT = 18888
+        private const val MAX_BODY_BYTES = 65_536
+
+        fun verifyTokenConstantTime(provided: String?, expected: String): Boolean {
+            val cleanProvided = provided?.trim().orEmpty()
+            val cleanExpected = expected.trim()
+            if (cleanProvided.length < 32 || cleanExpected.length < 32) return false
+            return MessageDigest.isEqual(
+                cleanProvided.toByteArray(StandardCharsets.UTF_8),
+                cleanExpected.toByteArray(StandardCharsets.UTF_8)
+            )
+        }
     }
 
     val sessionToken: String = generateToken()
@@ -125,14 +145,42 @@ class ArtemisCommandServer(
         }
 
         var contentLength = 0
+        var isProxiedOrBrowserRequest = false
         var headerLine = readAsciiLine(rawIn)
         while (!headerLine.isNullOrEmpty()) {
-            if (headerLine.lowercase().startsWith("content-length:")) {
-                contentLength = headerLine.substringAfter(":").trim().toIntOrNull() ?: 0
-            } else if (headerLine.lowercase().startsWith("x-artemis-token:")) {
-                queryParams["token"] = headerLine.substringAfter(":").trim()
+            val lower = headerLine.lowercase()
+            when {
+                lower.startsWith("content-length:") -> {
+                    contentLength = headerLine.substringAfter(":").trim().toIntOrNull() ?: 0
+                }
+                lower.startsWith("x-artemis-token:") -> {
+                    queryParams["token"] = headerLine.substringAfter(":").trim()
+                }
+                lower.startsWith("authorization:") -> {
+                    val authVal = headerLine.substringAfter(":").trim()
+                    if (authVal.lowercase().startsWith("bearer ")) {
+                        queryParams["token"] = authVal.substring(7).trim()
+                    }
+                }
+                lower.startsWith("cf-connecting-ip:") ||
+                    lower.startsWith("x-forwarded-for:") ||
+                    lower.startsWith("x-real-ip:") ||
+                    lower.startsWith("forwarded:") ||
+                    lower.startsWith("ngrok-trace-id:") ||
+                    lower.startsWith("x-forwarded-host:") ||
+                    lower.startsWith("tailscale-user-login:") ||
+                    lower.startsWith("origin:") ||
+                    lower.startsWith("referer:") ||
+                    lower.startsWith("sec-fetch-site:") -> {
+                    isProxiedOrBrowserRequest = true
+                }
             }
             headerLine = readAsciiLine(rawIn)
+        }
+
+        if (contentLength < 0 || contentLength > MAX_BODY_BYTES) {
+            sendHttpResponse(out, 413, "application/json", """{"status":"error","error":"Payload too large"}""")
+            return
         }
 
         var body = ""
@@ -147,9 +195,15 @@ class ArtemisCommandServer(
             body = String(buf, 0, read, StandardCharsets.UTF_8)
         }
 
-        if (requireTokenAuth && queryParams["token"] != sessionToken) {
+        val mustEnforceToken = requireTokenAuth || isProxiedOrBrowserRequest
+        if (mustEnforceToken && !verifyTokenConstantTime(queryParams["token"], sessionToken)) {
             onBridgeEvent?.invoke(path, "401 Unauthorized")
-            sendHttpResponse(out, 401, "application/json", """{"status":"error","error":"Unauthorized token"}""")
+            sendHttpResponse(
+                out,
+                401,
+                "application/json",
+                """{"status":"error","error":"Unauthorized: valid X-Artemis-Token or Authorization Bearer token required"}"""
+            )
             return
         }
 
@@ -351,7 +405,7 @@ class ArtemisCommandServer(
         val response = JSONObject()
         try {
             val req = JSONObject(rawJson)
-            if (requireTokenAuth && req.optString("token") != sessionToken) {
+            if (requireTokenAuth && !verifyTokenConstantTime(req.optString("token"), sessionToken)) {
                 response.put("status", "error")
                 response.put("error", "Unauthorized token")
                 return response
@@ -442,16 +496,18 @@ class ArtemisCommandServer(
         val statusText = when (statusCode) {
             200 -> "OK"
             401 -> "Unauthorized"
+            403 -> "Forbidden"
             404 -> "Not Found"
             405 -> "Method Not Allowed"
+            413 -> "Payload Too Large"
             else -> "Error"
         }
         val bodyBytes = body.toByteArray(StandardCharsets.UTF_8)
         val headers = buildString {
             append("HTTP/1.1 $statusCode $statusText\r\n")
             append("Content-Type: $contentType; charset=utf-8\r\n")
+            append("X-Content-Type-Options: nosniff\r\n")
             append("Content-Length: ${bodyBytes.size}\r\n")
-            append("Access-Control-Allow-Origin: *\r\n")
             append("Connection: close\r\n\r\n")
         }
         out.write(headers.toByteArray(StandardCharsets.UTF_8))
@@ -460,7 +516,7 @@ class ArtemisCommandServer(
     }
 
     private fun generateToken(): String {
-        val bytes = ByteArray(16)
+        val bytes = ByteArray(32)
         SecureRandom().nextBytes(bytes)
         return bytes.joinToString("") { "%02x".format(it) }
     }

@@ -111,24 +111,35 @@ flowchart TB
 
 ---
 
-## 외부 AI 에이전트 소통 및 A2A / MCP 오픈 프로토콜 (`127.0.0.1:18888`)
+## 외부 AI 에이전트 소통 및 A2A / MCP 보안 프로토콜 (`127.0.0.1:18888` & `:18890`)
 
-접근성 서비스가 켜지면 기기 내부 `127.0.0.1:18888`에 **A2A (Agent2Agent Protocol v1.0)**, **MCP (Model Context Protocol)**, 그리고 **Google Artemis Loopback HTTP/JSON-RPC 서버**가 자동으로 열립니다.
-Cloudflare Tunnel, Tailscale Funnel, ngrok 또는 ADB 포트 포워딩을 통해 인터넷이나 로컬 네트워크의 다른 AI 에이전트(Moltbook/OpenClaw, A2A Registry, OpenAgents, Claude Code, Codex, LangGraph, CrewAI)와 직접 소통하고 피드백을 주고받을 수 있습니다.
+> [!IMPORTANT]
+> **보안 아키텍처 (v3.1 Hardened Security Model)**
+> 1. **`:18888` A2A / Artemis 브리지 기본 토큰 인증 강제 (`requireTokenAuth = true`)**:
+>    - 모든 요청은 앱 내 `[인스펙터/브리지]` 탭에 발급된 **256-bit 난수 세션 토큰**(`X-Artemis-Token: <TOKEN>` 또는 `Authorization: Bearer <TOKEN>`)을 포함해야 하며, 상수 시간 비교(`MessageDigest.isEqual`)로 검증됩니다.
+>    - 브라우저 크로스오리진 하이재킹 방지를 위해 와일드카드 CORS(`Access-Control-Allow-Origin: *`)가 제거되었으며, 프록시/터널 헤더(`CF-Connecting-IP`, `X-Forwarded-For`, `Ngrok-Trace-Id` 등) 또는 브라우저 `Origin`/`Referer` 헤더가 감지되면 로컬 설정과 무관하게 **무조건 256-bit 토큰 인증이 강제**됩니다.
+>    - **절대로 토큰 인증 없이 `:18888` 또는 `:18890` 포트를 공용 인터넷 터널에 직접 노출하지 마십시오.**
+> 2. **`:18890` UID-2000 OS CLI 데몬 다중 방어 (Zero Arbitrary Shell)**:
+>    - 앱 전용 비밀 디렉토리(`/data/data/com.hanson.mobileuse/files/.hanson_cli_token`, 권한 `0600`)를 통해 공유되는 **256-bit `X-Hanson-Cli-Token` 인증**과 **커널 `/proc/net/tcp` 소켓 소유자 UID 검증**(`root(0)`, `shell(2000)`, `com.hanson.mobileuse` 외 타 서드파티 앱 접속 즉시 `403 Forbidden` 차단)이 동시에 적용됩니다.
+>    - `/exec`의 임의 셸(`sh -c`) 실행이 완전히 제거되었으며, 사전 정의된 안전 액션 허용 목록(`ALLOWED_ACTIONS`)과 셸 메타문자 차단 필터 및 `ProcessBuilder` 인자 배열 실행만 허용됩니다.
+> 3. **외부 격리 서명 키스토어**:
+>    - 저장소 내 `.jks` 커밋 및 기본 비밀번호 폴백을 전면 금지하고, 빌드 시 외부 환경변수(`HANSON_KEYSTORE_PATH`, `HANSON_KEYSTORE_PASSWORD`) 또는 Git 추적에서 제외된 로컬 `keystore.properties`만 참조합니다.
 
 ```bash
-# PC 또는 에이전트 호스트에서 ADB 포트 포워딩
+# 0. 앱 [인스펙터/브리지] 탭에서 확인한 256-bit 브리지 토큰 설정 및 ADB 포트 포워딩
+export ARTEMIS_TOKEN="<앱_인스펙터_탭에_표시된_64자리_HEX_토큰>"
 adb forward tcp:18888 tcp:18888
 
 # 1. A2A Agent Card 조회 (Agent2Agent 표준 디스커버리)
-curl -s http://127.0.0.1:18888/.well-known/agent-card.json | jq .
+curl -s -H "X-Artemis-Token: $ARTEMIS_TOKEN" http://127.0.0.1:18888/.well-known/agent-card.json | jq .
 
-# 2. MCP 도구 스키마 조회 (25종 안드로이드 자율 제어 도구)
-curl -s http://127.0.0.1:18888/mcp/tools | jq .
+# 2. MCP 도구 스키마 조회 (31종 안드로이드 자율 제어 도구)
+curl -s -H "X-Artemis-Token: $ARTEMIS_TOKEN" http://127.0.0.1:18888/mcp/tools | jq .
 
 # 3. A2A JSON-RPC 2.0 작업 위임 및 에이전트 간 소통 (FG / BG / AUTO 멀티레인 지원)
 curl -X POST http://127.0.0.1:18888/a2a \
   -H "Content-Type: application/json" \
+  -H "X-Artemis-Token: $ARTEMIS_TOKEN" \
   -d '{
     "jsonrpc": "2.0",
     "id": "a2a_req_1",
@@ -141,10 +152,10 @@ curl -X POST http://127.0.0.1:18888/a2a \
   }'
 
 # 4. 실시간 화면 요소 조회 (키보드/상태바 노이즈가 제거된 정밀 UI 트리)
-curl -s http://127.0.0.1:18888/elements | jq .
+curl -s -H "X-Artemis-Token: $ARTEMIS_TOKEN" http://127.0.0.1:18888/elements | jq .
 
 # 5. 실시간 대화 내역 및 에이전트 응답 확인
-curl -s http://127.0.0.1:18888/chat | jq .
+curl -s -H "X-Artemis-Token: $ARTEMIS_TOKEN" http://127.0.0.1:18888/chat | jq .
 ```
 
 ### 멀티레인 병렬 실행 (`FG` / `BG` / `AUTO`)

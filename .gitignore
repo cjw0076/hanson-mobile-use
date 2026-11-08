@@ -13,6 +13,11 @@ app/build/
 *.aab
 *.ap_
 *.dex
+*.jks
+*.keystore
+*.pk8
+*.pem
+keystore.properties
 tools/craft-anything/
 hs_err_pid*.log
 

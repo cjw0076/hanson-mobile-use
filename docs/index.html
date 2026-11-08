@@ -729,7 +729,7 @@
         <a href="#" class="brand-cluster">
           <div class="brand-mark">H</div>
           <span class="brand-title">hanson</span>
-          <span class="brand-badge">v3.0.0 · SWARM MOBILE-USE</span>
+          <span class="brand-badge">v3.1.0 · SWARM MOBILE-USE</span>
         </a>
 
         <nav class="nav-links">
@@ -747,7 +747,7 @@
             <span>◐ Contrast</span>
           </button>
           <a class="btn btn-primary" href="https://github.com/cjw0076/hanson-mobile-use/releases/latest" target="_blank" rel="noopener">
-            <span>⬇ APK v3.0.0</span>
+            <span>⬇ APK v3.1.0</span>
           </a>
         </div>
       </div>
@@ -777,7 +777,7 @@
 
             <div class="hero-cta-row">
               <a class="btn btn-primary btn-lg" href="https://github.com/cjw0076/hanson-mobile-use/releases/latest" target="_blank" rel="noopener">
-                ⬇ Download Release APK (v3.0.0)
+                ⬇ Download Release APK (v3.1.0)
               </a>
               <a class="btn btn-lg" href="#motion-ad-section">
                 🎬 Watch Opus 5.5 Motion Commercial
@@ -1112,12 +1112,13 @@
             Hanson Mobile-Use AI는 <code>/.well-known/agent-card.json</code> (Google A2A v1.0) 및 <code>/mcp/tools</code> (Model Context Protocol) 표준 엔드포인트를 내장하고 있습니다. Claude Code, Codex, OpenClaw/Moltbook, LangGraph 등 어떤 외부 에이전트든 당신의 스마트폰과 직접 대화하고 피드백을 주고받을 수 있습니다.
           </p>
           <div class="code-snippet">
-# 1. ADB 포트 포워딩 또는 Cloudflare Tunnel 연결
+# 1. 앱 [인스펙터/브리지] 탭의 256-bit 세션 토큰 설정 및 ADB 로컬 포트 포워딩 (기본 인증 강제)
+export ARTEMIS_TOKEN="&lt;YOUR_256BIT_HEX_TOKEN&gt;"
 adb forward tcp:18888 tcp:18888
 
-# 2. A2A v1.0 표준 에이전트 카드 조회 &amp; 병렬 BG 작업 위임
-curl -s http://127.0.0.1:18888/.well-known/agent-card.json | jq .
-curl -X POST http://127.0.0.1:18888/a2a -H "Content-Type: application/json" \
+# 2. A2A v1.0 표준 에이전트 카드 조회 &amp; 병렬 BG 작업 위임 (X-Artemis-Token 필수)
+curl -s -H "X-Artemis-Token: $ARTEMIS_TOKEN" http://127.0.0.1:18888/.well-known/agent-card.json | jq .
+curl -X POST http://127.0.0.1:18888/a2a -H "Content-Type: application/json" -H "X-Artemis-Token: $ARTEMIS_TOKEN" \
   -d '{"jsonrpc":"2.0","id":"1","method":"tasks/send","params":{"lane":"BG","prompt":"브라우저로 해커뉴스 최신 글 요약해줘"}}'
           </div>
         </div>
@@ -1340,7 +1341,7 @@ curl -X POST http://127.0.0.1:18888/a2a -H "Content-Type: application/json" \
       { title: '03 · JEV ROUTER ORCHESTRATION', ko: 'DYNAMIC MULTI-MODEL & FG / BG PARALLEL LANES', sub: 'S25 AICore Nano NPU ↔ Gemini 3.8 Flash ↔ 4 Argon · Concurrent Execution' },
       { title: '04 · OPUS 5.5 LIVE CODE CANVAS', ko: 'DRAW WITH CODE. SYNTHESIZE VISUAL MEDIA LIVE.', sub: 'Real-Time SVG Architecture, Interactive Metrics, and Generative Artwork' },
       { title: '05 · BEYOND-HABIT S1 DISTILLATION', ko: '620ms DELIBERATION → 12ms INSTANT HABIT', sub: 'Online System-2 to System-1 JIT Macro & 16KB Contrastive VLM Distillation' },
-      { title: '06 · OPEN SOURCE · JOIN THE SWARM', ko: 'HANSON MOBILE-USE AI v3.0.0 · MIT OPEN SOURCE', sub: 'A2A v1.0 & MCP Ready (:18888) · Star & Download APK on GitHub Today' }
+      { title: '06 · OPEN SOURCE · JOIN THE SWARM', ko: 'HANSON MOBILE-USE AI v3.1.0 · MIT OPEN SOURCE', sub: 'A2A v1.0 & MCP Ready (:18888) · Star & Download APK on GitHub Today' }
     ];
 
     function playSceneSynthChord(sceneIdx) {
@@ -1625,7 +1626,7 @@ curl -X POST http://127.0.0.1:18888/a2a -H "Content-Type: application/json" \
         ctx.fillRect(W / 2 - 210, 390, 420, 64);
         ctx.fillStyle = '#FFFFFF';
         ctx.font = '800 20px Inter, sans-serif';
-        ctx.fillText('DOWNLOAD APK v3.0.0 & JOIN THE SWARM', W / 2, 429);
+        ctx.fillText('DOWNLOAD APK v3.1.0 & JOIN THE SWARM', W / 2, 429);
       }
 
       // Bottom Cinema Headline Overlay

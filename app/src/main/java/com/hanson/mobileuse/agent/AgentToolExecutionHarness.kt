@@ -1352,9 +1352,21 @@ class AgentToolExecutionHarness(private val context: Context) {
             .removePrefix("/cli ")
             .removePrefix("/sh ")
             .trim()
+        if (com.hanson.mobileuse.oscli.HansonOsCliMain.containsShellMetacharacters(rawCmd)) {
+            return ToolExecutionOutcome(
+                succeeded = false,
+                outputText = "[보안 차단] OS CLI 명령에 허용되지 않는 셸 메타문자(; & | $ ` > < 등)가 포함되어 거부되었습니다."
+            )
+        }
         val tokens = rawCmd.split(Regex("\\s+")).filter { it.isNotBlank() }
         val action = tokens.firstOrNull()?.lowercase() ?: "status"
         val rest = tokens.drop(1)
+        if (action != "settings" && action !in com.hanson.mobileuse.oscli.HansonOsCliMain.ALLOWED_ACTIONS) {
+            return ToolExecutionOutcome(
+                succeeded = false,
+                outputText = "[보안 차단] 허용되지 않은 OS CLI 명령('$action')입니다. 허용 목록: ${com.hanson.mobileuse.oscli.HansonOsCliMain.ALLOWED_ACTIONS.joinToString(", ")}"
+            )
+        }
 
         // 1. Direct Settings.Secure / Settings.Global / Settings.System via permanent WRITE_SECURE_SETTINGS
         if (action == "setting" || action == "settings") {
@@ -1400,8 +1412,9 @@ class AgentToolExecutionHarness(private val context: Context) {
             }
         }
 
-        // 2. Try UID-2000 On-Device OS CLI Daemon (127.0.0.1:18890)
+        // 2. Try UID-2000 On-Device OS CLI Daemon (127.0.0.1:18890) with 256-bit shared token
         try {
+            val sharedToken = com.hanson.mobileuse.oscli.HansonOsCliMain.getOrCreateSharedDaemonToken(context)
             val url = java.net.URL("http://127.0.0.1:${com.hanson.mobileuse.oscli.HansonOsCliMain.DAEMON_PORT}/exec")
             val conn = (url.openConnection() as java.net.HttpURLConnection).apply {
                 requestMethod = "POST"
@@ -1409,6 +1422,7 @@ class AgentToolExecutionHarness(private val context: Context) {
                 readTimeout = 8000
                 doOutput = true
                 setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                setRequestProperty(com.hanson.mobileuse.oscli.HansonOsCliMain.TOKEN_HEADER, sharedToken)
             }
             val reqJson = JSONObject().apply {
                 put("action", action)

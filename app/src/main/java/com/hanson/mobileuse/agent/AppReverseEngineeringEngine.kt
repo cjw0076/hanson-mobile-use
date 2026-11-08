@@ -383,10 +383,8 @@ class AppReverseEngineeringEngine(private val context: Context) {
 
     private fun extractSchemesFromDumpsys(packageName: String): List<String> {
         return try {
-            val out = HansonOsCliMain.runRawShell(
-                "dumpsys package $packageName | grep -E 'Scheme: \"|Authority: \"' | head -n 30",
-                timeoutSec = 3L
-            ).optString("stdout")
+            val out = HansonOsCliMain.executeCommandJson("dump", listOf("package", packageName))
+                .optString("stdout")
             val schemes = mutableListOf<String>()
             var lastScheme = ""
             out.lineSequence().forEach { line ->

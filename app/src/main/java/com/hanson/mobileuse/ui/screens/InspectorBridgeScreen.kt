@@ -116,13 +116,13 @@ fun InspectorBridgeScreen(
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = "브리지 토큰 인증 강제 (X-Artemis-Token)",
+                            text = "브리지 토큰 인증 강제 (X-Artemis-Token · 기본 ON)",
                             color = ObsidianColors.TextPrimary,
                             fontSize = 13.sp,
                             fontWeight = FontWeight.SemiBold
                         )
                         Text(
-                            text = "꺼두면 ADB/Termux/로컬 에이전트가 토큰 없이 127.0.0.1:${a11yState.bridgePort}에 즉시 연결됩니다.",
+                            text = "256-bit 세션 토큰으로 타 앱 및 원격 터널 무단 접근을 차단합니다. (프록시/터널 헤더 감지 시에는 항상 인증 강제)",
                             color = ObsidianColors.TextSecondary,
                             fontSize = 11.5.sp
                         )
@@ -139,7 +139,8 @@ fun InspectorBridgeScreen(
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                val adbCmd = "adb forward tcp:18888 tcp:18888 && curl -s http://127.0.0.1:18888/snapshot | jq ."
+                val tokenPreview = a11yState.bridgeToken.ifBlank { "<BRIDGE_TOKEN>" }
+                val adbCmd = "adb forward tcp:18888 tcp:18888 && curl -s -H \"X-Artemis-Token: $tokenPreview\" http://127.0.0.1:18888/snapshot | jq ."
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()

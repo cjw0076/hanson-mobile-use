@@ -1,7 +1,16 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+}
+
+val localKeystoreProps = Properties().apply {
+    val propFile = rootProject.file("keystore.properties")
+    if (propFile.isFile) {
+        propFile.inputStream().use { load(it) }
+    }
 }
 
 android {
@@ -12,8 +21,8 @@ android {
         applicationId = "com.hanson.mobileuse"
         minSdk = 31
         targetSdk = 35
-        versionCode = 3
-        versionName = "3.0.0"
+        versionCode = 4
+        versionName = "3.1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -23,12 +32,27 @@ android {
 
     signingConfigs {
         create("release") {
-            val keystoreFile = file("hanson-release.jks")
-            if (keystoreFile.exists()) {
-                storeFile = keystoreFile
-                storePassword = System.getenv("HANSON_KEYSTORE_PASSWORD") ?: "hanson123"
-                keyAlias = System.getenv("HANSON_KEY_ALIAS") ?: "hanson"
-                keyPassword = System.getenv("HANSON_KEY_PASSWORD") ?: "hanson123"
+            val keystorePath = System.getenv("HANSON_KEYSTORE_PATH")
+                ?: localKeystoreProps.getProperty("storeFile")
+            val ksPassword = System.getenv("HANSON_KEYSTORE_PASSWORD")
+                ?: localKeystoreProps.getProperty("storePassword")
+            val aliasName = System.getenv("HANSON_KEY_ALIAS")
+                ?: localKeystoreProps.getProperty("keyAlias")
+            val aliasPassword = System.getenv("HANSON_KEY_PASSWORD")
+                ?: localKeystoreProps.getProperty("keyPassword")
+
+            if (!keystorePath.isNullOrBlank() &&
+                !ksPassword.isNullOrBlank() &&
+                !aliasName.isNullOrBlank() &&
+                !aliasPassword.isNullOrBlank()
+            ) {
+                val ksFile = file(keystorePath)
+                if (ksFile.isFile) {
+                    storeFile = ksFile
+                    storePassword = ksPassword
+                    keyAlias = aliasName
+                    keyPassword = aliasPassword
+                }
             }
         }
     }
@@ -40,7 +64,10 @@ android {
         }
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("release")
+            val releaseSigning = signingConfigs.getByName("release")
+            if (releaseSigning.storeFile != null) {
+                signingConfig = releaseSigning
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
