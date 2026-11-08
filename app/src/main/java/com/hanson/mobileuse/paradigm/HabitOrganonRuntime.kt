@@ -158,7 +158,7 @@ class HabitOrganonRuntime(
             val s2Cost = 0.25f
             if (expectedS2Gain < s2Cost) {
                 totalS1Calls++
-                val argsObj = runCatching { JSONObject(proto.toolArgsTemplateJson) }.getOrDefault(JSONObject())
+                val argsObj = instantiateParameterizedArgs(proto.toolName, proto.toolArgsTemplateJson, goal, snapshot)
                 return DeferralGateDecision(
                     escalateToS2 = false,
                     expectedS1SuccessProb = s1Prob,
@@ -212,7 +212,8 @@ class HabitOrganonRuntime(
     }
 
     /**
-     * Records a step's provenance into the current episode trace.
+     * Records a step's provenance into the current episode trace and performs
+     * immediate online Habit Prototype binding when `verifiedSuccess == true`.
      */
     @Synchronized
     fun recordStepProvenance(
@@ -225,11 +226,13 @@ class HabitOrganonRuntime(
         verifiedSuccess: Boolean,
         uiDeltaRatio: Float,
         recoveryAttempted: Boolean,
-        latencyMs: Long
+        latencyMs: Long,
+        goal: String = ""
     ) {
         if (recoveryAttempted) totalSelfHealInterventions++
         val preHash = WorldModelGraph.computeStateHash(preSnapshot)
         val postHash = WorldModelGraph.computeStateHash(postSnapshot)
+        val parameterizedArgsJson = parameterizeArgsTemplate(toolName, toolArgsJson, goal)
         currentEpisodeTrace.add(
             EpisodeProvenanceRecord(
                 stepNumber = stepNumber,
@@ -237,12 +240,98 @@ class HabitOrganonRuntime(
                 stateHashAfter = postHash,
                 actorTier = actorTier,
                 toolName = toolName,
-                toolArgsJson = toolArgsJson,
+                toolArgsJson = parameterizedArgsJson,
                 immediateVerifiedSuccess = verifiedSuccess,
                 uiDeltaRatio = uiDeltaRatio,
                 latencyMs = latencyMs
             )
         )
+        if (verifiedSuccess && goal.isNotBlank() && toolName in setOf("click", "input_text", "swipe", "press_key", "manage_app")) {
+            val slotKey = buildSlotKey(preSnapshot.activePackage, goal, preHash)
+            val existing = slotPrototypes[slotKey]
+            slotPrototypes[slotKey] = SlotPrototypeBinding(
+                intentSlotKey = slotKey,
+                stateHash = preHash,
+                toolName = toolName,
+                toolArgsTemplateJson = parameterizedArgsJson,
+                cumulativeCredit = ((existing?.cumulativeCredit ?: 0.75f) * 0.6f) + 0.65f,
+                uses = (existing?.uses ?: 0) + 1
+            )
+            persistToDisk()
+        }
+    }
+
+    @Synchronized
+    fun getStatsJson(): JSONObject = JSONObject().apply {
+        put("totalS1Calls", totalS1Calls)
+        put("totalS2Deferrals", totalS2Deferrals)
+        put("totalSelfHealInterventions", totalSelfHealInterventions)
+        put("learnedPrototypeCount", slotPrototypes.size)
+        val protoArr = JSONArray()
+        slotPrototypes.values.toList().takeLast(20).forEach { protoArr.put(it.toJson()) }
+        put("prototypes", protoArr)
+    }
+
+    private fun parameterizeArgsTemplate(toolName: String, rawArgsJson: String, goal: String): String {
+        if (toolName != "input_text") return rawArgsJson
+        return runCatching {
+            val obj = JSONObject(rawArgsJson)
+            val typed = obj.optString("text", "")
+            if (typed.isNotBlank() && goal.isNotBlank()) {
+                obj.put("text", "{{QUERY}}")
+                obj.put("fallback_text", typed)
+            }
+            obj.toString()
+        }.getOrDefault(rawArgsJson)
+    }
+
+    private fun instantiateParameterizedArgs(
+        toolName: String,
+        templateJson: String,
+        goal: String,
+        snapshot: AtomicSnapshot
+    ): JSONObject {
+        val obj = runCatching { JSONObject(templateJson) }.getOrDefault(JSONObject())
+        if (toolName == "input_text" && obj.optString("text") == "{{QUERY}}") {
+            val extracted = extractDynamicQueryFromGoal(goal).ifBlank { obj.optString("fallback_text", "") }
+            obj.put("text", extracted)
+            val editEl = snapshot.indexedElements.firstOrNull { it.editable }
+            if (editEl != null) {
+                obj.put("element_index", editEl.index)
+            }
+        } else if (toolName == "click") {
+            val desc = obj.optString("target_description", "")
+            if (desc.isNotBlank()) {
+                val liveMatch = snapshot.indexedElements.firstOrNull {
+                    it.text.equals(desc, ignoreCase = true) || it.contentDesc.equals(desc, ignoreCase = true)
+                }
+                if (liveMatch != null) {
+                    obj.put("element_index", liveMatch.index)
+                }
+            }
+        }
+        return obj
+    }
+
+    private fun extractDynamicQueryFromGoal(goal: String): String {
+        val quoted = Regex("'([^']+)'|\"([^\"]+)\"").find(goal)?.let { m ->
+            m.groupValues[1].ifBlank { m.groupValues[2] }
+        }
+        if (!quoted.isNullOrBlank()) return quoted
+        return goal
+            .replace("카카오톡", "")
+            .replace("카톡방", "")
+            .replace("대화방", "")
+            .replace("채팅방", "")
+            .replace("검색해서", "")
+            .replace("검색해줘", "")
+            .replace("검색해", "")
+            .replace("들어가봐", "")
+            .replace("들어가줘", "")
+            .replace("들어가", "")
+            .replace("열어줘", "")
+            .replace("열어", "")
+            .trim()
     }
 
     /**

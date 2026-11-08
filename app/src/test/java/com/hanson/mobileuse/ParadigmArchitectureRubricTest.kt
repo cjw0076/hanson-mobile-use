@@ -644,6 +644,57 @@ class ParadigmArchitectureRubricTest {
         assertEquals(0.85f, credits[1], 0.001f)
     }
 
+    @Test
+    fun rubricCriterion5_onlineVlmToSystem1DistillationAndParameterizedHabit() {
+        val ctx = createTestContext()
+        val worldGraph = WorldModelGraph(ctx)
+        val habitRuntime = HabitOrganonRuntime(ctx, worldGraph)
+        val controller = ParadigmExecutionModeController(worldGraph, habitRuntime)
+
+        val el0 = IndexedUiElement(
+            index = 0, shortClass = "ImageButton", className = "android.widget.ImageButton",
+            packageName = "com.kakao.talk", text = "", contentDesc = "설정", resourceId = "com.kakao.talk:id/btn_settings",
+            left = 900, top = 100, right = 1000, bottom = 200, centerX = 950, centerY = 150, normX = 880, normY = 64,
+            clickable = true, longClickable = false, scrollable = false, editable = false,
+            checkable = false, checked = false, focused = false, enabled = true, windowType = "APPLICATION", windowLayer = 0
+        )
+        val el1 = IndexedUiElement(
+            index = 1, shortClass = "TextView", className = "android.widget.TextView",
+            packageName = "com.kakao.talk", text = "4족로봇제어", contentDesc = "4족로봇제어", resourceId = "com.kakao.talk:id/room_title",
+            left = 100, top = 400, right = 900, bottom = 520, centerX = 500, centerY = 460, normX = 463, normY = 196,
+            clickable = true, longClickable = true, scrollable = false, editable = false,
+            checkable = false, checked = false, focused = false, enabled = true, windowType = "APPLICATION", windowLayer = 0
+        )
+        val snapshot = AtomicSnapshot(
+            screenWidth = 1080,
+            screenHeight = 2340,
+            activePackage = "com.kakao.talk",
+            activeWindowTitle = "채팅",
+            indexedElements = listOf(el0, el1)
+        )
+
+        // 1. Before distillation on novel state -> escalates to System 2
+        val coldTurn = controller.evaluateTurn(snapshot, "4족로봇제어 방 열어줘", recentStepFailed = false)
+        assertTrue("Cold state should escalate to System 2", coldTurn is ModeTurnResult.EscalateToSystem2)
+
+        // 2. System 2 teacher selects element 1 ("4족로봇제어") and online-distills into 16KB S1 probe
+        val s2Decision = ModelTurnDecision(
+            observation = "S2 VLM selected 4족로봇제어",
+            subGoals = emptyList(),
+            toolName = "click",
+            toolArgs = JSONObject().put("element_index", 1).put("target_description", "4족로봇제어")
+        )
+        val postDistillProb = controller.distillVerifiedStep("4족로봇제어 방 열어줘", snapshot, s2Decision)
+        assertTrue("Distilled probability should exceed 0.68 after online teacher update", postDistillProb >= 0.68f)
+
+        // 3. Subsequent evaluation on same screen hits System 1 Distilled Probe without calling System 2!
+        val warmTurn = controller.evaluateTurn(snapshot, "4족로봇제어 방 열어줘", recentStepFailed = false)
+        assertTrue("Warm state should execute directly in System 1", warmTurn is ModeTurnResult.DirectAction)
+        val direct = warmTurn as ModeTurnResult.DirectAction
+        assertEquals("click", direct.decision.toolName)
+        assertEquals(1, direct.decision.toolArgs.optInt("element_index"))
+    }
+
     private fun createTestContext(): Context {
         val prefsMap = mutableMapOf<String, InMemoryTestSharedPreferences>()
         return object : android.content.ContextWrapper(null) {

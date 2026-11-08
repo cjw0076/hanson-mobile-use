@@ -248,7 +248,7 @@ Conversational Full-Control Rules:
      * 3. Navigating into a KakaoTalk room or clicking an already-visible UI element
      * 4. Instant hardware keys ("뒤로 가", "홈으로") and scroll/ordinal commands
      */
-    private fun tryInstantConversationalOrScreenFastPath(
+    internal fun tryInstantConversationalOrScreenFastPath(
         goal: String,
         iteration: Int,
         snapshot: AtomicSnapshot,

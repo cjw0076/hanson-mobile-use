@@ -7,6 +7,7 @@ import com.hanson.mobileuse.accessibility.HierarchyDumper
 import com.hanson.mobileuse.notification.InterceptedNotification
 import com.hanson.mobileuse.paradigm.HabitOrganonRuntime
 import com.hanson.mobileuse.paradigm.LiquidUiSynthesizer
+import com.hanson.mobileuse.paradigm.ModeTurnResult
 import com.hanson.mobileuse.paradigm.ParadigmExecutionModeController
 import com.hanson.mobileuse.paradigm.SemanticTeleportRouter
 import com.hanson.mobileuse.paradigm.WorldModelGraph
@@ -942,20 +943,60 @@ class MobileUseAgentEngine(
             }
 
             _currentSession.update { it.copy(status = AgentRunStatus.THINKING) }
-            FloatingHudService.updateHudStatus("화면 분석 중", currentGoal.take(28), true)
+            FloatingHudService.updateHudStatus("S1/S2 계층 분기 중", currentGoal.take(28), true)
 
-            val decision = aiInfrastructureRouter.routeAndDecide(
-                apiKey = cfg.apiKey,
-                modelName = cfg.modelName,
+            val stepStartMs = System.currentTimeMillis()
+            val prevSteps = _currentSession.value.steps
+            val recentFailed = prevSteps.lastOrNull()?.let { !it.succeeded } ?: false
+
+            // =========================================================================
+            // LAYER 1: SYSTEM-1 BASE (Sub-10ms Reflex + Habit Prototype + Distilled 16KB VLM Probe)
+            // =========================================================================
+            val instantReflex = multimodalClient.tryInstantConversationalOrScreenFastPath(
                 goal = currentGoal,
                 iteration = iter,
                 snapshot = snapshot,
-                historySteps = _currentSession.value.steps,
-                previousPlan = _currentSession.value.subGoals,
-                chatHistory = _chatMessages.value
+                historySteps = prevSteps
             )
 
-            val backendBadge = aiInfrastructureRouter.state.value.lastUsedBackendBadge
+            val (decision, backendBadge, actorTier) = if (instantReflex != null && instantReflex.toolName == "complete_task") {
+                Triple(instantReflex, "S1-REFLEX", "S1_REFLEX")
+            } else {
+                val s1TurnResult = executionModeController.evaluateTurn(
+                    snapshot = snapshot,
+                    goal = currentGoal,
+                    recentStepFailed = recentFailed
+                )
+                when (s1TurnResult) {
+                    is ModeTurnResult.DirectAction -> {
+                        val badge = if (s1TurnResult.rationaleKo.contains("Distilled")) "S1-DISTILLED-VLM" else "S1-HABIT"
+                        Triple(s1TurnResult.decision, badge, "S1_HABIT_PROTOTYPE")
+                    }
+                    is ModeTurnResult.SpeculativeDispatched -> {
+                        Triple(s1TurnResult.speculativeDecision, "S1-SPECULATIVE", "S1_HABIT_PROTOTYPE")
+                    }
+                    is ModeTurnResult.EscalateToSystem2 -> {
+                        if (instantReflex != null) {
+                            Triple(instantReflex, "S1-FASTPATH", "S1_REFLEX")
+                        } else {
+                            // =========================================================================
+                            // LAYER 2: SYSTEM-2 DELIBERATIVE TEACHER (S25 NPU / Cloud Gemini VLM)
+                            // =========================================================================
+                            val s2Decision = aiInfrastructureRouter.routeAndDecide(
+                                apiKey = cfg.apiKey,
+                                modelName = cfg.modelName,
+                                goal = currentGoal,
+                                iteration = iter,
+                                snapshot = snapshot,
+                                historySteps = prevSteps,
+                                previousPlan = _currentSession.value.subGoals,
+                                chatHistory = _chatMessages.value
+                            )
+                            Triple(s2Decision, "S2-${aiInfrastructureRouter.state.value.lastUsedBackendBadge}", "S2_DELIBERATIVE")
+                        }
+                    }
+                }
+            }
 
             _currentSession.update {
                 it.copy(subGoals = decision.subGoals)
@@ -1196,6 +1237,7 @@ class MobileUseAgentEngine(
             }
 
             val updatedSteps = _currentSession.value.steps
+            val stepLatencyMs = (System.currentTimeMillis() - stepStartMs).coerceAtLeast(1L)
             scope.launch(Dispatchers.IO) {
                 worldModelGraph.recordTransition(
                     preSnapshot = snapshot,
@@ -1206,6 +1248,26 @@ class MobileUseAgentEngine(
                     uiDeltaRatio = verification.treeDeltaRatio,
                     selfHealRecipe = verification.recoveryActionKo
                 )
+                habitOrganonRuntime.recordStepProvenance(
+                    stepNumber = iter,
+                    preSnapshot = snapshot,
+                    postSnapshot = verification.finalSnapshot,
+                    actorTier = actorTier,
+                    toolName = decision.toolName,
+                    toolArgsJson = decision.toolArgs.toString(),
+                    verifiedSuccess = verification.verifiedSuccess,
+                    uiDeltaRatio = verification.treeDeltaRatio,
+                    recoveryAttempted = verification.recoveryAttempted,
+                    latencyMs = stepLatencyMs,
+                    goal = currentGoal
+                )
+                if (verification.verifiedSuccess) {
+                    executionModeController.distillVerifiedStep(
+                        goal = currentGoal,
+                        snapshot = snapshot,
+                        decision = decision
+                    )
+                }
                 LiquidUiSynthesizer.updateLiveTrajectoryHud(
                     goal = currentGoal,
                     steps = updatedSteps,

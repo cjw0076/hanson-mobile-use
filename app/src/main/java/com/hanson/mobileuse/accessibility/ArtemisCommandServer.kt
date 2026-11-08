@@ -224,6 +224,17 @@ class ArtemisCommandServer(
                 onBridgeEvent?.invoke("POST /a2a", "200 OK ($senderAgent)")
                 sendHttpResponse(out, 200, "application/json", resultObj.toString())
             }
+            "/habit_stats" -> {
+                val engine = HansonRuntimeHolder.getAgentEngine(service.applicationContext)
+                val habitStats = engine.habitOrganonRuntime.getStatsJson()
+                habitStats.put("distilledVlmUpdates", engine.executionModeController.s1Adapter.distilledUpdatesCount)
+                habitStats.put("bocpdRunLength", engine.executionModeController.bocpdDetector.runLength)
+                habitStats.put("bocpdStabilityProb", engine.executionModeController.bocpdDetector.regimeStabilityProbability)
+                habitStats.put("worldGraphNodes", engine.worldModelGraph.getAllNodes().size)
+                habitStats.put("worldGraphEdges", engine.worldModelGraph.getAllEdges().size)
+                onBridgeEvent?.invoke("/habit_stats", "200 OK")
+                sendHttpResponse(out, 200, "application/json", habitStats.toString())
+            }
             "/ping", "/health" -> {
                 val engine = HansonRuntimeHolder.getAgentEngine(service.applicationContext)
                 val parallelArr = JSONArray()

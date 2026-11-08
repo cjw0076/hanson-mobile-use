@@ -1,9 +1,12 @@
 package com.hanson.mobileuse.paradigm
 
 import com.hanson.mobileuse.accessibility.AtomicSnapshot
+import com.hanson.mobileuse.accessibility.IndexedUiElement
 import com.hanson.mobileuse.agent.ModelTurnDecision
 import com.hanson.mobileuse.agent.SubGoalItem
 import com.hanson.mobileuse.agent.SubGoalStatus
+import org.json.JSONObject
+import kotlin.math.abs
 import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.sqrt
@@ -127,6 +130,115 @@ class S1LinearProbeAdapter(
         }
         return probs
     }
+
+    var distilledUpdatesCount: Int = 0
+        private set
+
+    /**
+     * Encodes a `(goal, snapshot, element)` triple into a 4096-dimensional multimodal/structural
+     * feature representation $\phi(x, e_i) \in \mathbb{R}^{4096}$ for the on-device 16KB probe.
+     */
+    fun encodeCandidateOptionVector(
+        goal: String,
+        snapshot: AtomicSnapshot,
+        element: IndexedUiElement
+    ): FloatArray {
+        val vec = FloatArray(dimension)
+        val pkg = snapshot.activePackage.substringAfterLast('.')
+        val label = element.text.ifBlank { element.contentDesc }.lowercase()
+        val gLower = goal.lowercase()
+
+        fun addHashedFeature(key: String, weight: Float = 1.0f) {
+            val h1 = abs(key.hashCode()) % dimension
+            val h2 = abs((key.hashCode() * 31) xor 0x5bd1e995) % dimension
+            vec[h1] += weight
+            vec[h2] += weight * 0.5f
+        }
+
+        // 1. Structural & spatial features
+        addHashedFeature("pkg:$pkg|cls:${element.shortClass}", 1.2f)
+        addHashedFeature("pkg:$pkg|grid:${element.normX / 125}_${element.normY / 125}", 1.0f)
+        if (element.clickable) addHashedFeature("attr:clickable|cls:${element.shortClass}", 0.8f)
+        if (element.editable) addHashedFeature("attr:editable|pkg:$pkg", 1.5f)
+        if (element.resourceId.isNotBlank()) {
+            addHashedFeature("res:${element.resourceId.substringAfterLast('/')}", 1.4f)
+        }
+
+        // 2. Semantic label & goal cross-interaction features
+        if (label.isNotBlank()) {
+            addHashedFeature("lbl:${label.take(18)}", 1.8f)
+            if (gLower.contains(label) || label.contains(gLower.take(6))) {
+                addHashedFeature("match:exact_overlap", 3.2f)
+            }
+            val goalTokens = gLower.split(Regex("\\s+")).filter { it.length >= 2 }
+            for (gt in goalTokens) {
+                addHashedFeature("cross:$gt->${label.take(12)}", 1.5f)
+                if (element.editable) addHashedFeature("edit_intent:$gt", 1.6f)
+            }
+        }
+        return vec
+    }
+
+    /**
+     * Online Teacher-to-Student Distillation (`System 2 VLM -> System 1 16KB Probe`):
+     * Performs a cross-entropy gradient ascent step $\Delta w = \eta (\tilde{\phi}_{i^*} - \sum_j p_j \tilde{\phi}_j)$
+     * whenever a verified System-2 action selects `chosenElementIndex` on `snapshot`.
+     */
+    @Synchronized
+    fun distillFromVerifiedTeacherStep(
+        goal: String,
+        snapshot: AtomicSnapshot,
+        chosenElementIndex: Int,
+        learningRate: Float = 1.8f
+    ): Float {
+        val candidates = snapshot.indexedElements.take(40)
+        val targetPos = candidates.indexOfFirst { it.index == chosenElementIndex }
+        if (targetPos < 0 || candidates.size < 2) return 0f
+
+        val rawVectors = candidates.map { encodeCandidateOptionVector(goal, snapshot, it) }
+        val centered = centerAndScaleOptionRepresentations(rawVectors)
+        val probs = scoreOptions(centered)
+
+        val chosenVec = centered[targetPos]
+        for (d in 0 until dimension) {
+            var expectedFeat = 0f
+            for (j in centered.indices) {
+                expectedFeat += probs[j] * centered[j][d]
+            }
+            weights[d] += learningRate * (chosenVec[d] - expectedFeat)
+        }
+        distilledUpdatesCount++
+        val newProbs = scoreOptions(centered)
+        return newProbs[targetPos]
+    }
+
+    /**
+     * Evaluates all candidate UI elements on `snapshot` using the distilled 16KB probe.
+     * Returns `(bestElement, probability)` if distilled knowledge is confident.
+     */
+    @Synchronized
+    fun predictDistilledCandidate(
+        goal: String,
+        snapshot: AtomicSnapshot
+    ): Pair<IndexedUiElement, Float>? {
+        if (distilledUpdatesCount == 0) return null
+        val candidates = snapshot.indexedElements.take(40)
+        if (candidates.size < 2) return null
+
+        val rawVectors = candidates.map { encodeCandidateOptionVector(goal, snapshot, it) }
+        val centered = centerAndScaleOptionRepresentations(rawVectors)
+        val probs = scoreOptions(centered)
+
+        var bestIdx = 0
+        var bestProb = probs[0]
+        for (i in 1 until probs.size) {
+            if (probs[i] > bestProb) {
+                bestProb = probs[i]
+                bestIdx = i
+            }
+        }
+        return candidates[bestIdx] to bestProb
+    }
 }
 
 /**
@@ -206,8 +318,31 @@ class ParadigmExecutionModeController(
             recentStepFailed = recentStepFailed || stabilityProb < 0.35f
         )
 
-        // Rule 1: If Gate commands escalation to System-2
+        // Rule 1: If Gate commands escalation to System-2, first check if our Distilled On-Device 16KB Probe is confident!
         if (deferral.escalateToS2) {
+            if (!recentStepFailed && stabilityProb >= 0.35f) {
+                val distilledPred = s1Adapter.predictDistilledCandidate(goal, snapshot)
+                if (distilledPred != null && distilledPred.second >= 0.68f) {
+                    val el = distilledPred.first
+                    val probPct = (distilledPred.second * 100).toInt()
+                    val label = el.text.ifBlank { el.contentDesc.ifBlank { el.shortClass } }.take(24)
+                    val distilledDecision = ModelTurnDecision(
+                        observation = "[S1 Distilled On-Device VLM Probe · p=${probPct}%] 증류된 16KB 온디바이스 프로브가 '$label' 요소를 즉시 선택했습니다.",
+                        subGoals = listOf(SubGoalItem("S1 온디바이스 증류 정책 실행 ($label)", SubGoalStatus.IN_PROGRESS)),
+                        toolName = "click",
+                        toolArgs = JSONObject().apply {
+                            put("element_index", el.index)
+                            put("target_description", label)
+                        }
+                    )
+                    return ModeTurnResult.DirectAction(
+                        decision = distilledDecision,
+                        mode = mode,
+                        latencyMs = 4L,
+                        rationaleKo = "[S1 Distilled VLM Probe Hit · p=${probPct}%] S2 호출 없이 온디바이스 증류 가중치로 즉시 실행"
+                    )
+                }
+            }
             val reason = if (stabilityProb < 0.35f) {
                 "[BOCPD UI 상태 급변 감지 · RunLength=${bocpdDetector.runLength}] ${deferral.reasonKo}"
             } else {
@@ -263,6 +398,24 @@ class ParadigmExecutionModeController(
         gamma: Float = 0.85f
     ): Pair<List<String>, List<Float>> =
         Companion.computeLoopErasedDiscountedCredit(stateSequence, finalOutcomeSuccess, gamma)
+
+    /**
+     * Online Distillation Hook:
+     * Distills a verified System-2 (or fast-path) action into the on-device 16KB `S1LinearProbeAdapter`.
+     */
+    fun distillVerifiedStep(
+        goal: String,
+        snapshot: AtomicSnapshot,
+        decision: ModelTurnDecision
+    ): Float {
+        if (decision.toolName in setOf("click", "long_press", "input_text") && decision.toolArgs.has("element_index")) {
+            val chosenIdx = decision.toolArgs.optInt("element_index", -1)
+            if (chosenIdx >= 0) {
+                return s1Adapter.distillFromVerifiedTeacherStep(goal, snapshot, chosenIdx)
+            }
+        }
+        return 0f
+    }
 
     companion object {
         fun computeLoopErasedDiscountedCredit(
