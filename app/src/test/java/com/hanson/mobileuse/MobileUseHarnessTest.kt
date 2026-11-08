@@ -55,7 +55,7 @@ class MobileUseHarnessTest {
     @Test
     fun toolSpecRegistry_exposesAll24MobileUseToolsAndValidGeminiSchema() {
         val specs = ToolSpecRegistry.allSpecs
-        assertEquals(27, specs.size)
+        assertEquals(31, specs.size)
         assertNotNull(ToolSpecRegistry.find("click"))
         assertNotNull(ToolSpecRegistry.find("click_sequence"))
         assertNotNull(ToolSpecRegistry.find("drag_and_drop"))
@@ -67,11 +67,15 @@ class MobileUseHarnessTest {
         assertNotNull(ToolSpecRegistry.find("reverse_engineer_app"))
         assertNotNull(ToolSpecRegistry.find("learn_app_skill"))
         assertNotNull(ToolSpecRegistry.find("render_generative_ui"))
+        assertNotNull(ToolSpecRegistry.find("browser_use"))
+        assertNotNull(ToolSpecRegistry.find("cross_device_control"))
+        assertNotNull(ToolSpecRegistry.find("draw_with_code"))
+        assertNotNull(ToolSpecRegistry.find("generate_visual_media"))
 
         val geminiJson = ToolSpecRegistry.toGeminiToolsJson()
         assertEquals(1, geminiJson.length())
         val declarations = geminiJson.getJSONObject(0).getJSONArray("functionDeclarations")
-        assertEquals(27, declarations.length())
+        assertEquals(31, declarations.length())
     }
 
     @Test
@@ -302,7 +306,7 @@ class MobileUseHarnessTest {
         assertTrue(officialIds.contains("gemini-3.8-live-extended-thinking"))
 
         val interactionsTools = ToolSpecRegistry.toGeminiInteractionsToolsJson()
-        assertEquals(27, interactionsTools.length())
+        assertEquals(31, interactionsTools.length())
         val firstTool = interactionsTools.getJSONObject(0)
         assertEquals("function", firstTool.getString("type"))
         assertEquals("object", firstTool.getJSONObject("parameters").getString("type"))

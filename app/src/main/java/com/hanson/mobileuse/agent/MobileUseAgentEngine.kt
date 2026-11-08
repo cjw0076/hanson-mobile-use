@@ -87,6 +87,8 @@ class MobileUseAgentEngine(
     val executionModeController = ParadigmExecutionModeController(worldModelGraph, habitOrganonRuntime)
     val neuralSkillCompiler = NeuralSkillCompilerAndDistiller(context)
     val semanticTeleportRouter = SemanticTeleportRouter(context)
+    val universalNexusEngine: UniversalNexusEngine
+        get() = toolHarness.universalNexusEngine
 
     private var activeJob: Job? = null
     private var approvalDeferred: CompletableDeferred<Boolean>? = null
@@ -421,6 +423,26 @@ class MobileUseAgentEngine(
         appendChatMessage(msg)
     }
 
+    /**
+     * Evaluates standing Reactive Automation Rules (`UniversalNexusEngine`) whenever
+     * `HansonNotificationListenerService` intercepts an incoming notification.
+     */
+    fun onNotificationIntercepted(notif: InterceptedNotification) {
+        scope.launch(Dispatchers.IO) {
+            val triggerSummary = universalNexusEngine.evaluateReactiveRulesOnNotification(notif)
+            if (!triggerSummary.isNullOrBlank()) {
+                appendChatMessage(
+                    LiveChatMessage(
+                        sender = ChatSender.AGENT,
+                        text = "[리액티브 자동 실행] $triggerSummary",
+                        subtitle = "Universal Nexus Trigger · ${notif.appLabel}",
+                        toolBadge = "NEXUS-AUTO"
+                    )
+                )
+            }
+        }
+    }
+
     fun sendChatMessage(userMessage: String) {
         val trimmed = userMessage.trim()
         if (trimmed.isEmpty()) return
@@ -461,7 +483,10 @@ class MobileUseAgentEngine(
         val isDeviceSetting = gLower.contains("밝기") || gLower.contains("볼륨") || gLower.contains("소리") || gLower.contains("방해금지")
         val isScreenOrStatusInquiry = (gLower.contains("화면") && (gLower.contains("뭐") || gLower.contains("설명") || gLower.contains("브리핑"))) ||
             gLower.contains("무슨 작업 중") || gLower.contains("병렬 상태")
-        return isGameOrAppInventory || isCraftBlueprint || isNotifCheckOrReply || isDeviceSetting || isScreenOrStatusInquiry
+        val isOmniNexusHeadless = gLower.contains("브라우저로") || gLower.contains("웹페이지") || gLower.contains("해커뉴스") ||
+            gLower.contains("코드로 그려") || gLower.contains("이미지 생성") || gLower.contains("그림 그려") ||
+            gLower.contains("주변 기기") || gLower.contains("블루투스 기기") || gLower.contains("노트북으로")
+        return isGameOrAppInventory || isCraftBlueprint || isNotifCheckOrReply || isDeviceSetting || isScreenOrStatusInquiry || isOmniNexusHeadless
     }
 
     private fun launchParallelBackgroundTask(bgGoal: String) {
@@ -473,6 +498,28 @@ class MobileUseAgentEngine(
             try {
                 val gLower = bgGoal.lowercase(Locale.ROOT).trim()
                 val snapshot = HansonAccessibilityService.instance?.captureSnapshotNow(includeScreenshot = false)
+
+                // Check Universal Omni-Nexus Fast-Path first (Browser-Use, Code Canvas, Image Gen, Cross-Device, Pipelines)
+                val nexusRes = universalNexusEngine.tryExecuteUniversalNexus(
+                    prompt = bgGoal,
+                    latestSnapshot = snapshot,
+                    apiKey = _config.value.apiKey
+                )
+                if (nexusRes != null && nexusRes.handled) {
+                    appendChatMessage(
+                        LiveChatMessage(
+                            sender = ChatSender.AGENT,
+                            text = nexusRes.summaryKo,
+                            subtitle = "Universal Omni-Nexus · ${nexusRes.badge}",
+                            toolBadge = nexusRes.badge
+                        )
+                    )
+                    speakIfEnabled(nexusRes.summaryKo)
+                    if (!nexusRes.followUpGuiGoal.isNullOrBlank()) {
+                        dispatchToForegroundGuiLane(listOf(nexusRes.followUpGuiGoal))
+                    }
+                    return@launch
+                }
 
                 when {
                     (gLower.contains("게임") || gLower.contains("내 앱") || gLower.contains("설치된 앱") || gLower.contains("깔린")) -> {
@@ -644,7 +691,8 @@ class MobileUseAgentEngine(
                         val headlessSafeTools = setOf(
                             "list_notifications", "reply_notification", "control_device_setting",
                             "search_contacts", "manage_calendar", "set_alarm", "save_note", "read_note",
-                            "os_cli_exec", "reverse_engineer_app", "learn_app_skill", "render_generative_ui"
+                            "os_cli_exec", "reverse_engineer_app", "learn_app_skill", "render_generative_ui",
+                            "browser_use", "cross_device_control", "draw_with_code", "generate_visual_media"
                         )
                         val resultText = if (decision.toolName in headlessSafeTools ||
                             (decision.toolName == "manage_app" && decision.toolArgs.optString("action") != "launch")
@@ -950,6 +998,46 @@ class MobileUseAgentEngine(
             val stepStartMs = System.currentTimeMillis()
             val prevSteps = _currentSession.value.steps
             val recentFailed = prevSteps.lastOrNull()?.let { !it.succeeded } ?: false
+
+            // =========================================================================
+            // LAYER 0: UNIVERSAL OMNI-NEXUS (Zero-GUI Teleport, Cross-App Pipe, Browser-Use, Code Canvas, Image Gen, Cross-Device)
+            // =========================================================================
+            if (iter == 1) {
+                val nexusHit = universalNexusEngine.tryExecuteUniversalNexus(
+                    prompt = currentGoal,
+                    latestSnapshot = snapshot,
+                    apiKey = cfg.apiKey
+                )
+                if (nexusHit != null && nexusHit.handled) {
+                    appendChatMessage(
+                        LiveChatMessage(
+                            sender = ChatSender.AGENT,
+                            text = nexusHit.summaryKo,
+                            subtitle = "Universal Omni-Nexus · ${nexusHit.badge}",
+                            toolBadge = nexusHit.badge
+                        )
+                    )
+                    speakIfEnabled(nexusHit.summaryKo)
+                    if (!nexusHit.followUpGuiGoal.isNullOrBlank()) {
+                        currentGoal = nexusHit.followUpGuiGoal
+                        delay(450L)
+                        continue
+                    } else {
+                        FloatingHudService.setTouchPassthrough(false)
+                        _currentSession.update { prev ->
+                            val completed = prev.copy(
+                                status = AgentRunStatus.COMPLETED,
+                                finalSummary = nexusHit.summaryKo,
+                                finishedAtMs = System.currentTimeMillis()
+                            )
+                            archiveSession(completed)
+                            completed
+                        }
+                        FloatingHudService.updateHudStatus("소통 및 제어 대기", nexusHit.summaryKo.take(28), false)
+                        return
+                    }
+                }
+            }
 
             // =========================================================================
             // LAYER 1: SYSTEM-1 BASE (Sub-10ms Reflex + Habit Prototype + Distilled 16KB VLM Probe)

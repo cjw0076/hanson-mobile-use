@@ -154,6 +154,7 @@ class AgentToolExecutionHarness(private val context: Context) {
     }
 
     private val notesPrefs = context.getSharedPreferences(NOTES_PREFS, Context.MODE_PRIVATE)
+    val universalNexusEngine: UniversalNexusEngine by lazy { UniversalNexusEngine(context, this) }
 
     fun execute(
         toolName: String,
@@ -187,6 +188,10 @@ class AgentToolExecutionHarness(private val context: Context) {
                 "reverse_engineer_app" -> executeReverseEngineerApp(args, latestSnapshot)
                 "learn_app_skill" -> executeLearnAppSkill(args, latestSnapshot)
                 "render_generative_ui" -> executeRenderGenerativeUi(args)
+                "browser_use" -> universalNexusEngine.executeMobileBrowserUse(args)
+                "cross_device_control" -> universalNexusEngine.executeCrossDeviceOrPeripheralControl(args)
+                "draw_with_code" -> universalNexusEngine.executeDrawWithCode(args)
+                "generate_visual_media" -> universalNexusEngine.executeGenerateVisualMedia(args)
                 "ask_user" -> ToolExecutionOutcome(
                     succeeded = true,
                     outputText = "사용자에게 질문 전달: ${args.optString("question")}"

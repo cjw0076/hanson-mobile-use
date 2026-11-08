@@ -400,6 +400,49 @@ object ToolSpecRegistry {
                 ToolParamSpec("html_content", "STRING", "Self-contained HTML5/CSS/JS string calling window.HansonOS methods", required = true)
             )
         ),
+        ToolSpec(
+            name = "browser_use",
+            description = "Headless & Interactive Mobile Browser-Use Engine: Fetches any URL or web search query in the background without hijacking the foreground screen, extracts clean DOM text and top interactive links, or mounts an interactive DOM-instrumented WebView on the board.",
+            riskTier = ToolRiskTier.SAFE,
+            capability = AgentCapability.EXTERNAL_WEB,
+            parameters = listOf(
+                ToolParamSpec("action", "STRING", "'fetch_clean_dom' for headless background web extraction, or 'open_interactive_board' to render inside the Command Center board", required = true),
+                ToolParamSpec("url", "STRING", "Full URL (e.g. 'https://news.ycombinator.com') or search query", required = true),
+                ToolParamSpec("goal", "STRING", "What information or interaction to extract from the web page")
+            )
+        ),
+        ToolSpec(
+            name = "cross_device_control",
+            description = "Cross-Device Mesh & Peripheral / IoT / Robotics Controller: Inspect and control Bluetooth/BLE peripherals, switch audio routing (speakerphone/Bluetooth SCO), sync clipboard or RPC tasks to a PC/Laptop CLI bridge (:18889), or send commands to external A2A agents / IoT / quadruped robot nodes.",
+            riskTier = ToolRiskTier.STATEFUL,
+            capability = AgentCapability.SYSTEM_SETTINGS,
+            parameters = listOf(
+                ToolParamSpec("action", "STRING", "One of: 'bluetooth_status', 'audio_route', 'pc_clipboard_or_rpc', 'iot_robot_command', 'a2a_delegate'", required = true),
+                ToolParamSpec("target", "STRING", "Target device name, IP/URL endpoint, or audio route ('speakerphone_on', 'bluetooth')"),
+                ToolParamSpec("payload", "STRING", "Data, clipboard text, or JSON command payload to transmit", required = true)
+            )
+        ),
+        ToolSpec(
+            name = "draw_with_code",
+            description = "Draw with Code (Live SVG / HTML5 Canvas / Interactive Chart / Architecture Diagram / Mini-App): Dynamically draws diagrams, performance charts, or interactive canvas graphics using code and immediately displays them on the screen.",
+            riskTier = ToolRiskTier.SAFE,
+            capability = null,
+            parameters = listOf(
+                ToolParamSpec("prompt", "STRING", "What to draw or visualize (e.g. '시스템 아키텍처 다이어그램', '속도 비교 차트', '파동 시뮬레이션')", required = true),
+                ToolParamSpec("title", "STRING", "Optional title for the rendered code canvas"),
+                ToolParamSpec("code_or_svg", "STRING", "Optional custom SVG or HTML5 Canvas code to render directly")
+            )
+        ),
+        ToolSpec(
+            name = "generate_visual_media",
+            description = "Generate & Display Images / Illustrations: Synthesizes visual images or illustrations via Gemini Multimodal Image Generation (or instant on-device Procedural Vector/Canvas Generative Art when offline) and renders them inline on the board.",
+            riskTier = ToolRiskTier.SAFE,
+            capability = null,
+            parameters = listOf(
+                ToolParamSpec("prompt", "STRING", "Image generation prompt describing the visual scene or illustration", required = true),
+                ToolParamSpec("style", "STRING", "Visual style, e.g. 'achromatic_editorial', 'blueprint', 'geometric'")
+            )
+        ),
 
         // =====================================================================
         // 5. Task Lifecycle & Human-in-the-Loop Control

@@ -98,6 +98,11 @@ class HansonNotificationListenerService : NotificationListenerService() {
         )
 
         RemoteInputSessionCache.put(intercepted)
+        runCatching {
+            com.hanson.mobileuse.agent.HansonRuntimeHolder
+                .getAgentEngine(applicationContext)
+                .onNotificationIntercepted(intercepted)
+        }
     }
 
     private fun resolveAppLabel(pkg: String): String {

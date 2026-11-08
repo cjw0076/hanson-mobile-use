@@ -123,6 +123,36 @@
             android:name=".service.FloatingHudService"
             android:exported="false" />
 
+        <!-- TIER 5: OS-Wide Quick Settings Tile (Summon Hanson from Notification Shade) -->
+        <service
+            android:name=".service.HansonQuickTileService"
+            android:icon="@mipmap/ic_launcher"
+            android:label="Hanson AI"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
+        <!-- TIER 5: OS-Wide Text Selection (ACTION_PROCESS_TEXT) & System Share Sheet (ACTION_SEND) -->
+        <activity
+            android:name=".service.HansonSystemNexusReceiverActivity"
+            android:label="Hanson AI 실행"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.PROCESS_TEXT" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+        </activity>
+
         <!-- Auto-Start on Boot / Package Update -->
         <receiver
             android:name=".service.BootCompletedReceiver"

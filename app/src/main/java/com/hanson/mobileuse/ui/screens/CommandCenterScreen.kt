@@ -100,6 +100,7 @@ fun CommandCenterScreen(
 
     val voiceState by LiveVoiceSessionManager.state.collectAsState()
     val isVoiceListening = voiceState.isActive
+    val activeGenSpec by GenerativeUiStateHolder.activeSpec.collectAsState()
 
     val isAgentBusy = session.status == AgentRunStatus.OBSERVING ||
         session.status == AgentRunStatus.THINKING ||
@@ -123,10 +124,11 @@ fun CommandCenterScreen(
     val starterPrompts = remember {
         listOf(
             "지금 화면에 뭐 있어?",
-            "유튜브 앱 크래프트 클린룸 보드로 만들어줘",
-            "유튜브에서 로파이 틀어줘",
-            "첫 번째 항목 눌러줘",
-            "온디바이스 AI 모델 상태 확인"
+            "코드로 시스템 구조도 그려서 띄워줘",
+            "기하학 아트워크 이미지 생성해서 보여줘",
+            "브라우저로 해커뉴스 최신 글 요약해줘",
+            "주변 블루투스 기기 상태 알려줘",
+            "유튜브에서 로파이 틀어줘"
         )
     }
 
@@ -404,8 +406,10 @@ fun CommandCenterScreen(
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                // Show Generative UI Micro-Board only when BOARD mode is selected
-                if (BoardMode.entries[selectedModeIdx] == BoardMode.BOARD) {
+                // Show Generative UI / Live Code Canvas / AI Image Board when BOARD mode is selected
+                // OR automatically whenever a dynamic Code Canvas / Image / Browser Board is synthesized!
+                val hasDynamicVisualBoard = activeGenSpec != null && activeGenSpec?.id != "gen_ui_achromatic_board"
+                if (BoardMode.entries[selectedModeIdx] == BoardMode.BOARD || hasDynamicVisualBoard) {
                     item(key = "gen_ui_board") {
                         GenerativeUiSurfaceCard(
                             onRunCommand = { cmd -> onSendChatMessage(cmd) }

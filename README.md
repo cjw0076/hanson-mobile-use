@@ -81,6 +81,19 @@ flowchart TB
 - `save_note(key, content)` / `read_note(key)`: 영구 에이전트 메모리 저장소
 - `ask_user(question)` / `complete_task(summary)`: 사용자 확인 및 작업 완료 보고
 
+### 4. Universal Omni-Nexus Engine (`UniversalNexusEngine.kt`) — 4대 초연결 실행 엔진
+- **Zero-GUI Intent Teleport & Cross-App Data Pipeline**:
+  - 유튜브 검색/재생, 네이버지도/카카오맵 길찾기, 구글/네이버 검색, 12종 안드로이드 세부 설정 패널을 UI 클릭 없이 **0.02초 인텐트 텔레포트**로 직행합니다.
+  - 현재 화면/카톡방/클립보드 데이터를 추출해 노트 저장, 캘린더 등록, 클립보드 복사, 시스템 공유 시트, 외부 웹훅으로 즉시 연결합니다.
+  - 상시 리액티브 트리거(예: *"진동섭 알림 오면 자동으로 노트에 기록해줘"*) 및 OS 전역 퀵세팅 타일(`HansonQuickTileService`), 텍스트 선택 메뉴(`ACTION_PROCESS_TEXT`), 공유 시트(`ACTION_SEND`)를 지원합니다.
+- **Cross-Device Mesh & Peripheral / IoT / Robotics Control (`cross_device_control`)**:
+  - 블루투스/BLE 주변기기 스캔 및 페어링 상태 조회, 오디오 라우팅(스피커폰/블루투스 SCO), PC/노트북 CLI 브리지(`:18889`) 클립보드·작업 동기화, 외부 A2A 에이전트 및 4족 보행 로봇/IoT 노드 HTTP/REST 제어를 지원합니다.
+- **Headless & Interactive Mobile Browser-Use (`browser_use`)**:
+  - 포그라운드 화면을 빼앗지 않고 백그라운드(`BG` 레인)에서 웹 URL/검색 결과를 로드하여 정제된 DOM 본문과 인터랙티브 링크를 추출하거나, 보드 내에 인터랙티브 미니 브라우저를 즉시 마운트합니다.
+- **Live Code Canvas & AI Image Synthesis (`draw_with_code` / `generate_visual_media`)**:
+  - **코드로 그려서 띄우기 (`draw_with_code`)**: SVG 아키텍처 구조도, 실시간 성능 비교 차트, 인터랙티브 HTML5 캔버스 시뮬레이션을 동적 합성하여 채팅창/보드에 즉시 렌더링합니다.
+  - **이미지 생성해서 보여주기 (`generate_visual_media`)**: Gemini Multimodal Image Generation API 연동 및 오프라인에서도 0.03초 만에 동작하는 온디바이스 프로시저럴 벡터/캔버스 제너레이티브 아트 엔진을 내장했습니다.
+
 ---
 
 ## 설치 및 빠른 시작 (Quick Start)
