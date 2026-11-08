@@ -19,8 +19,10 @@ import com.hanson.mobileuse.paradigm.CompositeExecutionMode
 import com.hanson.mobileuse.paradigm.HabitOrganonRuntime
 import com.hanson.mobileuse.paradigm.LiquidUiSynthesizer
 import com.hanson.mobileuse.paradigm.ModeTurnResult
+import com.hanson.mobileuse.paradigm.NeuralSkillCompilerAndDistiller
 import com.hanson.mobileuse.paradigm.ParadigmExecutionModeController
 import com.hanson.mobileuse.paradigm.S1LinearProbeAdapter
+import com.hanson.mobileuse.paradigm.ScreenSkeletonFingerprinter
 import com.hanson.mobileuse.paradigm.SemanticTeleportCandidate
 import com.hanson.mobileuse.paradigm.SemanticTeleportRouter
 import com.hanson.mobileuse.paradigm.SlotPrototypeBinding
@@ -695,11 +697,74 @@ class ParadigmArchitectureRubricTest {
         assertEquals(1, direct.decision.toolArgs.optInt("element_index"))
     }
 
+    @Test
+    fun rubricCriterion6_beyondHabitJitMacroAndSkeletonInvariance() {
+        val ctx = createTestContext()
+        val compiler = NeuralSkillCompilerAndDistiller(ctx)
+
+        val searchIcon = IndexedUiElement(
+            index = 0, shortClass = "ImageButton", className = "android.widget.ImageButton",
+            packageName = "com.kakao.talk", text = "검색", contentDesc = "검색", resourceId = "com.kakao.talk:id/search_btn",
+            left = 880, top = 80, right = 980, bottom = 180, centerX = 930, centerY = 130, normX = 861, normY = 55,
+            clickable = true, longClickable = false, scrollable = false, editable = false,
+            checkable = false, checked = false, focused = false, enabled = true, windowType = "APPLICATION", windowLayer = 0
+        )
+        val roomA = IndexedUiElement(
+            index = 1, shortClass = "TextView", className = "android.widget.TextView",
+            packageName = "com.kakao.talk", text = "4족로봇제어", contentDesc = "4족로봇제어", resourceId = "com.kakao.talk:id/chat_title",
+            left = 100, top = 400, right = 900, bottom = 520, centerX = 500, centerY = 460, normX = 463, normY = 196,
+            clickable = true, longClickable = true, scrollable = false, editable = false,
+            checkable = false, checked = false, focused = false, enabled = true, windowType = "APPLICATION", windowLayer = 0
+        )
+
+        val snapDay1 = AtomicSnapshot(
+            screenWidth = 1080, screenHeight = 2340,
+            activePackage = "com.kakao.talk", activeWindowTitle = "채팅",
+            indexedElements = listOf(searchIcon, roomA)
+        )
+
+        // Day 2: Dynamic chat list mutated (new messages/rooms added, target room shifted to index 5 and renamed "캡스톤로봇팀")
+        val dummyNewRoom = roomA.copy(index = 1, text = "오늘점심모임", contentDesc = "오늘점심모임", centerY = 380, normY = 162)
+        val shiftedTargetRoom = roomA.copy(index = 5, text = "캡스톤로봇팀", contentDesc = "캡스톤로봇팀", centerY = 620, normY = 265)
+        val snapDay2 = AtomicSnapshot(
+            screenWidth = 1080, screenHeight = 2340,
+            activePackage = "com.kakao.talk", activeWindowTitle = "채팅",
+            indexedElements = listOf(searchIcon, dummyNewRoom, shiftedTargetRoom)
+        )
+
+        // 1. Skeleton hash must remain 100% invariant despite dynamic chat room list changes!
+        val skel1 = ScreenSkeletonFingerprinter.computeSkeletonHash(snapDay1)
+        val skel2 = ScreenSkeletonFingerprinter.computeSkeletonHash(snapDay2)
+        assertEquals("Screen skeleton hash must be invariant to dynamic list content", skel1, skel2)
+
+        // 2. Compile verified S2 step on Day 1 ("4족로봇제어 카톡방 들어가봐" -> clicked index 1)
+        compiler.compileAndDistillVerifiedStep(
+            goal = "4족로봇제어 카톡방 들어가봐",
+            preSnapshot = snapDay1,
+            toolName = "click",
+            toolArgs = JSONObject().put("element_index", 1).put("target_description", "4족로봇제어"),
+            verifiedSuccess = true
+        )
+
+        // 3. On Day 2, ask for a DIFFERENT room ("캡스톤로봇팀 카톡방 들어가봐") at a SHIFTED index (5):
+        // S1-JIT Macro resolves {{PARAM}} = "캡스톤로봇팀" at index 5 in 0-LLM!
+        val s1Decision = compiler.evaluateAdvancedSystem1(
+            goal = "캡스톤로봇팀 카톡방 들어가봐",
+            snapshot = snapDay2,
+            recentStepFailed = false
+        )
+        assertNotNull("S1-JIT Macro should resolve parameterized room on mutated screen", s1Decision)
+        assertEquals("click", s1Decision?.toolName)
+        assertEquals(5, s1Decision?.toolArgs?.optInt("element_index"))
+    }
+
     private fun createTestContext(): Context {
+        val tempDir = File(System.getProperty("java.io.tmpdir"), "hanson_test_files").apply { mkdirs() }
         val prefsMap = mutableMapOf<String, InMemoryTestSharedPreferences>()
         return object : android.content.ContextWrapper(null) {
             override fun getPackageName(): String = "com.hanson.mobileuse"
             override fun getApplicationContext(): Context = this
+            override fun getFilesDir(): File = tempDir
             override fun getSharedPreferences(name: String?, mode: Int): android.content.SharedPreferences {
                 return prefsMap.getOrPut(name ?: "default") { InMemoryTestSharedPreferences() }
             }

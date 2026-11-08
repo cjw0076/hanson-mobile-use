@@ -232,6 +232,7 @@ class ArtemisCommandServer(
                 habitStats.put("bocpdStabilityProb", engine.executionModeController.bocpdDetector.regimeStabilityProbability)
                 habitStats.put("worldGraphNodes", engine.worldModelGraph.getAllNodes().size)
                 habitStats.put("worldGraphEdges", engine.worldModelGraph.getAllEdges().size)
+                habitStats.put("neuralSkillCompiler", engine.neuralSkillCompiler.getCompilerStatsJson())
                 onBridgeEvent?.invoke("/habit_stats", "200 OK")
                 sendHttpResponse(out, 200, "application/json", habitStats.toString())
             }

@@ -8,6 +8,7 @@ import com.hanson.mobileuse.notification.InterceptedNotification
 import com.hanson.mobileuse.paradigm.HabitOrganonRuntime
 import com.hanson.mobileuse.paradigm.LiquidUiSynthesizer
 import com.hanson.mobileuse.paradigm.ModeTurnResult
+import com.hanson.mobileuse.paradigm.NeuralSkillCompilerAndDistiller
 import com.hanson.mobileuse.paradigm.ParadigmExecutionModeController
 import com.hanson.mobileuse.paradigm.SemanticTeleportRouter
 import com.hanson.mobileuse.paradigm.WorldModelGraph
@@ -84,6 +85,7 @@ class MobileUseAgentEngine(
     val worldModelGraph = WorldModelGraph(context)
     val habitOrganonRuntime = HabitOrganonRuntime(context, worldModelGraph)
     val executionModeController = ParadigmExecutionModeController(worldModelGraph, habitOrganonRuntime)
+    val neuralSkillCompiler = NeuralSkillCompilerAndDistiller(context)
     val semanticTeleportRouter = SemanticTeleportRouter(context)
 
     private var activeJob: Job? = null
@@ -962,37 +964,48 @@ class MobileUseAgentEngine(
             val (decision, backendBadge, actorTier) = if (instantReflex != null && instantReflex.toolName == "complete_task") {
                 Triple(instantReflex, "S1-REFLEX", "S1_REFLEX")
             } else {
-                val s1TurnResult = executionModeController.evaluateTurn(
-                    snapshot = snapshot,
+                // Check Beyond-Habit JIT Skill Macro & Persistent Contrastive Subword/Spatial VLM Distiller first
+                val advancedS1Decision = neuralSkillCompiler.evaluateAdvancedSystem1(
                     goal = currentGoal,
+                    snapshot = snapshot,
                     recentStepFailed = recentFailed
                 )
-                when (s1TurnResult) {
-                    is ModeTurnResult.DirectAction -> {
-                        val badge = if (s1TurnResult.rationaleKo.contains("Distilled")) "S1-DISTILLED-VLM" else "S1-HABIT"
-                        Triple(s1TurnResult.decision, badge, "S1_HABIT_PROTOTYPE")
-                    }
-                    is ModeTurnResult.SpeculativeDispatched -> {
-                        Triple(s1TurnResult.speculativeDecision, "S1-SPECULATIVE", "S1_HABIT_PROTOTYPE")
-                    }
-                    is ModeTurnResult.EscalateToSystem2 -> {
-                        if (instantReflex != null) {
-                            Triple(instantReflex, "S1-FASTPATH", "S1_REFLEX")
-                        } else {
-                            // =========================================================================
-                            // LAYER 2: SYSTEM-2 DELIBERATIVE TEACHER (S25 NPU / Cloud Gemini VLM)
-                            // =========================================================================
-                            val s2Decision = aiInfrastructureRouter.routeAndDecide(
-                                apiKey = cfg.apiKey,
-                                modelName = cfg.modelName,
-                                goal = currentGoal,
-                                iteration = iter,
-                                snapshot = snapshot,
-                                historySteps = prevSteps,
-                                previousPlan = _currentSession.value.subGoals,
-                                chatHistory = _chatMessages.value
-                            )
-                            Triple(s2Decision, "S2-${aiInfrastructureRouter.state.value.lastUsedBackendBadge}", "S2_DELIBERATIVE")
+                if (advancedS1Decision != null) {
+                    val badge = if (advancedS1Decision.observation.contains("Contrastive")) "S1-CONTRASTIVE-VLM" else "S1-JIT-MACRO"
+                    Triple(advancedS1Decision, badge, "S1_JIT_COMPILER")
+                } else {
+                    val s1TurnResult = executionModeController.evaluateTurn(
+                        snapshot = snapshot,
+                        goal = currentGoal,
+                        recentStepFailed = recentFailed
+                    )
+                    when (s1TurnResult) {
+                        is ModeTurnResult.DirectAction -> {
+                            val badge = if (s1TurnResult.rationaleKo.contains("Distilled")) "S1-DISTILLED-VLM" else "S1-HABIT"
+                            Triple(s1TurnResult.decision, badge, "S1_HABIT_PROTOTYPE")
+                        }
+                        is ModeTurnResult.SpeculativeDispatched -> {
+                            Triple(s1TurnResult.speculativeDecision, "S1-SPECULATIVE", "S1_HABIT_PROTOTYPE")
+                        }
+                        is ModeTurnResult.EscalateToSystem2 -> {
+                            if (instantReflex != null) {
+                                Triple(instantReflex, "S1-FASTPATH", "S1_REFLEX")
+                            } else {
+                                // =========================================================================
+                                // LAYER 2: SYSTEM-2 DELIBERATIVE TEACHER (S25 NPU / Cloud Gemini VLM)
+                                // =========================================================================
+                                val s2Decision = aiInfrastructureRouter.routeAndDecide(
+                                    apiKey = cfg.apiKey,
+                                    modelName = cfg.modelName,
+                                    goal = currentGoal,
+                                    iteration = iter,
+                                    snapshot = snapshot,
+                                    historySteps = prevSteps,
+                                    previousPlan = _currentSession.value.subGoals,
+                                    chatHistory = _chatMessages.value
+                                )
+                                Triple(s2Decision, "S2-${aiInfrastructureRouter.state.value.lastUsedBackendBadge}", "S2_DELIBERATIVE")
+                            }
                         }
                     }
                 }
@@ -1268,6 +1281,13 @@ class MobileUseAgentEngine(
                         decision = decision
                     )
                 }
+                neuralSkillCompiler.compileAndDistillVerifiedStep(
+                    goal = currentGoal,
+                    preSnapshot = snapshot,
+                    toolName = decision.toolName,
+                    toolArgs = decision.toolArgs,
+                    verifiedSuccess = verification.verifiedSuccess
+                )
                 LiquidUiSynthesizer.updateLiveTrajectoryHud(
                     goal = currentGoal,
                     steps = updatedSteps,
