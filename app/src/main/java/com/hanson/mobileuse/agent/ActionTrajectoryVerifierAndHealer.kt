@@ -128,12 +128,12 @@ class ActionTrajectoryVerifierAndHealer(private val context: Context) {
 
         // Wait for recovery UI settle and capture S_{t+2}
         try {
-            Thread.sleep(450L)
+            Thread.sleep(240L)
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
         }
 
-        val healedSnapshot = HansonAccessibilityService.instance?.captureSnapshotNow(includeScreenshot = true)
+        val healedSnapshot = HansonAccessibilityService.instance?.captureSnapshotNow(includeScreenshot = false)
             ?: postSnapshot
 
         val recheck = evaluateTransitionOnly(toolName, args, true, preSnapshot, healedSnapshot)
@@ -197,16 +197,10 @@ class ActionTrajectoryVerifierAndHealer(private val context: Context) {
             }
 
             "click", "long_press", "click_sequence" -> {
-                // Check if a modal/popup is blocking FIRST (e.g. permissioncontroller, packageinstaller, or modal buttons)
+                // 1. Check if an OS permission dialog popped up
                 val isPermissionOrSystemDialog = post.activePackage.contains("permissioncontroller", ignoreCase = true) ||
                     post.activePackage.contains("packageinstaller", ignoreCase = true)
-                val hasModal = isPermissionOrSystemDialog || post.indexedElements.any { el ->
-                    MODAL_DISMISS_KEYWORDS.any { kw ->
-                        (el.text.isNotBlank() && el.text.contains(kw, ignoreCase = true)) ||
-                            (el.contentDesc.isNotBlank() && el.contentDesc.contains(kw, ignoreCase = true))
-                    }
-                }
-                if (hasModal && (isPermissionOrSystemDialog || !pkgChanged || delta < 0.15f)) {
+                if (isPermissionOrSystemDialog) {
                     return TransitionVerificationReport(
                         verifiedSuccess = false,
                         treeDeltaRatio = delta,
@@ -214,12 +208,13 @@ class ActionTrajectoryVerifierAndHealer(private val context: Context) {
                         windowChanged = winChanged,
                         focusOrTextChanged = false,
                         failureCategory = FailureCategory.MODAL_POPUP_BLOCKING,
-                        diagnosisKo = if (isPermissionOrSystemDialog) "권한 요청 팝업 다이얼로그 감지" else "팝업/모달 창이 클릭을 가로막음",
+                        diagnosisKo = "권한 요청 팝업 다이얼로그 감지",
                         finalSnapshot = post
                     )
                 }
 
-                val ok = pkgChanged || winChanged || delta >= 0.05f || focusOrTextChanged
+                // 2. If the click produced a real UI transition, package change, or focus change, it succeeded!
+                val ok = pkgChanged || winChanged || delta >= 0.04f || focusOrTextChanged
                 if (ok) {
                     return TransitionVerificationReport(
                         verifiedSuccess = true,
@@ -236,14 +231,21 @@ class ActionTrajectoryVerifierAndHealer(private val context: Context) {
                         finalSnapshot = post
                     )
                 }
+
+                val hasExplicitModal = post.indexedElements.any { el ->
+                    MODAL_DISMISS_KEYWORDS.any { kw ->
+                        (el.text.isNotBlank() && el.text.contains(kw, ignoreCase = true)) ||
+                            (el.contentDesc.isNotBlank() && el.contentDesc.contains(kw, ignoreCase = true))
+                    }
+                }
                 return TransitionVerificationReport(
                     verifiedSuccess = false,
                     treeDeltaRatio = delta,
                     packageChanged = false,
                     windowChanged = false,
                     focusOrTextChanged = false,
-                    failureCategory = if (hasModal) FailureCategory.MODAL_POPUP_BLOCKING else FailureCategory.NO_UI_TRANSITION_ON_CLICK,
-                    diagnosisKo = if (hasModal) "팝업/모달 창이 클릭을 가로막음" else "클릭 후 화면 상태 변화 없음 (ΔUI 0%)",
+                    failureCategory = if (hasExplicitModal) FailureCategory.MODAL_POPUP_BLOCKING else FailureCategory.NO_UI_TRANSITION_ON_CLICK,
+                    diagnosisKo = if (hasExplicitModal) "팝업/모달 창이 클릭을 가로막음" else "클릭 후 화면 상태 변화 없음 (ΔUI 0%)",
                     finalSnapshot = post
                 )
             }

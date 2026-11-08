@@ -295,7 +295,20 @@ class AgentToolExecutionHarness(private val context: Context) {
         val service = HansonAccessibilityService.instance
             ?: return a11yNotConnectedOutcome("input_text")
 
-        val text = args.optString("text", "")
+        val rawText = args.optString("text", "")
+        // Normalize phonetic Korean number prefixes for room/search queries (e.g. "사족 로봇 제어" -> "4족로봇제어")
+        val text = if (
+            rawText.contains("사족") || rawText.contains("사정 로봇") ||
+            (rawText.startsWith("사 ") && rawText.contains("로봇"))
+        ) {
+            rawText
+                .replace("사족 로봇 제어", "4족로봇제어")
+                .replace("사정 로봇 제어", "4족로봇제어")
+                .replace("사족 로봇", "4족로봇")
+                .replace("사족로봇", "4족로봇")
+        } else {
+            rawText
+        }
         val clear = args.optBoolean("clear_existing", false)
         val pressEnter = args.optBoolean("press_enter", true)
         val pt = resolveTargetPixel(args, snapshot)

@@ -841,8 +841,10 @@ class MobileUseAgentEngine(
 
         activeJob = scope.launch {
             try {
+                FloatingHudService.setTouchPassthrough(true)
                 runLoop(guiGoal, cfg)
             } finally {
+                FloatingHudService.setTouchPassthrough(false)
                 unregisterParallelSlot(guiTaskId)
                 val nextQueuedGui = pendingGuiGoals.poll()
                 if (!nextQueuedGui.isNullOrBlank()) {
@@ -853,6 +855,7 @@ class MobileUseAgentEngine(
     }
 
     fun stopRun(reason: String = "네, 현재 작업을 멈췄어요. 이어서 무엇을 도와드릴까요?") {
+        FloatingHudService.setTouchPassthrough(false)
         pendingGuiGoals.clear()
         concurrentBackgroundJobs.values.forEach { it.cancel() }
         concurrentBackgroundJobs.clear()
@@ -918,14 +921,25 @@ class MobileUseAgentEngine(
                 )
             }
 
-            val snapshot: AtomicSnapshot = HansonAccessibilityService.instance?.captureSnapshotNow(
-                includeScreenshot = true
-            ) ?: AtomicSnapshot(
-                screenWidth = fallbackW,
-                screenHeight = fallbackH,
-                activePackage = context.packageName,
-                activeWindowTitle = "Hanson Board"
+            val fastSnapshot: AtomicSnapshot? = HansonAccessibilityService.instance?.captureSnapshotNow(
+                includeScreenshot = false
             )
+            val needsVisualScreenshot = fastSnapshot == null ||
+                fastSnapshot.indexedElements.size < 4 ||
+                currentGoal.contains("사진") ||
+                currentGoal.contains("이미지") ||
+                currentGoal.contains("그림")
+
+            val snapshot: AtomicSnapshot = if (needsVisualScreenshot) {
+                HansonAccessibilityService.instance?.captureSnapshotNow(includeScreenshot = true) ?: AtomicSnapshot(
+                    screenWidth = fallbackW,
+                    screenHeight = fallbackH,
+                    activePackage = context.packageName,
+                    activeWindowTitle = "Hanson Board"
+                )
+            } else {
+                fastSnapshot!!
+            }
 
             _currentSession.update { it.copy(status = AgentRunStatus.THINKING) }
             FloatingHudService.updateHudStatus("화면 분석 중", currentGoal.take(28), true)
@@ -949,6 +963,7 @@ class MobileUseAgentEngine(
 
             // 1. Task Completion -> speak and post natural conversational response
             if (decision.toolName == "complete_task") {
+                FloatingHudService.setTouchPassthrough(false)
                 habitOrganonRuntime.finalizeEpisodeAndAssignDelayedCredit(
                     goal = currentGoal,
                     activePackage = snapshot.activePackage,
@@ -995,6 +1010,7 @@ class MobileUseAgentEngine(
 
             // 2. Conversational Clarification (`ask_user`) -> speak question & listen for user's answer
             if (decision.toolName == "ask_user") {
+                FloatingHudService.setTouchPassthrough(false)
                 val question = decision.toolArgs.optString("question").ifBlank {
                     decision.spokenReply.ifBlank { "어떤 항목을 선택할지 말씀해 주세요." }
                 }
@@ -1020,9 +1036,9 @@ class MobileUseAgentEngine(
                 return
             }
 
-            // 3. Speak natural conversational progress while executing the action
+            // 3. Speak natural conversational acknowledgement ONLY on Turn 1 (no intermediate click narration spam!)
             val stepNarration = decision.spokenReply.trim()
-            if (stepNarration.isNotBlank() && stepNarration != lastSpokenStepText) {
+            if (iter == 1 && stepNarration.isNotBlank() && stepNarration != lastSpokenStepText) {
                 lastSpokenStepText = stepNarration
                 appendChatMessage(
                     LiveChatMessage(
@@ -1142,7 +1158,7 @@ class MobileUseAgentEngine(
                 return
             }
 
-            delay(260L)
+            delay(180L)
             val postSnapshot: AtomicSnapshot = HansonAccessibilityService.instance?.captureSnapshotNow(
                 includeScreenshot = false
             ) ?: snapshot
@@ -1197,7 +1213,7 @@ class MobileUseAgentEngine(
                 )
             }
 
-            delay(180L)
+            delay(60L)
         }
 
         val maxMsg = "여기까지 실행을 마쳤어요. 지금 화면에서 이어서 할 작업을 말씀해 주세요."

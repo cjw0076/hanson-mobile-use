@@ -69,6 +69,10 @@ class FloatingHudService : Service() {
         fun notifyChatUpdated(messages: List<LiveChatMessage>) {
             instance?.postChatMessagesUpdate(messages)
         }
+
+        fun setTouchPassthrough(passthrough: Boolean) {
+            instance?.applyTouchPassthrough(passthrough)
+        }
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -119,6 +123,25 @@ class FloatingHudService : Service() {
             val dotColor = if (isRunning) Color.parseColor("#FAFAFA") else Color.parseColor("#71717A")
             (dotView?.background as? GradientDrawable)?.setColor(dotColor)
             stopButton?.visibility = if (isRunning) View.VISIBLE else View.GONE
+        }
+    }
+
+    fun applyTouchPassthrough(passthrough: Boolean) {
+        mainHandler.post {
+            val wm = windowManager ?: return@post
+            val lp = layoutParams ?: return@post
+            val rv = rootView ?: return@post
+            if (isChatExpanded && passthrough) return@post
+            val nextFlags = if (passthrough) {
+                lp.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+            } else {
+                lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+            }
+            if (lp.flags != nextFlags) {
+                lp.flags = nextFlags
+                rv.alpha = if (passthrough) 0.45f else 1.0f
+                runCatching { wm.updateViewLayout(rv, lp) }
+            }
         }
     }
 

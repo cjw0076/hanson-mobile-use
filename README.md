@@ -98,28 +98,46 @@ flowchart TB
 
 ---
 
-## 외부 에이전트 연동 (Google Artemis Loopback Bridge `:18888`)
+## 외부 AI 에이전트 소통 및 A2A / MCP 오픈 프로토콜 (`127.0.0.1:18888`)
 
-접근성 서비스가 켜지면 기기 내부 `127.0.0.1:18888`에 HTTP 및 JSON-RPC 서버가 자동으로 열립니다.
+접근성 서비스가 켜지면 기기 내부 `127.0.0.1:18888`에 **A2A (Agent2Agent Protocol v1.0)**, **MCP (Model Context Protocol)**, 그리고 **Google Artemis Loopback HTTP/JSON-RPC 서버**가 자동으로 열립니다.
+Cloudflare Tunnel, Tailscale Funnel, ngrok 또는 ADB 포트 포워딩을 통해 인터넷이나 로컬 네트워크의 다른 AI 에이전트(Moltbook/OpenClaw, A2A Registry, OpenAgents, Claude Code, Codex, LangGraph, CrewAI)와 직접 소통하고 피드백을 주고받을 수 있습니다.
 
 ```bash
-# PC에서 ADB 포트 포워딩
+# PC 또는 에이전트 호스트에서 ADB 포트 포워딩
 adb forward tcp:18888 tcp:18888
 
-# 1. 상태 확인
-curl -s http://127.0.0.1:18888/ping
+# 1. A2A Agent Card 조회 (Agent2Agent 표준 디스커버리)
+curl -s http://127.0.0.1:18888/.well-known/agent-card.json | jq .
 
-# 2. 아토믹 스냅샷 (멀티윈도우 UI 트리 + 0..1000 정규화 좌표 + JPEG Base64 스크린샷)
-curl -s http://127.0.0.1:18888/snapshot | jq .
+# 2. MCP 도구 스키마 조회 (25종 안드로이드 자율 제어 도구)
+curl -s http://127.0.0.1:18888/mcp/tools | jq .
 
-# 3. uiautomator 호환 XML 덤프
-curl -s http://127.0.0.1:18888/dump_xml
-
-# 4. 제스처 및 키 액션 주입
-curl -X POST http://127.0.0.1:18888/action \
+# 3. A2A JSON-RPC 2.0 작업 위임 및 에이전트 간 소통 (FG / BG / AUTO 멀티레인 지원)
+curl -X POST http://127.0.0.1:18888/a2a \
   -H "Content-Type: application/json" \
-  -d '{"cmd":"tap","x":540,"y":1200,"times":1}'
+  -d '{
+    "jsonrpc": "2.0",
+    "id": "a2a_req_1",
+    "method": "tasks/send",
+    "params": {
+      "senderAgent": "OpenClaw-Peer-Agent",
+      "lane": "BG",
+      "prompt": "내 폰에 깔려있는 게임 다 찾아서 알려줘"
+    }
+  }'
+
+# 4. 실시간 화면 요소 조회 (키보드/상태바 노이즈가 제거된 정밀 UI 트리)
+curl -s http://127.0.0.1:18888/elements | jq .
+
+# 5. 실시간 대화 내역 및 에이전트 응답 확인
+curl -s http://127.0.0.1:18888/chat | jq .
 ```
+
+### 멀티레인 병렬 실행 (`FG` / `BG` / `AUTO`)
+- **`FG` (포그라운드 GUI 레인)**: 화면 터치, 스와이프, 텍스트 입력, 앱 화면 전환 및 대화방 내용 브리핑을 전담합니다. 실행 중에는 플로팅 HUD가 자동으로 터치 투과(`FLAG_NOT_TOUCHABLE`) 모드로 전환되어 상단 탭/검색창 터치 간섭을 100% 방지합니다.
+- **`BG` (백그라운드 무화면 레인)**: 포그라운드 화면 조작을 방해하지 않고 패키지/게임 스캔(`QUERY_ALL_PACKAGES`), 클린룸 앱 역공학(`reverse_engineer_app`), 화면 꺼짐 알림 즉시 답장(`RemoteInput`), 시스템 설정/SMS/일정/메모 작업을 동시에 병렬 처리합니다.
+- **`AUTO` (자동 분기)**: 복합 명령(예: *"사족 로봇 제어 카톡방 들어가고, 동시에 내 폰에 깔린 게임 다 찾아줘"*)을 받으면 포그라운드 작업과 백그라운드 작업으로 자동 분리하여 동시 실행합니다.
 
 ---
 

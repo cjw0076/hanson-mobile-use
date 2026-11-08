@@ -154,6 +154,76 @@ class ArtemisCommandServer(
         }
 
         when (path) {
+            "/.well-known/agent-card.json", "/agent-card.json" -> {
+                val card = JSONObject().apply {
+                    put("name", "Hanson Mobile-Use Agent")
+                    put("description", "Open-Source Full-Control Android Mobile-Use AI Agent with FG/BG Multi-Lane Parallel Execution, S25 On-Device NPU Routing, and Clean-Room App Reverse Engineering.")
+                    put("version", "2.4.0")
+                    put("url", "http://127.0.0.1:$port")
+                    put("repository", "https://github.com/cjw0076/hanson-mobile-use")
+                    put("protocol", "A2A/1.0")
+                    put(
+                        "capabilities",
+                        JSONObject().apply {
+                            put("streaming", false)
+                            put("pushNotifications", true)
+                            put("stateTransitionHistory", true)
+                            put("parallelLanes", JSONArray().put("FG").put("BG").put("AUTO"))
+                        }
+                    )
+                    put(
+                        "endpoints",
+                        JSONObject().apply {
+                            put("a2a", "/a2a")
+                            put("chat", "/chat")
+                            put("mcpTools", "/mcp/tools")
+                            put("snapshot", "/snapshot")
+                            put("elements", "/elements")
+                        }
+                    )
+                }
+                onBridgeEvent?.invoke(path, "200 OK (A2A Card)")
+                sendHttpResponse(out, 200, "application/json", card.toString())
+            }
+            "/mcp/tools" -> {
+                val toolsJson = com.hanson.mobileuse.agent.ToolSpecRegistry.toGeminiToolsJson()
+                onBridgeEvent?.invoke(path, "200 OK (MCP Tools)")
+                sendHttpResponse(out, 200, "application/json", toolsJson.toString())
+            }
+            "/a2a" -> {
+                val engine = HansonRuntimeHolder.getAgentEngine(service.applicationContext)
+                val req = runCatching { JSONObject(body) }.getOrDefault(JSONObject())
+                val rpcId = req.opt("id") ?: "a2a_1"
+                val rpcMethod = req.optString("method", "tasks/send")
+                val params = req.optJSONObject("params") ?: req
+                val senderAgent = params.optString("senderAgent", "External-A2A-Agent")
+                val lane = params.optString("lane", "AUTO").uppercase()
+                val prompt = params.optString("prompt", params.optString("text", "")).trim()
+
+                if (rpcMethod == "tasks/send" && prompt.isNotEmpty()) {
+                    val routedPrompt = when (lane) {
+                        "BG", "BACKGROUND" -> "[BG] $prompt"
+                        "FG", "FOREGROUND" -> "[FG] $prompt"
+                        else -> prompt
+                    }
+                    engine.sendChatMessage(routedPrompt)
+                }
+                val resultObj = JSONObject().apply {
+                    put("jsonrpc", "2.0")
+                    put("id", rpcId)
+                    put(
+                        "result",
+                        JSONObject().apply {
+                            put("status", engine.currentSession.value.status.name)
+                            put("acceptedFrom", senderAgent)
+                            put("lane", lane)
+                            put("latestReply", engine.chatMessages.value.lastOrNull()?.text.orEmpty())
+                        }
+                    )
+                }
+                onBridgeEvent?.invoke("POST /a2a", "200 OK ($senderAgent)")
+                sendHttpResponse(out, 200, "application/json", resultObj.toString())
+            }
             "/ping", "/health" -> {
                 val engine = HansonRuntimeHolder.getAgentEngine(service.applicationContext)
                 val parallelArr = JSONArray()

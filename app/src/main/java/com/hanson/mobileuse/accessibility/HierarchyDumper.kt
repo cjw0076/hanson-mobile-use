@@ -142,17 +142,51 @@ object HierarchyDumper {
         var scannedWindows = 0
 
         if (!windows.isNullOrEmpty()) {
-            // Sort by layer descending (top-most window first)
-            val sortedWindows = windows.sortedByDescending { it.layer }
-            scannedWindows = sortedWindows.size
-            for (win in sortedWindows) {
-                val root = getWindowRootCompat(win) ?: continue
+            // Prioritize full-screen TYPE_APPLICATION windows first (by screen area, then layer),
+            // and filter out IME keyboard key trees, Edge panel, top status-bar icon strip, and our own Floating HUD pill.
+            val filteredAndSorted = windows.mapNotNull { win ->
+                if (win.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD ||
+                    win.type == AccessibilityWindowInfo.TYPE_SPLIT_SCREEN_DIVIDER
+                ) {
+                    return@mapNotNull null
+                }
+                val root = getWindowRootCompat(win) ?: return@mapNotNull null
+                val pkg = root.packageName?.toString().orEmpty()
+                val winBounds = Rect()
+                win.getBoundsInScreen(winBounds)
+                val w = winBounds.width().coerceAtLeast(0)
+                val h = winBounds.height().coerceAtLeast(0)
+                val area = w.toLong() * h.toLong()
+
+                // Skip Samsung Edge panel & tiny status-bar notification strip
+                if (pkg == "com.samsung.android.app.cocktailbarservice") return@mapNotNull null
+                if (pkg == "com.android.systemui" && h < 180 && winBounds.top <= 10) return@mapNotNull null
+                // Skip Hanson's own Floating HUD overlay pill so it never pollutes the target app's element list
+                if (pkg == service.packageName && h < (screenH * 0.65).toInt()) return@mapNotNull null
+
+                Triple(win, root, area)
+            }.sortedWith(
+                compareByDescending<Triple<AccessibilityWindowInfo, AccessibilityNodeInfo, Long>> {
+                    // Full-screen / large TYPE_APPLICATION windows come first (ignores tiny PiP overlays)
+                    if (it.first.type == AccessibilityWindowInfo.TYPE_APPLICATION && it.third > (screenW.toLong() * screenH.toLong() / 3L)) 2
+                    else if (it.first.type == AccessibilityWindowInfo.TYPE_APPLICATION) 1
+                    else 0
+                }.thenByDescending { it.third }
+                    .thenByDescending { it.first.layer }
+            )
+
+            scannedWindows = filteredAndSorted.size
+            for ((win, root, _) in filteredAndSorted) {
                 val winType = windowTypeToString(win.type)
                 val winTitle = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                     win.title?.toString().orEmpty()
                 } else ""
-                if (activePkg.isBlank() && win.type == AccessibilityWindowInfo.TYPE_APPLICATION) {
-                    activePkg = root.packageName?.toString().orEmpty()
+                val pkg = root.packageName?.toString().orEmpty()
+                if (activePkg.isBlank() && win.type == AccessibilityWindowInfo.TYPE_APPLICATION && pkg != service.packageName) {
+                    activePkg = pkg
+                    activeTitle = winTitle
+                } else if (activePkg.isBlank() && win.type == AccessibilityWindowInfo.TYPE_APPLICATION) {
+                    activePkg = pkg
                     activeTitle = winTitle
                 }
                 val windowClip = Rect(screenBounds)
@@ -432,9 +466,9 @@ object HierarchyDumper {
                                 val softBitmap = hwBitmap.copy(Bitmap.Config.ARGB_8888, false)
                                 hwBitmap.recycle()
                                 if (softBitmap != null) {
-                                    val scaled = scaleBitmapIfNeeded(softBitmap, maxDimension = 1280)
+                                    val scaled = scaleBitmapIfNeeded(softBitmap, maxDimension = 768)
                                     val baos = ByteArrayOutputStream()
-                                    scaled.compress(Bitmap.CompressFormat.JPEG, jpegQuality.coerceIn(40, 95), baos)
+                                    scaled.compress(Bitmap.CompressFormat.JPEG, jpegQuality.coerceIn(40, 80), baos)
                                     if (scaled !== softBitmap) scaled.recycle()
                                     softBitmap.recycle()
                                     base64Ref.set(Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP))
