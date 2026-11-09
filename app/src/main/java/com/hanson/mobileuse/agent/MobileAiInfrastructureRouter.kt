@@ -38,6 +38,80 @@ enum class TaskComplexity {
     COMPLEX_REASONING
 }
 
+/**
+ * Per-Turn & Role-Specialized Multi-Model Matrix (`SpecialistModelRole`).
+ *
+ * Instead of binding an entire multi-step task to a single static model,
+ * JEV Router dynamically switches the underlying API model on EVERY turn (`iteration`)
+ * and active sub-goal (`SubGoalItem`):
+ * - Turn 1 Complex Planning / Self-Healing after Failure -> `MASTER_PLANNER_HEALER` (`gemini-4-argon` / `claude-opus-4-6`)
+ * - Turn 2..N Routine UI Step Execution -> `FAST_REFLEX` (`gemini-3.5-flash-lite` / S25 NPU Nano)
+ * - Standard App Search / Form Input / Messaging -> `INTERACTIVE_OPERATOR` (`gemini-3.8-flash` / `claude-sonnet-4-6`)
+ * - Drag-and-Drop / Slider / Map / Spatial Coordinate Grounding -> `SPATIAL_GROUNDING` (`gemini-robotics-er-2-preview`)
+ * - Live HTML5 / SVG / Chart / Widget Code Synthesis & Repair -> `CODE_CANVAS_SYNTHESIS` (`claude-opus-4-6` / `gemini-4-argon`)
+ * - Visual Image / Poster / Icon Generation -> `VISUAL_MEDIA_GEN` (`gemini-nano-banana-2.1`)
+ * - Deep Multi-App Research / UARP Reverse Engineering -> `DEEP_RESEARCH_UARP` (`gemini-4-argon` / `deep-research-preview-04-2026`)
+ */
+enum class SpecialistModelRole(
+    val badge: String,
+    val primaryModel: String,
+    val fallbackModel: String,
+    val roleKo: String
+) {
+    FAST_REFLEX(
+        badge = "GEMINI-3.5-FLASH-LITE",
+        primaryModel = "gemini-3.5-flash-lite",
+        fallbackModel = "gemini-2.5-flash-lite",
+        roleKo = "초저지연 반사신경 실행 (단순 탭·스크롤·후속 스텝 고속 처리)"
+    ),
+    INTERACTIVE_OPERATOR(
+        badge = "GEMINI-3.8-FLASH",
+        primaryModel = "gemini-3.8-flash",
+        fallbackModel = "gemini-3.5-flash-lite",
+        roleKo = "범용 멀티모달 UI 오퍼레이터 (앱 탐색·폼 입력·메시징)"
+    ),
+    MASTER_PLANNER_HEALER(
+        badge = "GEMINI-4-ARGON",
+        primaryModel = "gemini-4-argon",
+        fallbackModel = "gemini-3.8-flash",
+        roleKo = "플래그십 마스터 플래너 & 자가 치유(Self-Healing) 추론"
+    ),
+    SPATIAL_GROUNDING(
+        badge = "ROBOTICS-ER-2",
+        primaryModel = "gemini-robotics-er-2-preview",
+        fallbackModel = "gemini-3.8-flash",
+        roleKo = "공간 좌표·드래그·물리 궤적 추론 VLM (Embodied Reasoning 2)"
+    ),
+    CODE_CANVAS_SYNTHESIS(
+        badge = "ARGON-OPUS-CODE",
+        primaryModel = "claude-opus-4-6",
+        fallbackModel = "gemini-4-argon",
+        roleKo = "코드 캔버스·SVG·인터랙티브 위젯 합성 (Opus / Argon Code)"
+    ),
+    VISUAL_MEDIA_GEN(
+        badge = "NANO-BANANA-2.1",
+        primaryModel = "gemini-nano-banana-2.1",
+        fallbackModel = "gemini-3.8-flash",
+        roleKo = "비주얼 이미지 생성·합성 오케스트레이터 (Nano Banana 2.1)"
+    ),
+    DEEP_RESEARCH_UARP(
+        badge = "DEEP-RESEARCH-ARGON",
+        primaryModel = "gemini-4-argon",
+        fallbackModel = "deep-research-preview-04-2026",
+        roleKo = "심층 리서치·다중 앱 비교·UARP 분석"
+    );
+
+    fun candidateModels(): List<String> = when (this) {
+        FAST_REFLEX -> listOf("gemini-3.5-flash-lite", "gemini-2.5-flash-lite", "gemini-3.8-flash")
+        INTERACTIVE_OPERATOR -> listOf("gemini-3.8-flash", "claude-sonnet-4-6", "gemini-3.5-flash-lite")
+        MASTER_PLANNER_HEALER -> listOf("gemini-4-argon", "claude-opus-4-6", "gemini-3.8-flash", "gemini-3.5-flash-lite")
+        SPATIAL_GROUNDING -> listOf("gemini-robotics-er-2-preview", "gemini-3.8-flash", "gemini-3.5-flash-lite")
+        CODE_CANVAS_SYNTHESIS -> listOf("claude-opus-4-6", "gemini-4-argon", "gemini-3.8-flash", "gemini-3.5-flash-lite")
+        VISUAL_MEDIA_GEN -> listOf("gemini-nano-banana-2.1", "gemini-3.8-flash", "gemini-3.5-flash-lite")
+        DEEP_RESEARCH_UARP -> listOf("gemini-4-argon", "deep-research-preview-04-2026", "gemini-3.8-flash")
+    }
+}
+
 data class MobileAiInfrastructureState(
     val activeTier: MobileAiRouteTier = MobileAiRouteTier.AUTO_SMART,
     val googleAiCoreInstalled: Boolean = false,
@@ -51,7 +125,10 @@ data class MobileAiInfrastructureState(
     val isDownloadingModel: Boolean = false,
     val downloadProgressPercent: Int = 0,
     val downloadStatusText: String = "",
-    val lastUsedBackendBadge: String = "S25-NPU-NANO"
+    val lastUsedBackendBadge: String = "S25-NPU-NANO",
+    val lastSpecialistRole: String = SpecialistModelRole.FAST_REFLEX.name,
+    val lastSpecialistReason: String = SpecialistModelRole.FAST_REFLEX.roleKo,
+    val turnModelLedger: List<String> = emptyList()
 )
 
 /**
@@ -293,9 +370,121 @@ class MobileAiInfrastructureRouter(
     }
 
     /**
+     * Per-Turn & Role-Specialized Model Selector (`selectSpecialistRoleForTurn`).
+     *
+     * Selects the optimal model role for the *current turn (`iteration`)* and *current active sub-goal*,
+     * rather than locking an entire multi-step session to a single model:
+     * 1. **Self-Healing / Error Recovery Escalation**:
+     *    - If `[CANVAS_JS_ERROR]` is present -> `CODE_CANVAS_SYNTHESIS` (`claude-opus-4-6` / `gemini-4-argon`).
+     *    - If the previous step failed (`historySteps.lastOrNull()?.succeeded == false`) or repeated the same
+     *      action twice in a row -> `MASTER_PLANNER_HEALER` (`gemini-4-argon` / `claude-opus-4-6`).
+     * 2. **Modality-Specific Specialist Routing**:
+     *    - Code Canvas / SVG / HTML5 / Chart synthesis -> `CODE_CANVAS_SYNTHESIS`
+     *    - Visual Image / Illustration / Poster generation -> `VISUAL_MEDIA_GEN`
+     *    - Spatial Coordinate / Drag-and-Drop / Slider / Trajectory -> `SPATIAL_GROUNDING`
+     *    - Deep Multi-App Research / UARP Reverse Engineering -> `DEEP_RESEARCH_UARP`
+     * 3. **Multi-Turn Step-Down Optimization**:
+     *    - Turn 1 of a complex goal uses `MASTER_PLANNER_HEALER` (`gemini-4-argon`) to decompose the plan.
+     *    - Turns 2..N step down to `FAST_REFLEX` (`gemini-3.5-flash-lite`) or `INTERACTIVE_OPERATOR` (`gemini-3.8-flash`)
+     *      for routine UI actions (app launch, click, scroll, text input), and only step back up to
+     *      `MASTER_PLANNER_HEALER` when the active sub-goal requires final synthesis/comparison.
+     */
+    fun selectSpecialistRoleForTurn(
+        goal: String,
+        iteration: Int,
+        snapshot: AtomicSnapshot? = null,
+        historySteps: List<AgentStepLog> = emptyList(),
+        previousPlan: List<SubGoalItem> = emptyList()
+    ): SpecialistModelRole {
+        val g = goal.trim()
+        val gLower = g.lowercase()
+
+        // 1-A. Live Code Canvas JS Error Self-Healing
+        if (g.contains("[CANVAS_JS_ERROR]") || gLower.contains("canvas_js_error")) {
+            return SpecialistModelRole.CODE_CANVAS_SYNTHESIS
+        }
+
+        // 1-B. Self-Healing Escalation on step failure or repeated loop
+        val lastStep = historySteps.lastOrNull()
+        val prevStep = if (historySteps.size >= 2) historySteps[historySteps.size - 2] else null
+        val isRepeatedLoop = lastStep != null && prevStep != null &&
+            lastStep.toolName == prevStep.toolName &&
+            lastStep.toolArgsJson == prevStep.toolArgsJson
+        if ((lastStep != null && !lastStep.succeeded) || isRepeatedLoop) {
+            return SpecialistModelRole.MASTER_PLANNER_HEALER
+        }
+
+        // Active sub-goal for this specific turn
+        val activeSubGoal = previousPlan.firstOrNull { it.status == SubGoalStatus.IN_PROGRESS }?.title
+            ?: previousPlan.firstOrNull { it.status == SubGoalStatus.PENDING }?.title
+            ?: ""
+        val activeSubLower = activeSubGoal.lowercase()
+        val focusText = if (iteration >= 2 && activeSubLower.isNotBlank()) activeSubLower else gLower
+
+        // 2-A. Code Canvas / SVG / Interactive Widget Synthesis
+        val codeCanvasKeywords = listOf(
+            "캔버스", "canvas", "차트", "그래프", "svg", "html", "javascript", "위젯", "대시보드",
+            "코드로 그려", "시각화", "다이어그램", "플로우차트"
+        )
+        if (codeCanvasKeywords.any { focusText.contains(it) }) {
+            return SpecialistModelRole.CODE_CANVAS_SYNTHESIS
+        }
+
+        // 2-B. Visual Image / Media Generation
+        val imageGenKeywords = listOf(
+            "이미지 생성", "그림 그려", "일러스트", "포스터 만들어", "배경화면 생성",
+            "배경화면 만들어", "아이콘 생성", "썸네일 만들어", "nano banana", "image gen"
+        )
+        if (imageGenKeywords.any { focusText.contains(it) || gLower.contains(it) }) {
+            return SpecialistModelRole.VISUAL_MEDIA_GEN
+        }
+
+        // 2-C. Spatial Grounding / Drag-and-Drop / Trajectory / Slider / Map Pin
+        val spatialKeywords = listOf(
+            "드래그", "끌어서", "끌어다", "슬라이더", "조절바", "궤적", "좌표", "핀 옮겨",
+            "지도에서 위치", "drag", "slider", "seekbar", "trajectory", "스와이프 궤적"
+        )
+        if (spatialKeywords.any { focusText.contains(it) }) {
+            return SpecialistModelRole.SPATIAL_GROUNDING
+        }
+
+        // 2-D. Deep Research / Multi-App Comparison / UARP Architecture Analysis
+        val deepResearchKeywords = listOf(
+            "심층", "리서치", "리버스", "클린룸", "구조 파악", "아키텍처", "최저가 비교", "비교 분석", "논문"
+        )
+        if (deepResearchKeywords.any { focusText.contains(it) }) {
+            return SpecialistModelRole.DEEP_RESEARCH_UARP
+        }
+
+        // 3. Multi-Turn Step-Down Optimization (Turn 2+ when plan is already established and prior step succeeded)
+        if (iteration >= 2 && previousPlan.isNotEmpty() && activeSubLower.isNotBlank()) {
+            val reasoningSubGoalKeywords = listOf("분석", "비교", "요약", "정리", "판단", "평가", "계산", "종합")
+            if (reasoningSubGoalKeywords.any { activeSubLower.contains(it) }) {
+                return SpecialistModelRole.MASTER_PLANNER_HEALER
+            }
+            val fastSubGoalKeywords = listOf("열기", "실행", "탭", "클릭", "선택", "이동", "스크롤", "뒤로", "홈", "확인")
+            val inputSubGoalKeywords = listOf("입력", "검색", "전송", "보내기", "작성", "메시지")
+            if (inputSubGoalKeywords.any { activeSubLower.contains(it) }) {
+                return SpecialistModelRole.INTERACTIVE_OPERATOR
+            }
+            if (fastSubGoalKeywords.any { activeSubLower.contains(it) }) {
+                return SpecialistModelRole.FAST_REFLEX
+            }
+            return SpecialistModelRole.INTERACTIVE_OPERATOR
+        }
+
+        // 4. Turn 1 / Unplanned Fallback based on overall task complexity
+        return when (estimateTaskComplexity(goal, snapshot)) {
+            TaskComplexity.SIMPLE_NAVIGATION -> SpecialistModelRole.FAST_REFLEX
+            TaskComplexity.INTERACTIVE_TASK -> SpecialistModelRole.INTERACTIVE_OPERATOR
+            TaskComplexity.COMPLEX_REASONING -> SpecialistModelRole.MASTER_PLANNER_HEALER
+        }
+    }
+
+    /**
      * Routes a user goal/utterance across the best available AI infrastructure tier:
      * 1. Infrastructure / Assistant Delegation intents (e.g. Perplexity, ChatGPT, Bixby, AICore status)
-     * 2. Cloud Gemini VLM (if API key is configured and cloud tier is active)
+     * 2. Per-Turn & Role-Specialized Multi-Model Orchestrator (`SpecialistModelRole` cascade)
      * 3. On-Device MediaPipe `LlmInference` (if a `.task` / `.bin` / `.litertlm` model is on device)
      * 4. Local Edge OpenAI-compatible Server (`127.0.0.1:11434` Ollama / `:8080` llama.cpp)
      * 5. Galaxy S25 Built-In `com.google.ai.edge.aicore.GenerativeModel` (Gemini Nano NPU)
@@ -328,94 +517,26 @@ class MobileAiInfrastructureRouter(
 
         val tier = _state.value.activeTier
         val hasApiKey = apiKey.trim().isNotEmpty()
+        val specialistRole = selectSpecialistRoleForTurn(
+            goal = goal,
+            iteration = iteration,
+            snapshot = snapshot,
+            historySteps = historySteps,
+            previousPlan = previousPlan
+        )
 
-        // 1. AUTO_SMART Dynamic Complexity Multi-Model Routing
-        if (tier == MobileAiRouteTier.AUTO_SMART) {
-            val complexity = estimateTaskComplexity(goal, snapshot)
-            when (complexity) {
-                TaskComplexity.SIMPLE_NAVIGATION -> {
-                    // Route SIMPLE_NAVIGATION to on-device AICore Nano or gemini-3.5-flash-lite
-                    if (_state.value.googleAiCoreInstalled) {
-                        val nanoDecision = inferWithAiCoreGeminiNano(
-                            goal = goal,
-                            iteration = iteration,
-                            snapshot = snapshot,
-                            historySteps = historySteps,
-                            previousPlan = previousPlan,
-                            chatHistory = chatHistory
-                        )
-                        if (nanoDecision != null) {
-                            _state.update { it.copy(lastUsedBackendBadge = "S25-NPU-NANO") }
-                            return@withContext nanoDecision
-                        }
-                    }
-                    if (hasApiKey) {
-                        val cloudDecision = runCatching {
-                            cloudClient.decideNextAction(
-                                apiKey = apiKey,
-                                modelName = "gemini-3.5-flash-lite",
-                                goal = goal,
-                                iteration = iteration,
-                                snapshot = snapshot,
-                                historySteps = historySteps,
-                                previousPlan = previousPlan,
-                                chatHistory = chatHistory
-                            )
-                        }.getOrNull()
-                        if (cloudDecision != null) {
-                            _state.update { it.copy(lastUsedBackendBadge = "GEMINI-3.5-FLASH-LITE") }
-                            return@withContext cloudDecision
-                        }
-                    }
-                }
-                TaskComplexity.INTERACTIVE_TASK -> {
-                    // Route INTERACTIVE_TASK to gemini-3.8-flash
-                    if (hasApiKey) {
-                        val cloudDecision = runCatching {
-                            cloudClient.decideNextAction(
-                                apiKey = apiKey,
-                                modelName = "gemini-3.8-flash",
-                                goal = goal,
-                                iteration = iteration,
-                                snapshot = snapshot,
-                                historySteps = historySteps,
-                                previousPlan = previousPlan,
-                                chatHistory = chatHistory
-                            )
-                        }.getOrNull()
-                        if (cloudDecision != null) {
-                            _state.update { it.copy(lastUsedBackendBadge = "GEMINI-3.8-FLASH") }
-                            return@withContext cloudDecision
-                        }
-                    }
-                }
-                TaskComplexity.COMPLEX_REASONING -> {
-                    // Route COMPLEX_REASONING to gemini-4-argon
-                    if (hasApiKey) {
-                        val cloudDecision = runCatching {
-                            cloudClient.decideNextAction(
-                                apiKey = apiKey,
-                                modelName = "gemini-4-argon",
-                                goal = goal,
-                                iteration = iteration,
-                                snapshot = snapshot,
-                                historySteps = historySteps,
-                                previousPlan = previousPlan,
-                                chatHistory = chatHistory
-                            )
-                        }.getOrNull()
-                        if (cloudDecision != null) {
-                            _state.update { it.copy(lastUsedBackendBadge = "GEMINI-4-ARGON") }
-                            return@withContext cloudDecision
-                        }
-                    }
-                }
-            }
-        } else if (hasApiKey && tier == MobileAiRouteTier.CLOUD_GEMINI_VLM) {
-            val cloudDecision = runCatching {
-                cloudClient.decideNextAction(
-                    apiKey = apiKey,
-                    modelName = modelName,
+        // 1. Per-Turn Specialist Multi-Model Routing (`AUTO_SMART` or `jev-multi-model-auto`)
+        val useDynamicSpecialistMatrix = tier == MobileAiRouteTier.AUTO_SMART ||
+            (tier == MobileAiRouteTier.CLOUD_GEMINI_VLM && modelName == GeminiMultimodalClient.JEV_MULTI_MODEL_AUTO)
+
+        if (useDynamicSpecialistMatrix) {
+            // For FAST_REFLEX on simple single-step navigation, try on-device S25 AICore Nano NPU first if available
+            if (specialistRole == SpecialistModelRole.FAST_REFLEX &&
+                iteration == 1 &&
+                tier == MobileAiRouteTier.AUTO_SMART &&
+                _state.value.googleAiCoreInstalled
+            ) {
+                val nanoDecision = inferWithAiCoreGeminiNano(
                     goal = goal,
                     iteration = iteration,
                     snapshot = snapshot,
@@ -423,9 +544,60 @@ class MobileAiInfrastructureRouter(
                     previousPlan = previousPlan,
                     chatHistory = chatHistory
                 )
-            }.getOrNull()
-            if (cloudDecision != null) {
-                _state.update { it.copy(lastUsedBackendBadge = "GEMINI-CLOUD") }
+                if (nanoDecision != null) {
+                    recordSpecialistTurn(
+                        badge = "S25-NPU-NANO",
+                        role = specialistRole,
+                        iteration = iteration
+                    )
+                    return@withContext nanoDecision
+                }
+            }
+
+            if (hasApiKey) {
+                val cascaded = cloudClient.decideNextActionWithCascade(
+                    apiKey = apiKey,
+                    candidateModels = specialistRole.candidateModels(),
+                    goal = goal,
+                    iteration = iteration,
+                    snapshot = snapshot,
+                    historySteps = historySteps,
+                    previousPlan = previousPlan,
+                    chatHistory = chatHistory
+                )
+                if (cascaded != null) {
+                    val (resolvedModelBadge, cloudDecision) = cascaded
+                    val displayBadge = if (resolvedModelBadge == "FAST-PATH-10MS") {
+                        specialistRole.badge
+                    } else {
+                        resolvedModelBadge
+                    }
+                    recordSpecialistTurn(
+                        badge = displayBadge,
+                        role = specialistRole,
+                        iteration = iteration
+                    )
+                    return@withContext cloudDecision
+                }
+            }
+        } else if (hasApiKey && tier == MobileAiRouteTier.CLOUD_GEMINI_VLM) {
+            val cascaded = cloudClient.decideNextActionWithCascade(
+                apiKey = apiKey,
+                candidateModels = listOf(modelName, "gemini-3.8-flash", "gemini-3.5-flash-lite").distinct(),
+                goal = goal,
+                iteration = iteration,
+                snapshot = snapshot,
+                historySteps = historySteps,
+                previousPlan = previousPlan,
+                chatHistory = chatHistory
+            )
+            if (cascaded != null) {
+                val (resolvedBadge, cloudDecision) = cascaded
+                recordSpecialistTurn(
+                    badge = if (resolvedBadge == "FAST-PATH-10MS") "GEMINI-CLOUD" else resolvedBadge,
+                    role = specialistRole,
+                    iteration = iteration
+                )
                 return@withContext cloudDecision
             }
         }
@@ -481,11 +653,11 @@ class MobileAiInfrastructureRouter(
         }
 
         // 5. Fast Screen-Aware Conversational Partner (guaranteed zero-latency control + natural Korean speech)
-        _state.update {
-            it.copy(
-                lastUsedBackendBadge = if (_state.value.googleAiCoreInstalled) "S25-ONDEVICE" else "ONDEVICE-CORE"
-            )
-        }
+        recordSpecialistTurn(
+            badge = if (_state.value.googleAiCoreInstalled) "S25-ONDEVICE" else "ONDEVICE-CORE",
+            role = specialistRole,
+            iteration = iteration
+        )
         cloudClient.inferLocalOnDeviceAction(
             goal = goal,
             iteration = iteration,
@@ -494,6 +666,28 @@ class MobileAiInfrastructureRouter(
             previousPlan = previousPlan,
             chatHistory = chatHistory
         )
+    }
+
+    private fun recordSpecialistTurn(
+        badge: String,
+        role: SpecialistModelRole,
+        iteration: Int
+    ) {
+        val shortRole = role.roleKo.substringBefore(" (")
+        val entry = "T$iteration:$badge ($shortRole)"
+        _state.update { current ->
+            val updatedLedger = if (iteration == 1) {
+                listOf(entry)
+            } else {
+                (current.turnModelLedger + entry).takeLast(12)
+            }
+            current.copy(
+                lastUsedBackendBadge = badge,
+                lastSpecialistRole = role.name,
+                lastSpecialistReason = role.roleKo,
+                turnModelLedger = updatedLedger
+            )
+        }
     }
 
     /**

@@ -89,6 +89,7 @@ class MobileUseAgentEngine(
     val executionModeController = ParadigmExecutionModeController(worldModelGraph, habitOrganonRuntime)
     val neuralSkillCompiler = NeuralSkillCompilerAndDistiller(context)
     val semanticTeleportRouter = SemanticTeleportRouter(context)
+    val memoryManager = AgentMemoryManager(context)
     val universalNexusEngine: UniversalNexusEngine
         get() = toolHarness.universalNexusEngine
 
@@ -199,18 +200,19 @@ class MobileUseAgentEngine(
                 val sender = runCatching { ChatSender.valueOf(obj.optString("sender", "AGENT")) }
                     .getOrDefault(ChatSender.AGENT)
                 if (sender == ChatSender.NOTIFICATION) continue
-                list.add(
-                    LiveChatMessage(
-                        id = obj.optString("id", "msg_$i"),
-                        sender = sender,
-                        text = obj.optString("text", ""),
-                        subtitle = obj.optString("subtitle", ""),
-                        toolBadge = obj.optString("toolBadge").takeIf { it.isNotBlank() },
-                        succeeded = obj.optBoolean("succeeded", true),
-                        replySessionId = obj.optString("replySessionId").takeIf { it.isNotBlank() },
-                        timestampMs = obj.optLong("timestampMs", System.currentTimeMillis())
-                    )
+                val rawMsg = LiveChatMessage(
+                    id = obj.optString("id", "msg_$i"),
+                    sender = sender,
+                    text = obj.optString("text", ""),
+                    subtitle = obj.optString("subtitle", ""),
+                    toolBadge = obj.optString("toolBadge").takeIf { it.isNotBlank() },
+                    succeeded = obj.optBoolean("succeeded", true),
+                    replySessionId = obj.optString("replySessionId").takeIf { it.isNotBlank() },
+                    timestampMs = obj.optLong("timestampMs", System.currentTimeMillis()),
+                    structuredCard = StructuredUiCard.fromJson(obj.optJSONObject("structuredCard")),
+                    detailPayload = ChatDetailPayload.fromJson(obj.optJSONObject("detailPayload"))
                 )
+                list.add(HumanSummaryAndCardBuilder.enrichMessageForHumanDisplay(rawMsg))
             }
             if (list.isEmpty()) {
                 listOf(
@@ -227,10 +229,23 @@ class MobileUseAgentEngine(
     }
 
     private fun appendChatMessage(msg: LiveChatMessage) {
+        val routerState = aiInfrastructureRouter.state.value
+        val enriched = HumanSummaryAndCardBuilder.enrichMessageForHumanDisplay(
+            msg = msg,
+            specialistRoleKo = routerState.lastSpecialistReason,
+            turnLedger = routerState.turnModelLedger
+        )
         _chatMessages.update { prev ->
-            val updated = (prev + msg).takeLast(80)
-            persistChatMessages(updated)
-            updated
+            if (enriched.sender == ChatSender.AGENT) {
+                val lastUserMsg = prev.lastOrNull { it.sender == ChatSender.USER }?.text.orEmpty()
+                if (lastUserMsg.isNotBlank()) {
+                    memoryManager.observeAndLearnFromTurn(lastUserMsg, enriched.text)
+                }
+            }
+            val combined = (prev + enriched).takeLast(80)
+            val compacted = memoryManager.compactChatHistoryIfNeeded(combined, keepRecentCount = 16)
+            persistChatMessages(compacted)
+            compacted
         }
         FloatingHudService.notifyChatUpdated(_chatMessages.value)
     }
@@ -331,6 +346,15 @@ class MobileUseAgentEngine(
             return true
         }
 
+        // 2-B. 3-Tier Memory Management & Optimization ("메모리 관리", "메모리 정리", "메모리 상태", "기억 초기화")
+        if (lower.contains("메모리") || lower.contains("기억 정리") || lower.contains("기억 초기화") || lower.contains("컨텍스트 압축")) {
+            if (lower.contains("초기화") || lower.contains("다 지워")) {
+                memoryManager.clearAllSemanticMemories()
+            }
+            runMemoryOptimization()
+            return true
+        }
+
         // 3. Theme switching (Ahaboard Paper Light vs Carbon Dark)
         if (lower == "다크 모드" || lower == "다크모드" || lower.contains("다크 모드로") || lower.contains("카본 모드로")) {
             ObsidianColors.isDark = true
@@ -360,8 +384,12 @@ class MobileUseAgentEngine(
         }
 
         // 4. Explicit Model / AI Router tier switching
-        if (lower.contains("모델") && (lower.contains("바꿔") || lower.contains("변경") || lower.contains("전환"))) {
+        if (lower.contains("모델") && (lower.contains("바꿔") || lower.contains("변경") || lower.contains("전환") || lower.contains("적재적소") || lower.contains("멀티"))) {
             val matchedModel: Pair<String, String>? = when {
+                lower.contains("멀티") || lower.contains("적재적소") || lower.contains("자동") || lower.contains("jev") -> {
+                    aiInfrastructureRouter.setPreferredTier(MobileAiRouteTier.AUTO_SMART)
+                    GeminiMultimodalClient.JEV_MULTI_MODEL_AUTO to "JEV 적재적소 멀티모델 자동 오케스트레이터"
+                }
                 lower.contains("나노") || lower.contains("nano") || lower.contains("온디바이스") || lower.contains("npu") -> {
                     aiInfrastructureRouter.setPreferredTier(MobileAiRouteTier.S25_AICORE_NANO)
                     "gemma-4-26b-a4b-it" to "Galaxy S25 내장 Gemini Nano NPU"
@@ -369,6 +397,10 @@ class MobileUseAgentEngine(
                 lower.contains("argon") || lower.contains("아곤") -> {
                     aiInfrastructureRouter.setPreferredTier(MobileAiRouteTier.AUTO_SMART)
                     "gemini-4-argon" to "Gemini 4 Argon"
+                }
+                lower.contains("opus") || lower.contains("오퍼스") || lower.contains("클로드") -> {
+                    aiInfrastructureRouter.setPreferredTier(MobileAiRouteTier.AUTO_SMART)
+                    "claude-opus-4-6" to "Claude Opus 4.6"
                 }
                 lower.contains("3.8") -> {
                     aiInfrastructureRouter.setPreferredTier(MobileAiRouteTier.AUTO_SMART)
@@ -388,12 +420,12 @@ class MobileUseAgentEngine(
             if (matchedModel != null) {
                 val (modelId, label) = matchedModel
                 updateConfig(modelName = modelId)
-                val reply = "네, 추론 엔진을 $label 모델로 전환했어요."
+                val reply = "네, 추론 엔진을 $label 모드로 전환했어요."
                 appendChatMessage(
                     LiveChatMessage(
                         sender = ChatSender.AGENT,
                         text = reply,
-                        toolBadge = "MODEL"
+                        toolBadge = "JEV-MULTI-MODEL"
                     )
                 )
                 speakIfEnabled(reply)
@@ -402,6 +434,48 @@ class MobileUseAgentEngine(
         }
 
         return false
+    }
+
+    fun runMemoryOptimization() {
+        val dashboardCard = memoryManager.optimizeMemoryNow(
+            currentMessages = _chatMessages.value,
+            onUpdateMessages = { compacted ->
+                _chatMessages.value = compacted
+                persistChatMessages(compacted)
+            }
+        )
+        val memState = memoryManager.state.value
+        val rawMemReport = buildString {
+            appendLine("=== 3-Tier Cognitive & Runtime Memory Report ===")
+            appendLine("1. Runtime JVM Heap: ${memState.jvmUsedMb}MB / ${memState.jvmMaxMb}MB")
+            appendLine("2. Device RAM Available: ${memState.deviceAvailRamMb}MB / ${memState.deviceTotalRamMb}MB")
+            appendLine("3. Trimmed Historical Base64 Snapshots: ${memState.trimmedSnapshotCount}")
+            appendLine("4. Compacted Working Digest: ${memState.compactedDigestSummary.ifBlank { "(None yet)" }}")
+            appendLine("5. Semantic Memory Vault (${memState.semanticEntries.size} items):")
+            memState.semanticEntries.forEachIndexed { idx, e ->
+                appendLine("   [${idx + 1}] (${e.category}) ${e.titleKo}: ${e.contentKo}")
+            }
+        }.trim()
+
+        val summaryKo = "단기 대화 컨텍스트 압축과 런타임 캐시 정리를 마쳤어요. 현재 앱 힙 메모리는 ${memState.jvmUsedMb}MB 사용 중이며, 장기 시맨틱 기억 ${memState.semanticEntries.size}건이 보존되어 있습니다."
+        appendChatMessage(
+            LiveChatMessage(
+                sender = ChatSender.AGENT,
+                text = summaryKo,
+                subtitle = "3-Tier Memory Manager",
+                toolBadge = "MEMORY-GUARD",
+                structuredCard = dashboardCard,
+                detailPayload = ChatDetailPayload(
+                    humanSummary = summaryKo,
+                    modelBadge = "MEMORY-GUARD",
+                    specialistRoleKo = "3-Tier 단기 컨텍스트 압축 · 장기 시맨틱 볼트 · 런타임 RAM 가드",
+                    executedToolName = "optimize_memory",
+                    rawTechnicalOutput = rawMemReport,
+                    turnLedger = aiInfrastructureRouter.state.value.turnModelLedger
+                )
+            )
+        )
+        speakIfEnabled(summaryKo)
     }
 
     fun injectExternalReply(text: String, badge: String = "LAPTOP CLI") {
@@ -1338,7 +1412,7 @@ class MobileUseAgentEngine(
 
             _currentSession.update { prev ->
                 prev.copy(
-                    steps = prev.steps + stepLog,
+                    steps = memoryManager.trimStepSnapshotsInPlace(prev.steps + stepLog, keepRecentScreenshots = 2),
                     receipts = if (outcome.receipt != null) prev.receipts + outcome.receipt else prev.receipts
                 )
             }

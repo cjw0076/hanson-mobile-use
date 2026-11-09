@@ -566,7 +566,10 @@ class UniversalNexusEngine(
             ?.takeIf { it.isNotBlank() }
             ?: baseUrl.substringAfter("://").substringBefore("/")
 
-        // Extract top clean links
+        // Extract top clean content links (skipping generic nav bar items)
+        val navSkipSet = setOf(
+            "hacker news", "new", "past", "comments", "ask", "show", "jobs", "submit", "login", "hide", "more"
+        )
         val linkRegex = Regex("<a\\s+[^>]*href=[\"']([^\"'#]+)[\"'][^>]*>(.*?)</a>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
         val extractedLinks = mutableListOf<Pair<String, String>>()
         for (m in linkRegex.findAll(html)) {
@@ -577,7 +580,8 @@ class UniversalNexusEngine(
                 .replace(Regex("\\s+"), " ")
                 .let { decodeHtmlEntities(it) }
                 .trim()
-            if (rawAnchor.length < 3 || rawHref.startsWith("javascript:")) continue
+            if (rawAnchor.length < 4 || rawAnchor.lowercase(Locale.ROOT) in navSkipSet || rawHref.startsWith("javascript:")) continue
+            if (rawHref.startsWith("vote?") || rawHref.startsWith("hide?") || rawHref.startsWith("from?site=")) continue
             if (rawHref.contains("uddg=")) {
                 val encoded = rawHref.substringAfter("uddg=").substringBefore("&")
                 rawHref = runCatching { URLDecoder.decode(encoded, "UTF-8") }.getOrDefault(rawHref)
@@ -588,7 +592,7 @@ class UniversalNexusEngine(
                 rawHref = "$origin$rawHref"
             }
             if (extractedLinks.none { it.first == rawAnchor }) {
-                extractedLinks.add(rawAnchor.take(60) to rawHref)
+                extractedLinks.add(rawAnchor.take(72) to rawHref)
             }
         }
 
@@ -604,21 +608,13 @@ class UniversalNexusEngine(
 
         return ParsedDomPage(
             title = title,
-            textSnippet = stripped.take(600),
+            textSnippet = stripped.take(800),
             links = extractedLinks
         )
     }
 
-    private fun decodeHtmlEntities(input: String): String {
-        return input
-            .replace("&amp;", "&")
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&quot;", "\"")
-            .replace("&#39;", "'")
-            .replace("&apos;", "'")
-            .replace("&nbsp;", " ")
-    }
+    private fun decodeHtmlEntities(input: String): String =
+        HumanSummaryAndCardBuilder.decodeAllHtmlEntities(input)
 
     private fun buildInteractiveBrowserBoardHtml(url: String, dom: ParsedDomPage): String {
         val safeTitle = dom.title.replace("\"", "&quot;").replace("<", "&lt;")

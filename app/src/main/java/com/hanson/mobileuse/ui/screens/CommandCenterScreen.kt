@@ -1,5 +1,8 @@
 package com.hanson.mobileuse.ui.screens
 
+import android.content.Intent
+import android.net.Uri
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -10,9 +13,12 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -25,8 +31,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Contrast
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MoreHoriz
@@ -50,6 +58,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -57,14 +67,22 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.hanson.mobileuse.accessibility.AccessibilityEngineState
 import com.hanson.mobileuse.agent.AgentRunSession
 import com.hanson.mobileuse.agent.AgentRunStatus
 import com.hanson.mobileuse.agent.ChatSender
 import com.hanson.mobileuse.agent.LiveChatMessage
 import com.hanson.mobileuse.agent.LiveVoiceSessionManager
+import com.hanson.mobileuse.agent.MemoryTelemetryState
+import com.hanson.mobileuse.agent.MobileAiInfrastructureState
+import com.hanson.mobileuse.agent.PermissionHubState
+import com.hanson.mobileuse.agent.StructuredUiCard
+import com.hanson.mobileuse.agent.StructuredUiTemplateType
 import com.hanson.mobileuse.notification.InterceptedNotification
 import com.hanson.mobileuse.ui.components.AhaboardDotGridBox
+import com.hanson.mobileuse.ui.components.CodeBadge
 import com.hanson.mobileuse.ui.components.GenerativeUiStateHolder
 import com.hanson.mobileuse.ui.components.GenerativeUiSurfaceCard
 import com.hanson.mobileuse.ui.components.GlassCard
@@ -83,20 +101,30 @@ fun CommandCenterScreen(
     modelName: String,
     ttsEnabled: Boolean,
     a11yState: AccessibilityEngineState,
+    permissionState: PermissionHubState = PermissionHubState(),
+    memoryState: MemoryTelemetryState = MemoryTelemetryState(),
+    routerState: MobileAiInfrastructureState = MobileAiInfrastructureState(),
     notifications: List<InterceptedNotification>,
     onSendChatMessage: (String) -> Unit,
     onStopAgent: () -> Unit,
     onClearChat: () -> Unit,
+    onOptimizeMemory: () -> Unit = {},
     onToggleTts: () -> Unit,
     onToggleOverlayHud: (Boolean) -> Unit,
     onOneTouchAutoSetup: () -> Unit,
     onOpenDeepSettings: () -> Unit
 ) {
     val context = LocalContext.current
+    val focusManager = LocalFocusManager.current
+    val density = LocalDensity.current
+    val imeBottomPx = WindowInsets.ime.getBottom(density)
+    val isKeyboardOpen = imeBottomPx > 0
+
     var promptInput by rememberSaveable { mutableStateOf("") }
     var selectedModeIdx by rememberSaveable { mutableIntStateOf(0) }
     var selectedLaneIdx by rememberSaveable { mutableIntStateOf(0) } // 0=AUTO, 1=FG(포그라운드), 2=BG(백그라운드)
     var showOverflowMenu by remember { mutableStateOf(false) }
+    var selectedDetailMessage by remember { mutableStateOf<LiveChatMessage?>(null) }
 
     val voiceState by LiveVoiceSessionManager.state.collectAsState()
     val isVoiceListening = voiceState.isActive
@@ -107,47 +135,54 @@ fun CommandCenterScreen(
         session.status == AgentRunStatus.ACTING ||
         session.status == AgentRunStatus.AWAITING_APPROVAL
 
+    val isEnvConnected = a11yState.isConnected ||
+        permissionState.readinessPercent >= 80 ||
+        permissionState.items.any { it.id.contains("a11y", ignoreCase = true) && it.isGranted }
+
     val listState = rememberLazyListState()
-    LaunchedEffect(chatMessages.size) {
+    LaunchedEffect(chatMessages.size, isKeyboardOpen) {
         if (chatMessages.isNotEmpty()) {
             listState.animateScrollToItem(chatMessages.size - 1)
         }
     }
 
-    val shortModelBadge = remember(modelName) {
-        modelName
-            .removePrefix("gemini-")
-            .removeSuffix("-preview")
-            .take(18)
+    val shortModelBadge = remember(modelName, routerState.lastUsedBackendBadge) {
+        when {
+            modelName == "jev-multi-model-auto" -> "JEV·${routerState.lastUsedBackendBadge.removePrefix("GEMINI-").take(10)}"
+            else -> modelName
+                .removePrefix("gemini-")
+                .removeSuffix("-preview")
+                .take(14)
+        }
     }
 
     val starterPrompts = remember {
         listOf(
-            "지금 화면에 뭐 있어?",
+            "브라우저로 해커뉴스 최신 글 요약해줘",
+            "메모리 상태 확인하고 최적화해줘",
             "코드로 시스템 구조도 그려서 띄워줘",
             "기하학 아트워크 이미지 생성해서 보여줘",
-            "브라우저로 해커뉴스 최신 글 요약해줘",
             "주변 블루투스 기기 상태 알려줘",
-            "유튜브에서 로파이 틀어줘"
+            "적재적소 멀티모델 모드로 바꿔줘"
         )
     }
 
     AhaboardDotGridBox(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
 
-            // 1. Minimal Ahaboard Header (56dp, .lb-header)
+            // 1. Minimal Ahaboard Header (56dp) with 1-Touch Multi-Model & 3-Tier Memory Pills
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(56.dp)
-                    .background(ObsidianColors.Background.copy(alpha = 0.9f))
+                    .height(54.dp)
+                    .background(ObsidianColors.Background.copy(alpha = 0.94f))
                     .padding(horizontal = 16.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Box(
                         modifier = Modifier
@@ -158,10 +193,10 @@ fun CommandCenterScreen(
                     Text(
                         text = "hanson",
                         color = ObsidianColors.TextPrimary,
-                        fontSize = 18.sp,
+                        fontSize = 17.5.sp,
                         fontWeight = FontWeight.ExtraBold
                     )
-                    // 1-Touch Model Cycle Badge (tapping switches model via agent without opening Settings)
+                    // 1-Touch Specialist Multi-Model Cycle Badge
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(999.dp))
@@ -169,19 +204,37 @@ fun CommandCenterScreen(
                             .border(1.dp, ObsidianColors.GlassBorder, RoundedCornerShape(999.dp))
                             .clickable {
                                 val nextPrompt = when {
+                                    modelName == "jev-multi-model-auto" -> "모델 Argon으로 바꿔줘"
                                     modelName.contains("argon") -> "3.8 플래시 모델로 바꿔줘"
                                     modelName.contains("3.8-flash") -> "3.5 라이트 모델로 바꿔줘"
-                                    modelName.contains("3.5") -> "노트북 CLI 구독 모델로 바꿔줘"
-                                    else -> "모델 Argon으로 바꿔줘"
+                                    else -> "적재적소 멀티모델 모드로 바꿔줘"
                                 }
                                 onSendChatMessage(nextPrompt)
                             }
-                            .padding(horizontal = 9.dp, vertical = 3.dp)
+                            .padding(horizontal = 8.dp, vertical = 3.dp)
                     ) {
                         Text(
                             text = shortModelBadge,
                             color = ObsidianColors.TextSecondary,
-                            fontSize = 11.sp,
+                            fontSize = 10.5.sp,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    // 1-Touch 3-Tier Memory Status & Optimization Badge
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(999.dp))
+                            .background(ObsidianColors.Surface)
+                            .border(1.dp, ObsidianColors.GlassBorder, RoundedCornerShape(999.dp))
+                            .clickable { onOptimizeMemory() }
+                            .padding(horizontal = 8.dp, vertical = 3.dp)
+                    ) {
+                        Text(
+                            text = "MEM ${memoryState.jvmUsedMb.coerceAtLeast(12)}M·${memoryState.semanticEntries.size}기억",
+                            color = ObsidianColors.TextMuted,
+                            fontSize = 10.sp,
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.SemiBold
                         )
@@ -195,7 +248,7 @@ fun CommandCenterScreen(
                 ) {
                     Box(
                         modifier = Modifier
-                            .size(36.dp)
+                            .size(34.dp)
                             .clip(CircleShape)
                             .background(ObsidianColors.Surface)
                             .border(1.dp, ObsidianColors.GlassBorder, CircleShape)
@@ -206,14 +259,14 @@ fun CommandCenterScreen(
                             imageVector = Icons.Default.Contrast,
                             contentDescription = "무채색 명암 전환",
                             tint = ObsidianColors.TextPrimary,
-                            modifier = Modifier.size(16.dp)
+                            modifier = Modifier.size(15.dp)
                         )
                     }
 
                     Box {
                         Box(
                             modifier = Modifier
-                                .size(36.dp)
+                                .size(34.dp)
                                 .clip(CircleShape)
                                 .background(ObsidianColors.Surface)
                                 .border(1.dp, ObsidianColors.GlassBorder, CircleShape)
@@ -224,11 +277,10 @@ fun CommandCenterScreen(
                                 imageVector = Icons.Default.MoreHoriz,
                                 contentDescription = "더보기 메뉴",
                                 tint = ObsidianColors.TextPrimary,
-                                modifier = Modifier.size(18.dp)
+                                modifier = Modifier.size(17.dp)
                             )
                         }
 
-                        // Level-1 Popover (.lb-pop) -> Level-2 Deep Settings entry
                         DropdownMenu(
                             expanded = showOverflowMenu,
                             onDismissRequest = { showOverflowMenu = false },
@@ -239,10 +291,38 @@ fun CommandCenterScreen(
                             DropdownMenuItem(
                                 text = {
                                     Text(
-                                        "원터치 환경 자동 치유",
+                                        "3-Tier 메모리 최적화 및 상태 브리핑",
                                         color = ObsidianColors.TextPrimary,
                                         fontSize = 13.sp,
                                         fontWeight = FontWeight.SemiBold
+                                    )
+                                },
+                                onClick = {
+                                    showOverflowMenu = false
+                                    onOptimizeMemory()
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        "적재적소 멀티모델 자동 라우팅 켜기",
+                                        color = ObsidianColors.TextPrimary,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                },
+                                onClick = {
+                                    showOverflowMenu = false
+                                    onSendChatMessage("적재적소 멀티모델 모드로 바꿔줘")
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        "원터치 환경 자동 치유",
+                                        color = ObsidianColors.TextPrimary,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Medium
                                     )
                                 },
                                 onClick = {
@@ -300,17 +380,17 @@ fun CommandCenterScreen(
 
             HorizontalDivider(color = ObsidianColors.Divider, thickness = 1.dp)
 
-            // 2. Conditional 1-Touch Environment Setup Pill (hidden automatically when connected)
-            if (!a11yState.isConnected) {
+            // 2. Conditional 1-Touch Environment Setup Pill (hidden when connected or when keyboard is open)
+            AnimatedVisibility(visible = !isEnvConnected && !isKeyboardOpen) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                        .padding(horizontal = 16.dp, vertical = 6.dp)
                         .clip(RoundedCornerShape(14.dp))
                         .background(ObsidianColors.Surface)
                         .border(1.dp, ObsidianColors.GlassBorder, RoundedCornerShape(14.dp))
                         .clickable { onOneTouchAutoSetup() }
-                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                        .padding(horizontal = 14.dp, vertical = 9.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -318,86 +398,88 @@ fun CommandCenterScreen(
                         Text(
                             text = "접근성 및 환경 권한이 꺼져 있습니다",
                             color = ObsidianColors.TextPrimary,
-                            fontSize = 12.5.sp,
+                            fontSize = 12.sp,
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "설정 화면을 찾을 필요 없이 원터치로 자동 복구합니다",
+                            text = "원터치로 접근성·알림·오버레이 권한을 즉시 복구합니다",
                             color = ObsidianColors.TextSecondary,
-                            fontSize = 11.sp
+                            fontSize = 10.5.sp
                         )
                     }
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(999.dp))
                             .background(ObsidianColors.Accent)
-                            .padding(horizontal = 12.dp, vertical = 6.dp)
+                            .padding(horizontal = 11.dp, vertical = 5.dp)
                     ) {
                         Text(
-                            text = "원터치 자동 구성",
+                            text = "원터치 복구",
                             color = ObsidianColors.OnAccent,
-                            fontSize = 11.sp,
+                            fontSize = 10.5.sp,
                             fontWeight = FontWeight.Bold
                         )
                     }
                 }
             }
 
-            // 3. Ahaboard 3-Column Tactile Mode Strip (grid-cols-3, rounded-14dp, 3dp solid lip on active)
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 10.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                BoardMode.entries.forEachIndexed { idx, mode ->
-                    val active = selectedModeIdx == idx
-                    GlassCard(
-                        modifier = Modifier
-                            .weight(1f)
-                            .clickable {
-                                selectedModeIdx = idx
-                                when (mode) {
-                                    BoardMode.INSTANT -> Unit
-                                    BoardMode.BOARD -> GenerativeUiStateHolder.restoreDefaultCockpit()
-                                    BoardMode.VOICE -> {
-                                        onToggleTts()
-                                        LiveVoiceSessionManager.toggleLiveVoiceSession(context) { spoken ->
-                                            onSendChatMessage(spoken)
+            // 3. Ahaboard 3-Column Tactile Mode Strip (collapses automatically when keyboard opens so chat has full height!)
+            AnimatedVisibility(visible = !isKeyboardOpen) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    BoardMode.entries.forEachIndexed { idx, mode ->
+                        val active = selectedModeIdx == idx
+                        GlassCard(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clickable {
+                                    selectedModeIdx = idx
+                                    when (mode) {
+                                        BoardMode.INSTANT -> Unit
+                                        BoardMode.BOARD -> GenerativeUiStateHolder.restoreDefaultCockpit()
+                                        BoardMode.VOICE -> {
+                                            onToggleTts()
+                                            LiveVoiceSessionManager.toggleLiveVoiceSession(context) { spoken ->
+                                                onSendChatMessage(spoken)
+                                            }
                                         }
                                     }
-                                }
-                            },
-                        cornerRadius = 14.dp,
-                        containerColor = ObsidianColors.Surface,
-                        borderColor = ObsidianColors.GlassBorder,
-                        tactileBottomLip = active,
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp)
-                    ) {
-                        Text(
-                            text = mode.titleKo,
-                            color = ObsidianColors.TextPrimary,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            maxLines = 1
-                        )
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            text = if (mode == BoardMode.VOICE && (ttsEnabled || isVoiceListening)) {
-                                "보이스 켜짐 · 탭하여 전환"
-                            } else {
-                                mode.subKo
-                            },
-                            color = ObsidianColors.TextSecondary,
-                            fontSize = 10.5.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
+                                },
+                            cornerRadius = 14.dp,
+                            containerColor = ObsidianColors.Surface,
+                            borderColor = ObsidianColors.GlassBorder,
+                            tactileBottomLip = active,
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 9.dp)
+                        ) {
+                            Text(
+                                text = mode.titleKo,
+                                color = ObsidianColors.TextPrimary,
+                                fontSize = 12.5.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                maxLines = 1
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = if (mode == BoardMode.VOICE && (ttsEnabled || isVoiceListening)) {
+                                    "보이스 켜짐 · 탭하여 전환"
+                                } else {
+                                    mode.subKo
+                                },
+                                color = ObsidianColors.TextSecondary,
+                                fontSize = 10.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
                     }
                 }
             }
 
-            // 4. Clean Whiteboard Stage (Messages + Optional Generative Board + Active Trajectory Pill)
+            // 4. Clean Whiteboard Stage (Human Summaries + Pre-Structured UI Cards + Tap-to-Open Details)
             LazyColumn(
                 state = listState,
                 modifier = Modifier
@@ -406,10 +488,8 @@ fun CommandCenterScreen(
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                // Show Generative UI / Live Code Canvas / AI Image Board when BOARD mode is selected
-                // OR automatically whenever a dynamic Code Canvas / Image / Browser Board is synthesized!
                 val hasDynamicVisualBoard = activeGenSpec != null && activeGenSpec?.id != "gen_ui_achromatic_board"
-                if (BoardMode.entries[selectedModeIdx] == BoardMode.BOARD || hasDynamicVisualBoard) {
+                if ((BoardMode.entries[selectedModeIdx] == BoardMode.BOARD || hasDynamicVisualBoard) && !isKeyboardOpen) {
                     item(key = "gen_ui_board") {
                         GenerativeUiSurfaceCard(
                             onRunCommand = { cmd -> onSendChatMessage(cmd) }
@@ -417,7 +497,6 @@ fun CommandCenterScreen(
                     }
                 }
 
-                // Compact Active Trajectory Banner (shown only while agent is actively running)
                 if (isAgentBusy) {
                     item(key = "active_trajectory_card") {
                         GlassCard(
@@ -433,16 +512,16 @@ fun CommandCenterScreen(
                             ) {
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(
-                                        text = "행동 궤적 실행 중 · Step ${session.steps.size + 1}",
+                                        text = "행동 궤적 실행 중 · Step ${session.steps.size + 1} (${routerState.lastUsedBackendBadge})",
                                         color = ObsidianColors.TextPrimary,
-                                        fontSize = 12.5.sp,
+                                        fontSize = 12.sp,
                                         fontWeight = FontWeight.Bold
                                     )
                                     Text(
-                                        text = session.steps.lastOrNull()?.resultSummary
+                                        text = session.steps.lastOrNull()?.observation
                                             ?: session.goal.ifBlank { "화면을 분석하고 있습니다..." },
                                         color = ObsidianColors.TextSecondary,
-                                        fontSize = 11.5.sp,
+                                        fontSize = 11.sp,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
                                     )
@@ -475,7 +554,7 @@ fun CommandCenterScreen(
                     }
                 }
 
-                // Minimalist Monochrome Conversation Cards
+                // Human-Readable Conversation Cards + Structured UI Templates
                 items(chatMessages, key = { it.id }) { msg ->
                     val isUser = msg.sender == ChatSender.USER
                     Row(
@@ -498,36 +577,89 @@ fun CommandCenterScreen(
                             }
                         } else {
                             GlassCard(
-                                modifier = Modifier.fillMaxWidth(0.92f),
-                                cornerRadius = 14.dp,
+                                modifier = Modifier
+                                    .fillMaxWidth(0.95f)
+                                    .clickable { selectedDetailMessage = msg },
+                                cornerRadius = 15.dp,
                                 containerColor = ObsidianColors.Surface,
                                 borderColor = ObsidianColors.GlassBorder,
-                                tactileBottomLip = false,
+                                tactileBottomLip = msg.structuredCard != null,
                                 contentPadding = PaddingValues(13.dp)
                             ) {
-                                if (!msg.toolBadge.isNullOrBlank()) {
+                                // Top Badge Row: Specialist Model / Tool Badge + Template Type Pill
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
                                     Text(
-                                        text = msg.toolBadge,
+                                        text = msg.toolBadge ?: "AI-SUMMARY",
                                         color = ObsidianColors.TextMuted,
                                         fontSize = 10.sp,
                                         fontFamily = FontFamily.Monospace,
                                         fontWeight = FontWeight.Bold
                                     )
-                                    Spacer(modifier = Modifier.height(4.dp))
+                                    if (msg.structuredCard != null) {
+                                        CodeBadge(msg.structuredCard.templateType.labelKo)
+                                    }
                                 }
+
+                                Spacer(modifier = Modifier.height(5.dp))
+
+                                // Human-Friendly Core Summary
                                 Text(
                                     text = msg.text,
                                     color = ObsidianColors.TextPrimary,
                                     fontSize = 13.5.sp,
+                                    fontWeight = if (msg.structuredCard != null) FontWeight.SemiBold else FontWeight.Normal,
                                     lineHeight = 19.sp
                                 )
+
+                                // Pre-Structured UI Card (if present)
+                                if (msg.structuredCard != null) {
+                                    Spacer(modifier = Modifier.height(10.dp))
+                                    StructuredUiCardRenderer(
+                                        card = msg.structuredCard,
+                                        onItemClick = { item ->
+                                            if (item.actionUrlOrCmd.startsWith("http")) {
+                                                selectedDetailMessage = msg
+                                            } else {
+                                                selectedDetailMessage = msg
+                                            }
+                                        }
+                                    )
+                                }
+
+                                // Tap-to-Open Detail Footer
+                                Spacer(modifier = Modifier.height(8.dp))
+                                HorizontalDivider(color = ObsidianColors.Divider, thickness = 0.8.dp)
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = msg.structuredCard?.footerHint
+                                            ?: "탭하여 사용한 모델·실행 도구·상세 내역 보기 ↗",
+                                        color = ObsidianColors.TextMuted,
+                                        fontSize = 10.5.sp,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                    Text(
+                                        text = "상세 ↗",
+                                        color = ObsidianColors.TextPrimary,
+                                        fontSize = 10.5.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
                             }
                         }
                     }
                 }
             }
 
-            // 4.5 Live Voice Conversation Bar (Barge-In & Real-Time Transcript)
+            // 4.5 Live Voice Conversation Bar
             if (isVoiceListening) {
                 Row(
                     modifier = Modifier
@@ -536,10 +668,8 @@ fun CommandCenterScreen(
                         .clip(RoundedCornerShape(14.dp))
                         .background(ObsidianColors.Surface)
                         .border(1.dp, ObsidianColors.Accent, RoundedCornerShape(14.dp))
-                        .clickable {
-                            LiveVoiceSessionManager.bargeInAndListen()
-                        }
-                        .padding(horizontal = 14.dp, vertical = 9.dp),
+                        .clickable { LiveVoiceSessionManager.bargeInAndListen() }
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -552,7 +682,7 @@ fun CommandCenterScreen(
                         )
                         val liveTranscript = voiceState.partialTranscript.ifBlank {
                             voiceState.lastSpokenResponse.ifBlank {
-                                "말씀하시면 화면을 함께 보고 대화하며 제어합니다 (탭하여 끼어들기)"
+                                "말씀하시면 화면을 함께 보고 대화하며 제어합니다"
                             }
                         }
                         Text(
@@ -567,9 +697,7 @@ fun CommandCenterScreen(
                         modifier = Modifier
                             .clip(RoundedCornerShape(999.dp))
                             .background(ObsidianColors.Accent)
-                            .clickable {
-                                LiveVoiceSessionManager.stopLiveVoiceSession()
-                            }
+                            .clickable { LiveVoiceSessionManager.stopLiveVoiceSession() }
                             .padding(horizontal = 10.dp, vertical = 5.dp)
                     ) {
                         Text(
@@ -582,52 +710,54 @@ fun CommandCenterScreen(
                 }
             }
 
-            // 5. 1-Touch Starter Chips (.lb-ask-exb)
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 16.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                starterPrompts.forEach { preset ->
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(999.dp))
-                            .background(ObsidianColors.Surface)
-                            .border(1.dp, ObsidianColors.GlassBorder, RoundedCornerShape(999.dp))
-                            .clickable { onSendChatMessage(preset) }
-                            .padding(horizontal = 12.dp, vertical = 6.dp)
-                    ) {
-                        Text(
-                            text = preset,
-                            color = ObsidianColors.TextSecondary,
-                            fontSize = 11.5.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
+            // 5. 1-Touch Starter Chips (hidden when keyboard is open so input bar sits cleanly above keyboard)
+            AnimatedVisibility(visible = !isKeyboardOpen) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .padding(horizontal = 16.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    starterPrompts.forEach { preset ->
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(999.dp))
+                                .background(ObsidianColors.Surface)
+                                .border(1.dp, ObsidianColors.GlassBorder, RoundedCornerShape(999.dp))
+                                .clickable { onSendChatMessage(preset) }
+                                .padding(horizontal = 12.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                text = preset,
+                                color = ObsidianColors.TextSecondary,
+                                fontSize = 11.5.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
                     }
                 }
             }
 
-            // 6. Ahaboard Bare-Field Bottom Composer (.brand-card with 3dp solid ink bottom lip)
+            // 6. Ahaboard Bare-Field Bottom Composer (lifts smoothly above soft keyboard via MainActivity imePadding)
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 10.dp)
+                    .background(ObsidianColors.Background)
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
             ) {
                 GlassCard(
                     cornerRadius = 16.dp,
                     containerColor = ObsidianColors.Surface,
                     borderColor = ObsidianColors.Accent,
                     tactileBottomLip = true,
-                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp)
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 9.dp)
                 ) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        // 1-Touch Lane Selector Pill: AUTO <-> FG (포그라운드) <-> BG (백그라운드)
                         val laneBadgeText = when (selectedLaneIdx) {
                             1 -> "FG"
                             2 -> "BG"
@@ -639,7 +769,7 @@ fun CommandCenterScreen(
                                 .background(if (selectedLaneIdx == 0) ObsidianColors.SurfaceHigh else ObsidianColors.Accent)
                                 .border(1.dp, ObsidianColors.GlassBorder, RoundedCornerShape(999.dp))
                                 .clickable { selectedLaneIdx = (selectedLaneIdx + 1) % 3 }
-                                .padding(horizontal = 9.dp, vertical = 6.dp),
+                                .padding(horizontal = 9.dp, vertical = 5.dp),
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
@@ -661,7 +791,9 @@ fun CommandCenterScreen(
                                 Text(
                                     text = hintText,
                                     color = ObsidianColors.TextMuted,
-                                    fontSize = 14.sp
+                                    fontSize = 13.5.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
                             BasicTextField(
@@ -685,6 +817,7 @@ fun CommandCenterScreen(
                                                 else -> ""
                                             }
                                             promptInput = ""
+                                            focusManager.clearFocus()
                                             onSendChatMessage("$prefix$text")
                                         }
                                     }
@@ -696,7 +829,7 @@ fun CommandCenterScreen(
                         // 1-Touch Voice Mic Button
                         Box(
                             modifier = Modifier
-                                .size(34.dp)
+                                .size(32.dp)
                                 .clip(CircleShape)
                                 .background(if (isVoiceListening) ObsidianColors.Accent else ObsidianColors.SurfaceHigh)
                                 .border(1.dp, ObsidianColors.GlassBorder, CircleShape)
@@ -711,7 +844,7 @@ fun CommandCenterScreen(
                                 imageVector = Icons.Default.Mic,
                                 contentDescription = "음성 입력",
                                 tint = if (isVoiceListening) ObsidianColors.OnAccent else ObsidianColors.TextPrimary,
-                                modifier = Modifier.size(16.dp)
+                                modifier = Modifier.size(15.dp)
                             )
                         }
 
@@ -729,10 +862,11 @@ fun CommandCenterScreen(
                                             else -> ""
                                         }
                                         promptInput = ""
+                                        focusManager.clearFocus()
                                         onSendChatMessage("$prefix$text")
                                     }
                                 }
-                                .padding(horizontal = 14.dp, vertical = 7.dp),
+                                .padding(horizontal = 13.dp, vertical = 7.dp),
                             contentAlignment = Alignment.Center
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -750,6 +884,445 @@ fun CommandCenterScreen(
                                     modifier = Modifier.size(13.dp)
                                 )
                             }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 7. Tap-to-Open Chat Detail Modal (Human Summary vs. AI Model/Tool Telemetry & Raw Data)
+        val detailMsg = selectedDetailMessage
+        if (detailMsg != null) {
+            ChatDetailModalDialog(
+                msg = detailMsg,
+                routerState = routerState,
+                memoryState = memoryState,
+                onDismiss = { selectedDetailMessage = null },
+                onOpenUrl = { url ->
+                    runCatching {
+                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        context.startActivity(intent)
+                    }
+                },
+                onRunFollowUp = { followUpPrompt ->
+                    selectedDetailMessage = null
+                    onSendChatMessage(followUpPrompt)
+                }
+            )
+        }
+    }
+}
+
+/**
+ * Renders pre-structured Human UI Card templates inside an assistant chat bubble.
+ */
+@Composable
+private fun StructuredUiCardRenderer(
+    card: StructuredUiCard,
+    onItemClick: (com.hanson.mobileuse.agent.StructuredUiItem) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(ObsidianColors.SurfaceHigh)
+            .border(1.dp, ObsidianColors.GlassBorder, RoundedCornerShape(12.dp))
+            .padding(11.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        // Card Header
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = card.headerTitle,
+                    color = ObsidianColors.TextPrimary,
+                    fontSize = 12.5.sp,
+                    fontWeight = FontWeight.ExtraBold
+                )
+                if (card.headerSubtitle.isNotBlank()) {
+                    Text(
+                        text = card.headerSubtitle,
+                        color = ObsidianColors.TextMuted,
+                        fontSize = 10.5.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+        }
+
+        HorizontalDivider(color = ObsidianColors.Divider, thickness = 0.8.dp)
+
+        // Render items according to template type
+        card.items.forEach { item ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(9.dp))
+                    .background(ObsidianColors.Surface)
+                    .border(1.dp, ObsidianColors.GlassBorder, RoundedCornerShape(9.dp))
+                    .clickable { onItemClick(item) }
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(9.dp)
+            ) {
+                if (item.badge.isNotBlank()) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(ObsidianColors.Accent)
+                            .padding(horizontal = 6.dp, vertical = 3.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = item.badge,
+                            color = ObsidianColors.OnAccent,
+                            fontSize = 10.sp,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                    }
+                }
+
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = item.title,
+                        color = ObsidianColors.TextPrimary,
+                        fontSize = 12.5.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    if (item.subtitle.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = item.subtitle,
+                            color = ObsidianColors.TextSecondary,
+                            fontSize = 11.sp,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+
+                if (item.meta.isNotBlank()) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(999.dp))
+                            .background(ObsidianColors.SurfaceHigh)
+                            .border(1.dp, ObsidianColors.GlassBorder, RoundedCornerShape(999.dp))
+                            .padding(horizontal = 7.dp, vertical = 3.dp)
+                    ) {
+                        Text(
+                            text = item.meta,
+                            color = ObsidianColors.TextSecondary,
+                            fontSize = 9.5.sp,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Full-Detail Modal Dialog opened when the user taps any assistant chat bubble.
+ * Shows:
+ * 1. Human-friendly summary & full structured items
+ * 2. Multi-model specialist routing telemetry (which model was used on each turn and why)
+ * 3. Collapsible raw AI/tool output for technical inspection
+ */
+@Composable
+private fun ChatDetailModalDialog(
+    msg: LiveChatMessage,
+    routerState: MobileAiInfrastructureState,
+    memoryState: MemoryTelemetryState,
+    onDismiss: () -> Unit,
+    onOpenUrl: (String) -> Unit,
+    onRunFollowUp: (String) -> Unit
+) {
+    val detail = msg.detailPayload
+    var showRawOutput by remember { mutableStateOf(false) }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(ObsidianColors.Background.copy(alpha = 0.88f))
+                .padding(horizontal = 16.dp, vertical = 28.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            GlassCard(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .fillMaxHeight(0.88f),
+                cornerRadius = 20.dp,
+                containerColor = ObsidianColors.Surface,
+                borderColor = ObsidianColors.Accent,
+                tactileBottomLip = true,
+                contentPadding = PaddingValues(16.dp)
+            ) {
+                Column(modifier = Modifier.fillMaxSize()) {
+                    // Modal Header
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = msg.structuredCard?.headerTitle ?: "채팅 실행 상세 및 원문 리포트",
+                                color = ObsidianColors.TextPrimary,
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.ExtraBold
+                            )
+                            Text(
+                                text = "인간 유저용 핵심 브리핑 · 적재적소 멀티모델 & 도구 명세",
+                                color = ObsidianColors.TextMuted,
+                                fontSize = 11.sp
+                            )
+                        }
+                        Box(
+                            modifier = Modifier
+                                .size(32.dp)
+                                .clip(CircleShape)
+                                .background(ObsidianColors.SurfaceHigh)
+                                .border(1.dp, ObsidianColors.GlassBorder, CircleShape)
+                                .clickable { onDismiss() },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "닫기",
+                                tint = ObsidianColors.TextPrimary,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+                    HorizontalDivider(color = ObsidianColors.Divider)
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        // 1. Human Summary Section
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(ObsidianColors.SurfaceHigh)
+                                .border(1.dp, ObsidianColors.GlassBorder, RoundedCornerShape(12.dp))
+                                .padding(12.dp)
+                        ) {
+                            Text(
+                                text = "인간 유저용 핵심 요약",
+                                color = ObsidianColors.TextMuted,
+                                fontSize = 10.5.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = msg.text,
+                                color = ObsidianColors.TextPrimary,
+                                fontSize = 13.5.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                lineHeight = 19.sp
+                            )
+                            val sourceUrl = detail?.sourceUrl.orEmpty()
+                            if (sourceUrl.startsWith("http")) {
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(999.dp))
+                                        .background(ObsidianColors.Accent)
+                                        .clickable { onOpenUrl(sourceUrl) }
+                                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                                ) {
+                                    Text(
+                                        text = "브라우저에서 원문 사이트 열기 ($sourceUrl) ↗",
+                                        color = ObsidianColors.OnAccent,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                        }
+
+                        // 2. Full Structured Items (if present)
+                        if (msg.structuredCard != null && msg.structuredCard.items.isNotEmpty()) {
+                            StructuredUiCardRenderer(
+                                card = msg.structuredCard,
+                                onItemClick = { item ->
+                                    if (item.actionUrlOrCmd.startsWith("http")) {
+                                        onOpenUrl(item.actionUrlOrCmd)
+                                    } else {
+                                        onRunFollowUp("${item.title} 자세히 알려줘")
+                                    }
+                                }
+                            )
+                        }
+
+                        // 3. JEV Multi-Model & Tool Telemetry Card
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(ObsidianColors.SurfaceHigh)
+                                .border(1.dp, ObsidianColors.GlassBorder, RoundedCornerShape(12.dp))
+                                .padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                text = "AI 적재적소 멀티모델 & 도구 실행 명세",
+                                color = ObsidianColors.TextMuted,
+                                fontSize = 10.5.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text("호출 엔진 / 배지", color = ObsidianColors.TextSecondary, fontSize = 12.sp)
+                                CodeBadge(detail?.modelBadge?.ifBlank { msg.toolBadge ?: "AUTO" } ?: "AUTO")
+                            }
+                            val roleReason = detail?.specialistRoleKo?.ifBlank { routerState.lastSpecialistReason }
+                                ?: routerState.lastSpecialistReason
+                            Text(
+                                text = "선택 역할: $roleReason",
+                                color = ObsidianColors.TextPrimary,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                            if (!detail?.executedToolName.isNullOrBlank()) {
+                                Text(
+                                    text = "실행 도구: ${detail?.executedToolName} ${detail?.executedToolArgs.orEmpty()}",
+                                    color = ObsidianColors.TextSecondary,
+                                    fontSize = 11.sp,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
+                            val ledger = detail?.turnLedger?.takeIf { it.isNotEmpty() } ?: routerState.turnModelLedger
+                            if (ledger.isNotEmpty()) {
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = "턴별 멀티모델 스위칭 이력:",
+                                    color = ObsidianColors.TextMuted,
+                                    fontSize = 10.5.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                ledger.forEach { entry ->
+                                    Text(
+                                        text = "• $entry",
+                                        color = ObsidianColors.TextSecondary,
+                                        fontSize = 11.sp,
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                }
+                            }
+                        }
+
+                        // 4. Collapsible Raw Technical Output (kept out of the main chat!)
+                        val rawOut = detail?.rawTechnicalOutput.orEmpty()
+                        if (rawOut.isNotBlank()) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(ObsidianColors.SurfaceHigh)
+                                    .border(1.dp, ObsidianColors.GlassBorder, RoundedCornerShape(12.dp))
+                                    .clickable { showRawOutput = !showRawOutput }
+                                    .padding(12.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "AI / 브라우저 원본 추출 데이터 (Raw Output)",
+                                        color = ObsidianColors.TextSecondary,
+                                        fontSize = 11.5.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        text = if (showRawOutput) "접기 ▲" else "펼치기 ▼",
+                                        color = ObsidianColors.TextPrimary,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                                if (showRawOutput) {
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    HorizontalDivider(color = ObsidianColors.Divider)
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Text(
+                                        text = rawOut,
+                                        color = ObsidianColors.TextSecondary,
+                                        fontSize = 11.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        lineHeight = 16.sp
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+                    // Bottom Action Buttons
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(ObsidianColors.SurfaceHigh)
+                                .border(1.dp, ObsidianColors.GlassBorder, RoundedCornerShape(12.dp))
+                                .clickable { onRunFollowUp("방금 내용 바탕으로 코드로 시각화 보드 그려줘") }
+                                .padding(vertical = 10.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "시각화 보드로 그리기",
+                                color = ObsidianColors.TextPrimary,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(ObsidianColors.Accent)
+                                .clickable { onDismiss() }
+                                .padding(vertical = 10.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "닫기",
+                                color = ObsidianColors.OnAccent,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
                         }
                     }
                 }

@@ -44,11 +44,22 @@ class FloatingHudService : Service() {
         private val _isShowing = MutableStateFlow(false)
         val isShowing: StateFlow<Boolean> = _isShowing.asStateFlow()
 
+        @Volatile
+        var isMainActivityInForeground: Boolean = false
+
         private var instance: FloatingHudService? = null
         var onStopClicked: (() -> Unit)? = null
         var onSendLiveChatMessage: ((String) -> Unit)? = null
 
-        fun startIfPermitted(context: Context): Boolean {
+        fun setMainActivityForeground(context: Context, inForeground: Boolean) {
+            isMainActivityInForeground = inForeground
+            if (inForeground) {
+                stop(context)
+            }
+        }
+
+        fun startIfPermitted(context: Context, forceEvenInApp: Boolean = false): Boolean {
+            if (isMainActivityInForeground && !forceEvenInApp) return false
             if (!Settings.canDrawOverlays(context)) return false
             context.startService(Intent(context, FloatingHudService::class.java))
             return true

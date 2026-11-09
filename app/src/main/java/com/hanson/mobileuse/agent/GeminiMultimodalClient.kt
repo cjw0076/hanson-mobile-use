@@ -28,11 +28,60 @@ class GeminiMultimodalClient {
 
     companion object {
         const val DEFAULT_MODEL = "gemini-3.8-flash"
+        const val JEV_MULTI_MODEL_AUTO = "jev-multi-model-auto"
+
+        /**
+         * Parses a single or multi-provider API key string (comma/semicolon/newline separated).
+         * Supports simultaneous Google AI Studio (`AIza...`), Anthropic (`sk-ant-...`),
+         * OpenRouter (`sk-or-...`), and OpenAI (`sk-...`) keys for role-specialized routing.
+         */
+        data class MultiProviderApiKeySet(
+            val geminiKey: String? = null,
+            val anthropicKey: String? = null,
+            val openRouterKey: String? = null,
+            val openAiKey: String? = null
+        ) {
+            val hasAnyCloudKey: Boolean
+                get() = !geminiKey.isNullOrBlank() ||
+                    !anthropicKey.isNullOrBlank() ||
+                    !openRouterKey.isNullOrBlank() ||
+                    !openAiKey.isNullOrBlank()
+
+            companion object {
+                fun parse(rawKeyString: String): MultiProviderApiKeySet {
+                    val tokens = rawKeyString.split(',', ';', '\n', ' ')
+                        .map { it.trim() }
+                        .filter { it.isNotEmpty() }
+                    var gemini: String? = null
+                    var anthropic: String? = null
+                    var openRouter: String? = null
+                    var openAi: String? = null
+                    for (token in tokens) {
+                        when {
+                            token.startsWith("sk-ant-", ignoreCase = true) -> anthropic = token
+                            token.startsWith("sk-or-", ignoreCase = true) -> openRouter = token
+                            token.startsWith("AIza") -> gemini = token
+                            token.startsWith("sk-") -> openAi = token
+                            gemini == null -> gemini = token
+                        }
+                    }
+                    return MultiProviderApiKeySet(
+                        geminiKey = gemini,
+                        anthropicKey = anthropic,
+                        openRouterKey = openRouter,
+                        openAiKey = openAi
+                    )
+                }
+            }
+        }
 
         /**
          * Official model catalog synchronized with https://aistudio.google.com/docs/models
+         * plus JEV Multi-Model Specialist Auto-Orchestrator and Multi-Provider (Anthropic / OpenAI) support.
          */
         val AISTUDIO_OFFICIAL_MODELS: List<Pair<String, String>> = listOf(
+            // JEV Per-Turn Specialist Multi-Model Orchestrator
+            "jev-multi-model-auto" to "[JEV 적재적소 멀티모델 자동 오케스트레이션] 턴·서브골·역할별 최적 모델(Argon/3.8-Flash/3.5-Lite/ER-2/Opus/Nano) 동적 호출",
             // Gemini 4 Flagship
             "gemini-4-argon" to "[Gemini 4 · Flagship] 공유 1M 컨텍스트 · 최대 1M Long Decode · 고차원 추론 (thinking_level=medium)",
             // Gemini 3.8 & 3.x Multimodal / Agentic
@@ -47,6 +96,10 @@ class GeminiMultimodalClient {
             "antigravity-preview-09-2026" to "[Managed Agent] Antigravity Agent — 격리 리눅스 샌드박스 코드 실행·웹 브라우징 에이전트",
             "deep-research-preview-04-2026" to "[Managed Agent] Gemini Deep Research — 자율 다단계 심층 리서치 에이전트",
             "deep-research-max-preview-04-2026" to "[Managed Agent] Gemini Deep Research Max — 최대 깊이 자율 리서치 에이전트",
+            // Multi-Provider Specialists (Anthropic Claude / OpenAI / OpenRouter)
+            "claude-opus-4-6" to "[Anthropic · Opus] 고난도 코드 캔버스 합성 · 아키텍처 추론 · 자가 치유 특화 (sk-ant-... / sk-or-...)",
+            "claude-sonnet-4-6" to "[Anthropic · Sonnet] 고속 UI 제어 · 정밀 코드 생성 및 멀티모달 오퍼레이터 (sk-ant-... / sk-or-...)",
+            "gpt-4.1" to "[OpenAI · Flagship] 범용 멀티모달 UI 및 도구 호출 에이전트 (sk-... / sk-or-...)",
             // Live Audio / Speech / Translation (aistudio.google.com/docs/models#audio-models)
             "gemini-3.8-live" to "[Live API · New 기본] 추론 지연 없는 초저지연 실시간 양방향 음성·비디오 에이전트",
             "gemini-3.8-live-extended-thinking" to "[Live API · New 고추론] 실시간 음성 대화 + 백그라운드 심층 추론 결합",
@@ -223,21 +276,150 @@ Conversational Full-Control Rules:
             return inferLocalOnDeviceAction(goal, iteration, snapshot, historySteps, previousPlan, chatHistory)
         }
 
-        return try {
-            val normalizedModel = normalize2026ModelName(modelName)
-            callGeminiMultimodalApi(
-                apiKey = cleanKey,
-                modelName = normalizedModel,
-                goal = goal,
-                iteration = iteration,
-                snapshot = snapshot,
-                historySteps = historySteps,
-                previousPlan = previousPlan,
-                chatHistory = chatHistory
-            )
-        } catch (_: Exception) {
-            inferLocalOnDeviceAction(goal, iteration, snapshot, historySteps, previousPlan, chatHistory)
+        val normalizedModel = normalize2026ModelName(modelName)
+        val cascaded = decideNextActionWithCascade(
+            apiKey = cleanKey,
+            candidateModels = listOf(normalizedModel, "gemini-3.8-flash", "gemini-3.5-flash-lite").distinct(),
+            goal = goal,
+            iteration = iteration,
+            snapshot = snapshot,
+            historySteps = historySteps,
+            previousPlan = previousPlan,
+            chatHistory = chatHistory
+        )
+        return cascaded?.second ?: inferLocalOnDeviceAction(goal, iteration, snapshot, historySteps, previousPlan, chatHistory)
+    }
+
+    /**
+     * Executes a per-turn cloud model cascade across one or more specialist models and providers.
+     *
+     * - First checks the <10ms conversational/screen fast-path (`FAST-PATH`).
+     * - Parses `MultiProviderApiKeySet` from `apiKey` (supports Google `AIza...`, Anthropic `sk-ant-...`,
+     *   OpenRouter `sk-or-...`, OpenAI `sk-...`, or comma-separated multi-provider keys).
+     * - Iterates through `candidateModels` in priority order and returns `(resolvedModelBadge, decision)`
+     *   from the first model that succeeds without throwing.
+     */
+    fun decideNextActionWithCascade(
+        apiKey: String,
+        candidateModels: List<String>,
+        goal: String,
+        iteration: Int,
+        snapshot: AtomicSnapshot,
+        historySteps: List<AgentStepLog>,
+        previousPlan: List<SubGoalItem>,
+        chatHistory: List<LiveChatMessage> = emptyList()
+    ): Pair<String, ModelTurnDecision>? {
+        val fastDecision = tryInstantConversationalOrScreenFastPath(
+            goal = goal,
+            iteration = iteration,
+            snapshot = snapshot,
+            historySteps = historySteps
+        )
+        if (fastDecision != null) {
+            return "FAST-PATH-10MS" to fastDecision
         }
+
+        val keySet = MultiProviderApiKeySet.parse(apiKey)
+        if (!keySet.hasAnyCloudKey) return null
+
+        val expandedCandidates = buildProviderCandidateQueue(candidateModels, keySet)
+        for ((providerTag, targetModel, providerKey) in expandedCandidates) {
+            val decision = runCatching {
+                when (providerTag) {
+                    "ANTHROPIC" -> callAnthropicMessagesApi(
+                        apiKey = providerKey,
+                        modelName = targetModel,
+                        goal = goal,
+                        iteration = iteration,
+                        snapshot = snapshot,
+                        historySteps = historySteps,
+                        previousPlan = previousPlan,
+                        chatHistory = chatHistory
+                    )
+                    "OPENROUTER", "OPENAI" -> callOpenAiCompatibleApi(
+                        apiKey = providerKey,
+                        modelName = targetModel,
+                        isOpenRouter = providerTag == "OPENROUTER",
+                        goal = goal,
+                        iteration = iteration,
+                        snapshot = snapshot,
+                        historySteps = historySteps,
+                        previousPlan = previousPlan,
+                        chatHistory = chatHistory
+                    )
+                    else -> callGeminiMultimodalApi(
+                        apiKey = providerKey,
+                        modelName = normalize2026ModelName(targetModel),
+                        goal = goal,
+                        iteration = iteration,
+                        snapshot = snapshot,
+                        historySteps = historySteps,
+                        previousPlan = previousPlan,
+                        chatHistory = chatHistory
+                    )
+                }
+            }.getOrNull()
+
+            if (decision != null) {
+                return targetModel.uppercase() to decision
+            }
+        }
+        return null
+    }
+
+    private fun buildProviderCandidateQueue(
+        requestedModels: List<String>,
+        keySet: MultiProviderApiKeySet
+    ): List<Triple<String, String, String>> {
+        val queue = mutableListOf<Triple<String, String, String>>()
+        for (raw in requestedModels) {
+            val m = raw.trim()
+            if (m.isEmpty()) continue
+            when {
+                m.startsWith("claude-", ignoreCase = true) -> {
+                    if (!keySet.anthropicKey.isNullOrBlank()) {
+                        queue.add(Triple("ANTHROPIC", m, keySet.anthropicKey))
+                    } else if (!keySet.openRouterKey.isNullOrBlank()) {
+                        queue.add(Triple("OPENROUTER", "anthropic/$m", keySet.openRouterKey))
+                    } else if (!keySet.geminiKey.isNullOrBlank()) {
+                        val mapped = if (m.contains("opus")) "gemini-4-argon" else "gemini-3.8-flash"
+                        queue.add(Triple("GEMINI", mapped, keySet.geminiKey))
+                    }
+                }
+                m.startsWith("gpt-", ignoreCase = true) || m.startsWith("o3", ignoreCase = true) || m.startsWith("o4", ignoreCase = true) -> {
+                    if (!keySet.openAiKey.isNullOrBlank()) {
+                        queue.add(Triple("OPENAI", m, keySet.openAiKey))
+                    } else if (!keySet.openRouterKey.isNullOrBlank()) {
+                        queue.add(Triple("OPENROUTER", "openai/$m", keySet.openRouterKey))
+                    } else if (!keySet.geminiKey.isNullOrBlank()) {
+                        queue.add(Triple("GEMINI", "gemini-3.8-flash", keySet.geminiKey))
+                    }
+                }
+                else -> {
+                    // Requested a Gemini specialist model
+                    if (!keySet.geminiKey.isNullOrBlank()) {
+                        queue.add(Triple("GEMINI", m, keySet.geminiKey))
+                    } else if (!keySet.anthropicKey.isNullOrBlank()) {
+                        val mappedClaude = when {
+                            m.contains("argon") || m.contains("deep-research") -> "claude-opus-4-6"
+                            m.contains("lite") -> "claude-haiku-4-5"
+                            else -> "claude-sonnet-4-6"
+                        }
+                        queue.add(Triple("ANTHROPIC", mappedClaude, keySet.anthropicKey))
+                    } else if (!keySet.openRouterKey.isNullOrBlank()) {
+                        val mappedOr = when {
+                            m.contains("argon") -> "google/gemini-2.5-pro"
+                            else -> "google/gemini-2.5-flash"
+                        }
+                        queue.add(Triple("OPENROUTER", mappedOr, keySet.openRouterKey))
+                    } else if (!keySet.openAiKey.isNullOrBlank()) {
+                        val mappedOai = if (m.contains("lite")) "gpt-4.1-mini" else "gpt-4.1"
+                        queue.add(Triple("OPENAI", mappedOai, keySet.openAiKey))
+                    }
+                }
+            }
+        }
+        return queue.distinctBy { "${it.first}:${it.second}" }
     }
 
     /**
@@ -821,6 +1003,278 @@ Conversational Full-Control Rules:
                 previousPlan = previousPlan,
                 chatHistory = chatHistory
             )
+        }
+    }
+
+    /**
+     * Calls Anthropic Messages API (`https://api.anthropic.com/v1/messages`) with multimodal image + tool calling.
+     * Converts `ToolSpecRegistry.toGeminiToolsJson()` declarations into Anthropic `input_schema` tools.
+     */
+    private fun callAnthropicMessagesApi(
+        apiKey: String,
+        modelName: String,
+        goal: String,
+        iteration: Int,
+        snapshot: AtomicSnapshot,
+        historySteps: List<AgentStepLog>,
+        previousPlan: List<SubGoalItem>,
+        chatHistory: List<LiveChatMessage>
+    ): ModelTurnDecision {
+        val promptText = buildUnifiedTurnPrompt(goal, iteration, snapshot, historySteps, previousPlan, chatHistory)
+        val contentBlocks = JSONArray()
+        if (!snapshot.screenshotBase64Jpeg.isNullOrBlank()) {
+            contentBlocks.put(
+                JSONObject().apply {
+                    put("type", "image")
+                    put(
+                        "source",
+                        JSONObject().apply {
+                            put("type", "base64")
+                            put("media_type", "image/jpeg")
+                            put("data", snapshot.screenshotBase64Jpeg)
+                        }
+                    )
+                }
+            )
+        }
+        contentBlocks.put(
+            JSONObject().apply {
+                put("type", "text")
+                put("text", promptText)
+            }
+        )
+
+        val anthropicTools = JSONArray()
+        val geminiToolGroups = ToolSpecRegistry.toGeminiToolsJson()
+        for (g in 0 until geminiToolGroups.length()) {
+            val decls = geminiToolGroups.optJSONObject(g)?.optJSONArray("functionDeclarations") ?: continue
+            for (i in 0 until decls.length()) {
+                val fn = decls.optJSONObject(i) ?: continue
+                anthropicTools.put(
+                    JSONObject().apply {
+                        put("name", fn.optString("name"))
+                        put("description", fn.optString("description"))
+                        put("input_schema", fn.optJSONObject("parameters") ?: JSONObject().put("type", "object"))
+                    }
+                )
+            }
+        }
+
+        val payload = JSONObject().apply {
+            put("model", modelName)
+            put("max_tokens", 2048)
+            put("system", SYSTEM_INSTRUCTION)
+            put("tools", anthropicTools)
+            put("tool_choice", JSONObject().put("type", "any"))
+            put(
+                "messages",
+                JSONArray().put(
+                    JSONObject().apply {
+                        put("role", "user")
+                        put("content", contentBlocks)
+                    }
+                )
+            )
+        }
+
+        val req = Request.Builder()
+            .url("https://api.anthropic.com/v1/messages")
+            .addHeader("x-api-key", apiKey)
+            .addHeader("anthropic-version", "2023-06-01")
+            .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+            .build()
+
+        httpClient.newCall(req).execute().use { resp ->
+            val bodyStr = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) {
+                throw IllegalStateException("Anthropic HTTP ${resp.code}: ${bodyStr.take(180)}")
+            }
+            val root = JSONObject(bodyStr)
+            val contentArr = root.optJSONArray("content") ?: JSONArray()
+            var textOut = ""
+            var fnName: String? = null
+            var fnArgs = JSONObject()
+
+            for (i in 0 until contentArr.length()) {
+                val block = contentArr.optJSONObject(i) ?: continue
+                when (block.optString("type")) {
+                    "text" -> textOut += block.optString("text") + "\n"
+                    "tool_use" -> {
+                        fnName = block.optString("name")
+                        fnArgs = block.optJSONObject("input") ?: JSONObject()
+                    }
+                }
+            }
+
+            val (parsedSpoken, obs, updatedPlan) = parseSpokenObservationAndPlan(textOut, previousPlan)
+            val argSpoken = fnArgs.optString("spoken_reply", "").trim()
+            val spoken = argSpoken.ifBlank { parsedSpoken }
+            val rawDecision = if (fnName != null) {
+                ModelTurnDecision(obs, updatedPlan, fnName, fnArgs, spoken)
+            } else {
+                ModelTurnDecision(
+                    observation = obs,
+                    subGoals = updatedPlan.map { it.copy(status = SubGoalStatus.COMPLETED) },
+                    toolName = "complete_task",
+                    toolArgs = JSONObject().put("summary", spoken.ifBlank { obs }),
+                    spokenReply = spoken
+                )
+            }
+            return rescueActionPromiseDecision(rawDecision, goal, iteration, snapshot, historySteps, previousPlan, chatHistory)
+        }
+    }
+
+    /**
+     * Calls OpenAI / OpenRouter Chat Completions API (`/v1/chat/completions`) with multimodal vision + tool calling.
+     */
+    private fun callOpenAiCompatibleApi(
+        apiKey: String,
+        modelName: String,
+        isOpenRouter: Boolean,
+        goal: String,
+        iteration: Int,
+        snapshot: AtomicSnapshot,
+        historySteps: List<AgentStepLog>,
+        previousPlan: List<SubGoalItem>,
+        chatHistory: List<LiveChatMessage>
+    ): ModelTurnDecision {
+        val promptText = buildUnifiedTurnPrompt(goal, iteration, snapshot, historySteps, previousPlan, chatHistory)
+        val userContent = JSONArray()
+        if (!snapshot.screenshotBase64Jpeg.isNullOrBlank()) {
+            userContent.put(
+                JSONObject().apply {
+                    put("type", "image_url")
+                    put("image_url", JSONObject().put("url", "data:image/jpeg;base64,${snapshot.screenshotBase64Jpeg}"))
+                }
+            )
+        }
+        userContent.put(JSONObject().put("type", "text").put("text", promptText))
+
+        val openAiTools = JSONArray()
+        val geminiToolGroups = ToolSpecRegistry.toGeminiToolsJson()
+        for (g in 0 until geminiToolGroups.length()) {
+            val decls = geminiToolGroups.optJSONObject(g)?.optJSONArray("functionDeclarations") ?: continue
+            for (i in 0 until decls.length()) {
+                val fn = decls.optJSONObject(i) ?: continue
+                openAiTools.put(
+                    JSONObject().apply {
+                        put("type", "function")
+                        put(
+                            "function",
+                            JSONObject().apply {
+                                put("name", fn.optString("name"))
+                                put("description", fn.optString("description"))
+                                put("parameters", fn.optJSONObject("parameters") ?: JSONObject().put("type", "object"))
+                            }
+                        )
+                    }
+                )
+            }
+        }
+
+        val payload = JSONObject().apply {
+            put("model", modelName)
+            put("tools", openAiTools)
+            put("tool_choice", "required")
+            put(
+                "messages",
+                JSONArray().apply {
+                    put(JSONObject().put("role", "system").put("content", SYSTEM_INSTRUCTION))
+                    put(JSONObject().put("role", "user").put("content", userContent))
+                }
+            )
+        }
+
+        val endpoint = if (isOpenRouter) {
+            "https://openrouter.ai/api/v1/chat/completions"
+        } else {
+            "https://api.openai.com/v1/chat/completions"
+        }
+
+        val req = Request.Builder()
+            .url(endpoint)
+            .addHeader("Authorization", "Bearer $apiKey")
+            .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+            .build()
+
+        httpClient.newCall(req).execute().use { resp ->
+            val bodyStr = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) {
+                throw IllegalStateException("OpenAI/OR HTTP ${resp.code}: ${bodyStr.take(180)}")
+            }
+            val root = JSONObject(bodyStr)
+            val msg = root.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("message")
+            val textOut = msg?.optString("content").orEmpty()
+            val toolCalls = msg?.optJSONArray("tool_calls")
+            var fnName: String? = null
+            var fnArgs = JSONObject()
+            if (toolCalls != null && toolCalls.length() > 0) {
+                val fnObj = toolCalls.optJSONObject(0)?.optJSONObject("function")
+                fnName = fnObj?.optString("name")
+                val argsStr = fnObj?.optString("arguments").orEmpty()
+                fnArgs = runCatching { JSONObject(argsStr) }.getOrDefault(JSONObject())
+            }
+
+            val (parsedSpoken, obs, updatedPlan) = parseSpokenObservationAndPlan(textOut, previousPlan)
+            val argSpoken = fnArgs.optString("spoken_reply", "").trim()
+            val spoken = argSpoken.ifBlank { parsedSpoken }
+            val rawDecision = if (!fnName.isNullOrBlank()) {
+                ModelTurnDecision(obs, updatedPlan, fnName, fnArgs, spoken)
+            } else {
+                ModelTurnDecision(
+                    observation = obs,
+                    subGoals = updatedPlan.map { it.copy(status = SubGoalStatus.COMPLETED) },
+                    toolName = "complete_task",
+                    toolArgs = JSONObject().put("summary", spoken.ifBlank { obs }),
+                    spokenReply = spoken
+                )
+            }
+            return rescueActionPromiseDecision(rawDecision, goal, iteration, snapshot, historySteps, previousPlan, chatHistory)
+        }
+    }
+
+    private fun buildUnifiedTurnPrompt(
+        goal: String,
+        iteration: Int,
+        snapshot: AtomicSnapshot,
+        historySteps: List<AgentStepLog>,
+        previousPlan: List<SubGoalItem>,
+        chatHistory: List<LiveChatMessage>
+    ): String {
+        val chatSummary = if (chatHistory.isEmpty()) {
+            "(No prior live chat messages)"
+        } else {
+            chatHistory.takeLast(14).joinToString("\n") { msg -> "[${msg.sender.name}] ${msg.text}" }
+        }
+        val historySummary = if (historySteps.isEmpty()) {
+            "(First turn - no prior actions executed yet)"
+        } else {
+            historySteps.takeLast(6).joinToString("\n") { step ->
+                "Step ${step.stepNumber}: tool=${step.toolName}(${step.toolArgsJson}) -> ${if (step.succeeded) "OK" else "FAIL"}: ${step.resultSummary}"
+            }
+        }
+        val planSummary = if (previousPlan.isEmpty()) {
+            "(Create initial sub-goal checklist now)"
+        } else {
+            previousPlan.joinToString("\n") { "- ${it.status.marker} ${it.title}" }
+        }
+        return buildString {
+            appendLine("Live Conversation History with User:")
+            appendLine(chatSummary)
+            appendLine()
+            appendLine("Current User Utterance / Goal: $goal")
+            appendLine("Current Turn: $iteration")
+            appendLine()
+            appendLine("Previous Plan Ledger:")
+            appendLine(planSummary)
+            appendLine()
+            appendLine("Recent Execution History:")
+            appendLine(historySummary)
+            appendLine()
+            appendLine("Current Device Perception Snapshot:")
+            appendLine(snapshot.toPromptContext(maxElements = 95))
+            appendLine()
+            appendLine("Respond with SPOKEN:, OBSERVATION:, PLAN:, and invoke one tool call.")
         }
     }
 

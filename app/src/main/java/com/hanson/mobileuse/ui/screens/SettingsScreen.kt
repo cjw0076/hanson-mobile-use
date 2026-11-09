@@ -183,10 +183,15 @@ fun SettingsScreen(
                 item {
                     GlassCard {
                         Text(
-                            text = "API 인증 및 추론 모델",
+                            text = "멀티 프로바이더 API 인증 및 적재적소 멀티모델 매트릭스",
                             color = ObsidianColors.TextPrimary,
                             fontSize = 14.sp,
                             fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "단일 키 또는 쉼표(,)로 복수 키(AIza..., sk-ant-..., sk-or-...)를 넣으면 턴·역할별로 최적 모델을 교차 호출합니다",
+                            color = ObsidianColors.TextSecondary,
+                            fontSize = 11.sp
                         )
                         Spacer(modifier = Modifier.height(8.dp))
 
@@ -194,7 +199,7 @@ fun SettingsScreen(
                             value = apiKey,
                             onValueChange = { apiKey = it },
                             modifier = Modifier.fillMaxWidth(),
-                            label = { Text("Gemini API Key (AIza...)", color = ObsidianColors.TextSecondary) },
+                            label = { Text("API Keys (AIza... , sk-ant-... , sk-or-...)", color = ObsidianColors.TextSecondary) },
                             visualTransformation = if (showKey) VisualTransformation.None else PasswordVisualTransformation(),
                             trailingIcon = {
                                 IconButton(onClick = { showKey = !showKey }) {
@@ -223,13 +228,13 @@ fun SettingsScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = "모델 카탈로그 (${allModels.size}종)",
+                                text = "모델 카탈로그 (${allModels.size}종 · 적재적소 멀티모델 포함)",
                                 color = ObsidianColors.TextPrimary,
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.SemiBold
                             )
                             Text(
-                                text = if (showAllModels) "핵심 모델만 보기" else "전체 26종 펼치기",
+                                text = if (showAllModels) "핵심 모델만 보기" else "전체 ${allModels.size}종 펼치기",
                                 color = ObsidianColors.TextSecondary,
                                 fontSize = 11.5.sp,
                                 fontWeight = FontWeight.Bold,
