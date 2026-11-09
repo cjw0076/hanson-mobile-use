@@ -362,11 +362,11 @@ object ToolSpecRegistry {
         // =====================================================================
         ToolSpec(
             name = "os_cli_exec",
-            description = "Execute a Hanson Mobile-Use Native OS CLI (`hanson`) command or privileged system/shell command (`status`, `top`, `tap`, `swipe`, `text`, `key`, `app stop|grant|appops`, `setting get|put system|secure|global`, `dump`, `provider`, `self-heal`, or raw shell pipeline). Routes via UID-2000 OS Daemon (:18890) -> `/data/local/tmp/hanson` -> on-device Privileged Binder/Shell.",
+            description = "Execute a Hanson Mobile-Use Native OS CLI (`hanson`) command for Developer Options & OS-Level Package/System control: `status`, `top`, `tap`, `swipe`, `text`, `key`, `devopt status|animation_scale|show_touches|pointer_location|layout_bounds|overdraw|stay_awake|dont_keep_activities|background_limit`, `app list|open|stop|clear|enable|disable|standby|compile|whitelist|grant|revoke|appops`, `setting get|put|delete|list system|secure|global`, `wm size|density`, `uimode night yes|no|auto`, `statusbar expand-notifications|expand-settings|collapse`, `dump`, `provider`, `self-heal`. Routes via authenticated UID-2000 OS Daemon (:18890) & WRITE_SECURE_SETTINGS.",
             riskTier = ToolRiskTier.STATEFUL,
             capability = AgentCapability.SYSTEM_SETTINGS,
             parameters = listOf(
-                ToolParamSpec("command", "STRING", "Hanson CLI subcommand or raw shell pipeline, e.g. 'status', 'top', 'setting put global window_animation_scale 0.5', 'app stop com.google.android.youtube', 'dump activity top'", required = true)
+                ToolParamSpec("command", "STRING", "Structured Hanson OS CLI command, e.g. 'devopt animation_scale 0.5', 'devopt show_touches 1', 'devopt layout_bounds true', 'app standby com.instagram.android restricted', 'app compile com.kakao.talk speed-profile', 'wm density 420', 'uimode night yes'", required = true)
             )
         ),
         ToolSpec(

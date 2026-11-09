@@ -54,6 +54,10 @@ object HansonOsCliMain {
         "key",
         "app",
         "setting",
+        "devopt",
+        "wm",
+        "uimode",
+        "statusbar",
         "dump",
         "provider",
         "self-heal"
@@ -353,39 +357,63 @@ object HansonOsCliMain {
             "app" -> {
                 val subOp = args.getOrNull(0)?.lowercase() ?: "list"
                 val pkg = args.getOrNull(1)?.trim().orEmpty()
-                if (subOp != "list" && !PACKAGE_NAME_REGEX.matches(pkg)) {
+                if (subOp !in setOf("list", "trim-caches") && !PACKAGE_NAME_REGEX.matches(pkg)) {
                     return JSONObject().apply {
                         put("status", "error")
                         put("error", "Invalid package name: $pkg")
                     }
                 }
                 when (subOp) {
-                    "list" -> runSafeProcess(listOf("pm", "list", "packages", "-3"))
+                    "list" -> {
+                        val filterFlag = args.getOrNull(1)?.takeIf { it in setOf("-3", "-s", "-d", "-e", "-a") } ?: "-3"
+                        runSafeProcess(listOf("pm", "list", "packages", filterFlag))
+                    }
                     "open", "start" -> runSafeProcess(
                         listOf("monkey", "-p", pkg, "-c", "android.intent.category.LAUNCHER", "1")
                     )
                     "stop", "kill" -> runSafeProcess(listOf("am", "force-stop", pkg))
+                    "clear" -> runSafeProcess(listOf("pm", "clear", pkg))
+                    "enable" -> runSafeProcess(listOf("pm", "enable", pkg))
+                    "disable" -> runSafeProcess(listOf("pm", "disable-user", "--user", "0", pkg))
+                    "standby", "bucket" -> {
+                        val bucket = args.getOrNull(2)?.lowercase() ?: "active"
+                        if (bucket !in setOf("active", "working_set", "frequent", "rare", "restricted", "never")) {
+                            return JSONObject().put("status", "error").put("error", "Invalid standby bucket: $bucket")
+                        }
+                        runSafeProcess(listOf("am", "set-standby-bucket", pkg, bucket))
+                    }
+                    "compile" -> {
+                        val mode = args.getOrNull(2)?.lowercase() ?: "speed-profile"
+                        if (mode !in setOf("speed-profile", "speed", "verify", "quicken", "everything")) {
+                            return JSONObject().put("status", "error").put("error", "Invalid compile mode: $mode")
+                        }
+                        runSafeProcess(listOf("cmd", "package", "compile", "-m", mode, pkg))
+                    }
+                    "whitelist" -> {
+                        val op = if (args.getOrNull(2) == "remove") "-$pkg" else "+$pkg"
+                        runSafeProcess(listOf("dumpsys", "deviceidle", "whitelist", op))
+                    }
                     "grant" -> {
                         val perm = args.getOrNull(2)?.trim().orEmpty()
-                        if (!pkg.startsWith("com.hanson.mobileuse") || !IDENTIFIER_REGEX.matches(perm)) {
-                            return JSONObject().apply {
-                                put("status", "error")
-                                put("error", "Permission grant restricted to com.hanson.mobileuse")
-                            }
+                        if (!IDENTIFIER_REGEX.matches(perm)) {
+                            return JSONObject().put("status", "error").put("error", "Invalid permission identifier: $perm")
                         }
                         runSafeProcess(listOf("pm", "grant", pkg, perm))
+                    }
+                    "revoke" -> {
+                        val perm = args.getOrNull(2)?.trim().orEmpty()
+                        if (!IDENTIFIER_REGEX.matches(perm)) {
+                            return JSONObject().put("status", "error").put("error", "Invalid permission identifier: $perm")
+                        }
+                        runSafeProcess(listOf("pm", "revoke", pkg, perm))
                     }
                     "appops" -> {
                         val op = args.getOrNull(2)?.trim().orEmpty()
                         val mode = args.getOrNull(3)?.trim()?.lowercase() ?: "allow"
-                        if (!pkg.startsWith("com.hanson.mobileuse") ||
-                            !IDENTIFIER_REGEX.matches(op) ||
-                            mode !in setOf("allow", "ignore", "deny", "default")
+                        if (!IDENTIFIER_REGEX.matches(op) ||
+                            mode !in setOf("allow", "ignore", "deny", "default", "foreground")
                         ) {
-                            return JSONObject().apply {
-                                put("status", "error")
-                                put("error", "AppOps modification restricted to com.hanson.mobileuse")
-                            }
+                            return JSONObject().put("status", "error").put("error", "Invalid AppOps arguments")
                         }
                         runSafeProcess(listOf("appops", "set", pkg, op, mode))
                     }
@@ -412,17 +440,116 @@ object HansonOsCliMain {
                     }
                 }
                 when (op) {
-                    "put" -> {
-                        if (ns == "secure" && key !in setOf("enabled_accessibility_services", "accessibility_enabled")) {
-                            return JSONObject().apply {
-                                put("status", "error")
-                                put("error", "Writing to secure.$key is disallowed by security policy")
-                            }
-                        }
-                        runSafeProcess(listOf("settings", "put", ns, key, value))
-                    }
+                    "put" -> runSafeProcess(listOf("settings", "put", ns, key, value))
+                    "delete" -> runSafeProcess(listOf("settings", "delete", ns, key))
                     "list" -> runSafeProcess(listOf("settings", "list", ns))
                     else -> runSafeProcess(listOf("settings", "get", ns, key))
+                }
+            }
+
+            "devopt" -> {
+                val opt = args.getOrNull(0)?.lowercase() ?: "status"
+                val value = args.getOrNull(1)?.trim().orEmpty()
+                when (opt) {
+                    "animation", "animation_scale", "anim" -> {
+                        val scale = value.toFloatOrNull()?.coerceIn(0f, 10f)?.toString() ?: "0.5"
+                        runSafeProcess(listOf("settings", "put", "global", "window_animation_scale", scale))
+                        runSafeProcess(listOf("settings", "put", "global", "transition_animation_scale", scale))
+                        val r = runSafeProcess(listOf("settings", "put", "global", "animator_duration_scale", scale))
+                        JSONObject().apply {
+                            put("status", if (r.optInt("exitCode") == 0) "ok" else "error")
+                            put("developerOption", "animation_scale")
+                            put("scale", scale)
+                        }
+                    }
+                    "touches", "show_touches" -> {
+                        val v = if (value in setOf("1", "on", "true")) "1" else "0"
+                        runSafeProcess(listOf("settings", "put", "system", "show_touches", v))
+                    }
+                    "pointer", "pointer_location" -> {
+                        val v = if (value in setOf("1", "on", "true")) "1" else "0"
+                        runSafeProcess(listOf("settings", "put", "system", "pointer_location", v))
+                    }
+                    "layout_bounds", "bounds" -> {
+                        val v = if (value in setOf("1", "on", "true")) "true" else "false"
+                        runSafeProcess(listOf("setprop", "debug.layout", v))
+                        runSafeProcess(listOf("service", "call", "activity", "1599295570"))
+                    }
+                    "overdraw", "gpu_overdraw" -> {
+                        val v = if (value in setOf("1", "on", "true", "show")) "show" else "false"
+                        runSafeProcess(listOf("setprop", "debug.hwui.overdraw", v))
+                        runSafeProcess(listOf("service", "call", "activity", "1599295570"))
+                    }
+                    "stay_awake" -> {
+                        val v = if (value in setOf("1", "on", "true", "3", "7")) "3" else "0"
+                        runSafeProcess(listOf("settings", "put", "global", "stay_on_while_plugged_in", v))
+                    }
+                    "dont_keep_activities" -> {
+                        val v = if (value in setOf("1", "on", "true")) "1" else "0"
+                        runSafeProcess(listOf("settings", "put", "global", "always_finish_activities", v))
+                    }
+                    "background_limit", "bg_limit" -> {
+                        val limit = value.toIntOrNull()?.coerceIn(-1, 4) ?: -1
+                        runSafeProcess(listOf("service", "call", "activity", "51", "i32", limit.toString()))
+                    }
+                    else -> {
+                        val winAnim = runSafeProcess(listOf("settings", "get", "global", "window_animation_scale")).optString("stdout").trim()
+                        val transAnim = runSafeProcess(listOf("settings", "get", "global", "transition_animation_scale")).optString("stdout").trim()
+                        val durAnim = runSafeProcess(listOf("settings", "get", "global", "animator_duration_scale")).optString("stdout").trim()
+                        val touches = runSafeProcess(listOf("settings", "get", "system", "show_touches")).optString("stdout").trim()
+                        val pointer = runSafeProcess(listOf("settings", "get", "system", "pointer_location")).optString("stdout").trim()
+                        val layout = runSafeProcess(listOf("getprop", "debug.layout")).optString("stdout").trim()
+                        val stayAwake = runSafeProcess(listOf("settings", "get", "global", "stay_on_while_plugged_in")).optString("stdout").trim()
+                        JSONObject().apply {
+                            put("status", "ok")
+                            put("window_animation_scale", winAnim)
+                            put("transition_animation_scale", transAnim)
+                            put("animator_duration_scale", durAnim)
+                            put("show_touches", touches)
+                            put("pointer_location", pointer)
+                            put("debug_layout_bounds", layout)
+                            put("stay_on_while_plugged_in", stayAwake)
+                        }
+                    }
+                }
+            }
+
+            "wm" -> {
+                val sub = args.getOrNull(0)?.lowercase() ?: "size"
+                val arg1 = args.getOrNull(1)?.trim().orEmpty()
+                when (sub) {
+                    "size" -> {
+                        if (arg1.isBlank()) runSafeProcess(listOf("wm", "size"))
+                        else if (arg1 == "reset" || Regex("^\\d{3,5}x\\d{3,5}$").matches(arg1)) {
+                            runSafeProcess(listOf("wm", "size", arg1))
+                        } else JSONObject().put("status", "error").put("error", "Invalid wm size: $arg1")
+                    }
+                    "density" -> {
+                        if (arg1.isBlank()) runSafeProcess(listOf("wm", "density"))
+                        else if (arg1 == "reset" || (arg1.toIntOrNull() ?: 0) in 120..960) {
+                            runSafeProcess(listOf("wm", "density", arg1))
+                        } else JSONObject().put("status", "error").put("error", "Invalid wm density: $arg1")
+                    }
+                    else -> JSONObject().put("status", "error").put("error", "Unsupported wm subcommand: $sub")
+                }
+            }
+
+            "uimode" -> {
+                val mode = args.getOrNull(0)?.lowercase() ?: "night"
+                val valArg = args.getOrNull(1)?.lowercase() ?: ""
+                if (mode == "night" && valArg in setOf("yes", "no", "auto")) {
+                    runSafeProcess(listOf("cmd", "uimode", "night", valArg))
+                } else {
+                    runSafeProcess(listOf("cmd", "uimode", "night"))
+                }
+            }
+
+            "statusbar" -> {
+                val sub = args.getOrNull(0)?.lowercase() ?: "collapse"
+                if (sub in setOf("expand-notifications", "expand-settings", "collapse")) {
+                    runSafeProcess(listOf("cmd", "statusbar", sub))
+                } else {
+                    JSONObject().put("status", "error").put("error", "Invalid statusbar action: $sub")
                 }
             }
 
