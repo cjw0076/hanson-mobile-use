@@ -440,4 +440,34 @@ class CodeCanvasErrorSelfCorrectionTest {
         assertNull("Self-correction re-publish must clear error", GenerativeUiStateHolder.lastError.value)
         assertEquals("시각화 차트 (수정 완료)", GenerativeUiStateHolder.activeSpec.value?.title)
     }
+
+    @Test
+    fun testAhaboardMultimodalMediaBlocks_roundTripAndHumanSummaryEnrichment() {
+        for (fmt in com.hanson.mobileuse.agent.MediaFormatType.entries) {
+            val block = com.hanson.mobileuse.agent.MultimodalMediaBlock(
+                format = fmt,
+                title = "테스트 미디어 · ${fmt.name}",
+                subtitle = fmt.labelKo,
+                mediaUrlOrUri = "https://hanson.local/sample.${fmt.name.lowercase()}",
+                inlineHtmlContent = "<div>${fmt.badge}</div>",
+                recommendedHeightDp = 235
+            )
+            val json = block.toJson()
+            val restored = com.hanson.mobileuse.agent.MultimodalMediaBlock.fromJson(json)
+            assertNotNull(restored)
+            assertEquals(fmt, restored!!.format)
+            assertEquals(block.title, restored.title)
+
+            val rawMsg = com.hanson.mobileuse.agent.LiveChatMessage(
+                sender = com.hanson.mobileuse.agent.ChatSender.AGENT,
+                text = "원본 출력",
+                toolBadge = "NEXUS-${fmt.name}",
+                mediaBlock = restored
+            )
+            val enriched = com.hanson.mobileuse.agent.HumanSummaryAndCardBuilder.enrichMessageForHumanDisplay(rawMsg)
+            assertNotNull(enriched.mediaBlock)
+            assertEquals(fmt, enriched.mediaBlock!!.format)
+            assertNotNull(enriched.detailPayload)
+        }
+    }
 }

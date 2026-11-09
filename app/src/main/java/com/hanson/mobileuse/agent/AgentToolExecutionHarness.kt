@@ -30,7 +30,8 @@ import kotlin.math.roundToInt
 data class ToolExecutionOutcome(
     val succeeded: Boolean,
     val outputText: String,
-    val receipt: ActionReceipt? = null
+    val receipt: ActionReceipt? = null,
+    val mediaBlock: MultimodalMediaBlock? = null
 )
 
 /**

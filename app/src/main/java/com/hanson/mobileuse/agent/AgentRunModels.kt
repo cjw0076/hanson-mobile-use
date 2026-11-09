@@ -48,6 +48,61 @@ enum class StructuredUiTemplateType(val labelKo: String) {
     MEMORY_DASHBOARD("3-Tier 메모리 대시보드")
 }
 
+/**
+ * Multimodal Media Formats supported inline in Chat & Board (Ahaboard.ai style).
+ * Supports IMAGE (.png/.jpg/SVG/Canvas), GIF (animated loops), MP4 (motion-graphic video),
+ * GLB_3D (interactive 3D mesh/wireframe/PBR viewer), and CODE_CANVAS (live HTML5/JS micro-UI).
+ */
+enum class MediaFormatType(val badge: String, val labelKo: String) {
+    IMAGE("IMAGE", "생성형 이미지 · 일러스트"),
+    GIF("GIF · LOOP", "루프 모션 GIF 애니메이션"),
+    MP4("MP4 · VIDEO", "모션그래픽 MP4 비디오"),
+    GLB_3D("GLB · 3D", "인터랙티브 3D 모델 (GLB/WebGL)"),
+    CODE_CANVAS("CODE · UI", "라이브 코드 · SVG 위젯")
+}
+
+/**
+ * Self-contained Multimodal Media Block (`IMAGE`, `GIF`, `MP4`, `GLB_3D`, `CODE_CANVAS`)
+ * rendered inline right inside the chat message bubble AND expandable inside `ChatDetailModalDialog`.
+ */
+data class MultimodalMediaBlock(
+    val format: MediaFormatType,
+    val title: String,
+    val subtitle: String = "",
+    val mediaUrlOrUri: String = "",
+    val inlineHtmlContent: String = "",
+    val recommendedHeightDp: Int = 225,
+    val interactiveHintKo: String = "드래그·터치로 직접 조작하거나 탭하여 크게 열기 ↗"
+) {
+    fun toJson(): JSONObject = JSONObject().apply {
+        put("format", format.name)
+        put("title", title)
+        put("subtitle", subtitle)
+        put("mediaUrlOrUri", mediaUrlOrUri)
+        put("inlineHtmlContent", inlineHtmlContent)
+        put("recommendedHeightDp", recommendedHeightDp)
+        put("interactiveHintKo", interactiveHintKo)
+    }
+
+    companion object {
+        fun fromJson(obj: JSONObject?): MultimodalMediaBlock? {
+            if (obj == null) return null
+            val fmtName = obj.optString("format", MediaFormatType.CODE_CANVAS.name)
+            val fmt = runCatching { MediaFormatType.valueOf(fmtName) }
+                .getOrDefault(MediaFormatType.CODE_CANVAS)
+            return MultimodalMediaBlock(
+                format = fmt,
+                title = obj.optString("title", ""),
+                subtitle = obj.optString("subtitle", ""),
+                mediaUrlOrUri = obj.optString("mediaUrlOrUri", ""),
+                inlineHtmlContent = obj.optString("inlineHtmlContent", ""),
+                recommendedHeightDp = obj.optInt("recommendedHeightDp", 225),
+                interactiveHintKo = obj.optString("interactiveHintKo", "드래그·터치로 직접 조작하거나 탭하여 크게 열기 ↗")
+            )
+        }
+    }
+}
+
 data class StructuredUiItem(
     val badge: String = "",
     val title: String,
@@ -171,6 +226,7 @@ data class ChatDetailPayload(
  * Continuous Runtime Live Chat Message.
  * - `text` always holds the clean, human-readable Korean summary.
  * - `structuredCard` holds an optional pre-structured visual UI card rendered inline.
+ * - `mediaBlock` holds an optional Ahaboard-style multimodal media block (`IMAGE`, `GIF`, `MP4`, `GLB_3D`, `CODE_CANVAS`) rendered inline!
  * - `detailPayload` holds the full technical/raw details shown when the user taps the message.
  */
 data class LiveChatMessage(
@@ -183,6 +239,7 @@ data class LiveChatMessage(
     val replySessionId: String? = null,
     val timestampMs: Long = System.currentTimeMillis(),
     val structuredCard: StructuredUiCard? = null,
+    val mediaBlock: MultimodalMediaBlock? = null,
     val detailPayload: ChatDetailPayload? = null
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
@@ -195,6 +252,7 @@ data class LiveChatMessage(
         if (replySessionId != null) put("replySessionId", replySessionId)
         put("timestampMs", timestampMs)
         if (structuredCard != null) put("structuredCard", structuredCard.toJson())
+        if (mediaBlock != null) put("mediaBlock", mediaBlock.toJson())
         if (detailPayload != null) put("detailPayload", detailPayload.toJson())
     }
 }
@@ -281,29 +339,36 @@ object HumanSummaryAndCardBuilder {
             )
         }
 
-        // Case 3: Visual Canvas / Image Generation output
-        if (msg.toolBadge?.contains("CANVAS") == true || msg.toolBadge?.contains("IMAGE") == true) {
-            val card = StructuredUiCard(
-                templateType = StructuredUiTemplateType.CONTROL_RECEIPT,
-                headerTitle = if (msg.toolBadge.contains("IMAGE")) "비주얼 아트워크 생성 완료" else "인터랙티브 코드 캔버스 렌더링 완료",
-                headerSubtitle = "상단 화면 보드에서 실시간 조작 및 확인 가능",
-                items = listOf(
-                    StructuredUiItem(
-                        badge = if (msg.toolBadge.contains("IMAGE")) "ART" else "CODE",
-                        title = cleanedRaw.lineSequence().firstOrNull()?.take(54) ?: "시각화 보드가 생성되었습니다.",
-                        subtitle = "상단 보드 영역에서 직접 터치하거나 확대할 수 있습니다.",
-                        meta = "LIVE"
-                    )
-                )
-            )
+        // Case 3: Multimodal Media Block (`GLB_3D`, `MP4`, `GIF`, `IMAGE`, `CODE_CANVAS`)
+        if (msg.mediaBlock != null ||
+            msg.toolBadge?.contains("CANVAS") == true ||
+            msg.toolBadge?.contains("IMAGE") == true ||
+            msg.toolBadge?.contains("GLB") == true ||
+            msg.toolBadge?.contains("MP4") == true ||
+            msg.toolBadge?.contains("GIF") == true
+        ) {
+            val fmt = msg.mediaBlock?.format ?: when {
+                msg.toolBadge?.contains("GLB") == true -> MediaFormatType.GLB_3D
+                msg.toolBadge?.contains("MP4") == true -> MediaFormatType.MP4
+                msg.toolBadge?.contains("GIF") == true -> MediaFormatType.GIF
+                msg.toolBadge?.contains("IMAGE") == true -> MediaFormatType.IMAGE
+                else -> MediaFormatType.CODE_CANVAS
+            }
+            val humanSummary = when (fmt) {
+                MediaFormatType.GLB_3D -> "요청하신 3D 모델(GLB/WebGL)을 채팅 카드에 바로 띄웠어요. 손가락으로 드래그해 360° 회전하거나 확대한 뒤 탭하여 전체 뷰어로 볼 수 있습니다."
+                MediaFormatType.MP4 -> "요청하신 모션그래픽 비디오(MP4)를 채팅 카드에 바로 띄웠어요. 재생/일시정지 및 타임라인 탐색이 가능합니다."
+                MediaFormatType.GIF -> "요청하신 루프 모션 애니메이션(GIF)을 생성해 바로 띄웠어요. 캔버스를 터치해 속도나 시드를 바꿀 수 있습니다."
+                MediaFormatType.IMAGE -> "요청하신 비주얼 이미지를 생성해 채팅 카드에 바로 띄웠어요. 터치하면 새로운 시드(Seed)로 리믹스됩니다."
+                MediaFormatType.CODE_CANVAS -> "요청하신 인터랙티브 코드·시각화 UI를 채팅 카드에 바로 렌더링했어요. 직접 터치해 조작할 수 있습니다."
+            }
             return msg.copy(
-                text = "요청하신 내용을 상단 비주얼 보드에 깔끔하게 그려서 띄워두었어요.",
-                structuredCard = card,
-                detailPayload = ChatDetailPayload(
-                    humanSummary = cleanedRaw,
-                    modelBadge = msg.toolBadge.orEmpty(),
-                    specialistRoleKo = specialistRoleKo.ifBlank { "코드 캔버스·비주얼 합성 (Opus / Argon / Nano Banana)" },
-                    executedToolName = if (msg.toolBadge.contains("IMAGE")) "generate_visual_media" else "draw_with_code",
+                text = humanSummary,
+                detailPayload = msg.detailPayload ?: ChatDetailPayload(
+                    humanSummary = humanSummary,
+                    modelBadge = msg.toolBadge ?: "NEXUS-${fmt.name}",
+                    specialistRoleKo = specialistRoleKo.ifBlank { "Ahaboard 멀티모달 미디어 합성 (Opus / Argon / Nano Banana)" },
+                    executedToolName = if (fmt == MediaFormatType.CODE_CANVAS) "draw_with_code" else "generate_visual_media",
+                    executedToolArgs = """{"format":"${fmt.name}"}""",
                     rawTechnicalOutput = cleanedRaw,
                     turnLedger = turnLedger
                 )

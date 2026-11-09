@@ -210,6 +210,7 @@ class MobileUseAgentEngine(
                     replySessionId = obj.optString("replySessionId").takeIf { it.isNotBlank() },
                     timestampMs = obj.optLong("timestampMs", System.currentTimeMillis()),
                     structuredCard = StructuredUiCard.fromJson(obj.optJSONObject("structuredCard")),
+                    mediaBlock = MultimodalMediaBlock.fromJson(obj.optJSONObject("mediaBlock")),
                     detailPayload = ChatDetailPayload.fromJson(obj.optJSONObject("detailPayload"))
                 )
                 list.add(HumanSummaryAndCardBuilder.enrichMessageForHumanDisplay(rawMsg))
@@ -564,6 +565,8 @@ class MobileUseAgentEngine(
             gLower.contains("무슨 작업 중") || gLower.contains("병렬 상태")
         val isOmniNexusHeadless = gLower.contains("브라우저로") || gLower.contains("웹페이지") || gLower.contains("해커뉴스") ||
             gLower.contains("코드로 그려") || gLower.contains("이미지 생성") || gLower.contains("그림 그려") ||
+            gLower.contains("glb") || gLower.contains("3d") || gLower.contains("mp4") || gLower.contains("모션그래픽") ||
+            gLower.contains("gif") || gLower.contains("움짤") || gLower.contains("루프 애니메이션") ||
             gLower.contains("주변 기기") || gLower.contains("블루투스 기기") || gLower.contains("노트북으로")
         return isGameOrAppInventory || isCraftBlueprint || isNotifCheckOrReply || isDeviceSetting || isScreenOrStatusInquiry || isOmniNexusHeadless
     }
@@ -578,7 +581,7 @@ class MobileUseAgentEngine(
                 val gLower = bgGoal.lowercase(Locale.ROOT).trim()
                 val snapshot = HansonAccessibilityService.instance?.captureSnapshotNow(includeScreenshot = false)
 
-                // Check Universal Omni-Nexus Fast-Path first (Browser-Use, Code Canvas, Image Gen, Cross-Device, Pipelines)
+                // Check Universal Omni-Nexus Fast-Path first (Browser-Use, Code Canvas, Image/GIF/MP4/GLB Gen, Cross-Device, Pipelines)
                 val nexusRes = universalNexusEngine.tryExecuteUniversalNexus(
                     prompt = bgGoal,
                     latestSnapshot = snapshot,
@@ -590,7 +593,8 @@ class MobileUseAgentEngine(
                             sender = ChatSender.AGENT,
                             text = nexusRes.summaryKo,
                             subtitle = "Universal Omni-Nexus · ${nexusRes.badge}",
-                            toolBadge = nexusRes.badge
+                            toolBadge = nexusRes.badge,
+                            mediaBlock = nexusRes.mediaBlock
                         )
                     )
                     speakIfEnabled(nexusRes.summaryKo)
@@ -1094,7 +1098,8 @@ class MobileUseAgentEngine(
                             sender = ChatSender.AGENT,
                             text = nexusHit.summaryKo,
                             subtitle = "Universal Omni-Nexus · ${nexusHit.badge}",
-                            toolBadge = nexusHit.badge
+                            toolBadge = nexusHit.badge,
+                            mediaBlock = nexusHit.mediaBlock
                         )
                     )
                     speakIfEnabled(nexusHit.summaryKo)

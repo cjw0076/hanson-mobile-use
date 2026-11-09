@@ -67,7 +67,8 @@ data class NexusExecutionResult(
     val followUpGuiGoal: String? = null,
     val renderedVisualBoard: Boolean = false,
     val errorTelemetry: CanvasErrorTelemetry? = null,
-    val hasError: Boolean = errorTelemetry != null
+    val hasError: Boolean = errorTelemetry != null,
+    val mediaBlock: MultimodalMediaBlock? = null
 )
 
 /**
@@ -208,19 +209,75 @@ class UniversalNexusEngine(
             )
         }
 
+        // Pillar 4-D: Interactive 3D GLB / WebGL Model ("glb", "gltf", "3d", "입체 모델", "와이어프레임", "홀로그램")
+        if (pLower.contains("glb") || pLower.contains("gltf") || pLower.contains("3d") ||
+            pLower.contains("입체") || pLower.contains("모델링") || pLower.contains("홀로그램") ||
+            pLower.contains("와이어프레임") || pLower.contains("메쉬")
+        ) {
+            val outcome = executeGenerateVisualMedia(
+                JSONObject().put("prompt", p).put("format", "glb"),
+                apiKey = apiKey
+            )
+            return NexusExecutionResult(
+                handled = true,
+                summaryKo = outcome.outputText,
+                badge = "NEXUS-GLB-3D",
+                renderedVisualBoard = true,
+                mediaBlock = outcome.mediaBlock
+            )
+        }
+
+        // Pillar 4-E: Motion-Graphic MP4 Video ("mp4", "비디오", "모션그래픽", "영상 띄워", "동영상 만들어")
+        if ((pLower.contains("mp4") || pLower.contains("비디오") || pLower.contains("모션그래픽") ||
+                ((pLower.contains("영상") || pLower.contains("동영상") || pLower.contains("프로모")) &&
+                    (pLower.contains("생성") || pLower.contains("만들어") || pLower.contains("그려") || pLower.contains("띄워") || pLower.contains("보여") || pLower.contains("틀어")))) &&
+            !pLower.contains("유튜브") && !pLower.contains("youtube")
+        ) {
+            val outcome = executeGenerateVisualMedia(
+                JSONObject().put("prompt", p).put("format", "mp4"),
+                apiKey = apiKey
+            )
+            return NexusExecutionResult(
+                handled = true,
+                summaryKo = outcome.outputText,
+                badge = "NEXUS-MP4-VIDEO",
+                renderedVisualBoard = true,
+                mediaBlock = outcome.mediaBlock
+            )
+        }
+
+        // Pillar 4-F: Animated Loop GIF ("gif", "움짤", "루프 애니메이션", "키네틱")
+        if (pLower.contains("gif") || pLower.contains("움짤") || pLower.contains("루프 애니메이션") ||
+            pLower.contains("키네틱") ||
+            (pLower.contains("애니메이션") && (pLower.contains("생성") || pLower.contains("만들어") || pLower.contains("그려") || pLower.contains("띄워") || pLower.contains("보여")))
+        ) {
+            val outcome = executeGenerateVisualMedia(
+                JSONObject().put("prompt", p).put("format", "gif"),
+                apiKey = apiKey
+            )
+            return NexusExecutionResult(
+                handled = true,
+                summaryKo = outcome.outputText,
+                badge = "NEXUS-GIF-LOOP",
+                renderedVisualBoard = true,
+                mediaBlock = outcome.mediaBlock
+            )
+        }
+
         // Pillar 4-A: AI Image / Illustration Generation ("이미지 생성", "그림 그려서 보여줘", "일러스트 생성")
         if ((pLower.contains("이미지") || pLower.contains("그림") || pLower.contains("일러스트") || pLower.contains("포스터") || pLower.contains("아트")) &&
             (pLower.contains("생성") || pLower.contains("만들어") || pLower.contains("그려") || pLower.contains("띄워") || pLower.contains("보여"))
         ) {
             val outcome = executeGenerateVisualMedia(
-                JSONObject().put("prompt", p).put("style", "achromatic_editorial"),
+                JSONObject().put("prompt", p).put("style", "achromatic_editorial").put("format", "image"),
                 apiKey = apiKey
             )
             return NexusExecutionResult(
                 handled = true,
                 summaryKo = outcome.outputText,
                 badge = "NEXUS-IMAGE-GEN",
-                renderedVisualBoard = true
+                renderedVisualBoard = true,
+                mediaBlock = outcome.mediaBlock
             )
         }
 
@@ -240,7 +297,8 @@ class UniversalNexusEngine(
                 badge = if (outcome.succeeded) "NEXUS-CODE-CANVAS" else "NEXUS-CANVAS-ERROR",
                 renderedVisualBoard = true,
                 errorTelemetry = currentErr,
-                hasError = !outcome.succeeded || currentErr != null
+                hasError = !outcome.succeeded || currentErr != null,
+                mediaBlock = outcome.mediaBlock
             )
         }
 
@@ -731,15 +789,25 @@ window.addEventListener('unhandledrejection', function(event) {
             )
         )
 
+        val codeMediaBlock = MultimodalMediaBlock(
+            format = MediaFormatType.CODE_CANVAS,
+            title = title,
+            subtitle = "인터랙티브 코드 캔버스 · SVG / HTML5 UI",
+            inlineHtmlContent = htmlContent,
+            recommendedHeightDp = 225,
+            interactiveHintKo = "캔버스 노드를 직접 터치해 조작하거나 탭하여 크게 열기 ↗"
+        )
+
         return ToolExecutionOutcome(
             succeeded = true,
-            outputText = "요청하신 내용을 코드(SVG/HTML5 Canvas)로 실시간 렌더링해서 화면 보드에 바로 띄웠어요! 터치하여 인터랙션하실 수 있습니다.",
+            outputText = "요청하신 내용을 코드(SVG/HTML5 Canvas)로 실시간 렌더링해서 채팅 카드와 보드에 바로 띄웠어요! 터치하여 인터랙션하실 수 있습니다.",
             receipt = ActionReceipt(
                 toolName = "draw_with_code",
                 summaryKo = "코드 캔버스 렌더링: $title",
                 detailKo = prompt.take(100),
                 undoHintKo = "우측 상단 새로고침 버튼으로 기본 보드로 되돌릴 수 있습니다."
-            )
+            ),
+            mediaBlock = codeMediaBlock
         )
     }
 
@@ -855,53 +923,195 @@ window.addEventListener('unhandledrejection', function(event) {
     }
 
     /**
-     * Generates an AI Image (via Gemini Multimodal Image Generation / Imagen API when `apiKey` is provided)
-     * OR synthesizes an instant high-contrast Procedural Vector/Canvas Artwork in <30ms when offline,
-     * and displays it directly in the Command Center!
+     * Generates and renders Ahaboard-style Multimodal Visual Media:
+     * - `GLB_3D` (`.glb`, `.gltf`, interactive 3D WebGL/Canvas mesh & wireframe viewer with touch orbit/zoom)
+     * - `MP4` (`.mp4`, `.webm`, native HTML5 video + 60fps procedural motion-graphic cinema player)
+     * - `GIF` (`.gif`, seamless animated loop canvas & GIF viewer)
+     * - `IMAGE` (`.png`, `.jpg`, Gemini Multimodal Image Generation + high-contrast procedural vector/canvas art)
      */
     fun executeGenerateVisualMedia(args: JSONObject, apiKey: String = ""): ToolExecutionOutcome {
         totalVisualSyntheses++
         val prompt = args.optString("prompt", "Achromatic geometric architectural art").trim()
         val style = args.optString("style", "achromatic_editorial").trim()
+        val explicitFormat = args.optString("format", "").lowercase(Locale.ROOT).trim()
+        val mediaUrl = args.optString("media_url", "").trim().ifBlank {
+            Regex("(https?://[^\\s]+\\.(?:glb|gltf|mp4|webm|gif|png|jpg|jpeg|webp))", RegexOption.IGNORE_CASE)
+                .find(prompt)?.value.orEmpty()
+        }
+        val pLower = prompt.lowercase(Locale.ROOT)
 
-        // 1. Try Cloud Gemini Image Generation if API key is available
-        var base64Image: String? = null
-        var mimeType = "image/png"
-        if (apiKey.isNotBlank()) {
-            val cloudImg = tryFetchGeminiGeneratedImage(prompt, apiKey)
-            if (cloudImg != null) {
-                base64Image = cloudImg.first
-                mimeType = cloudImg.second
+        val formatType: MediaFormatType = when {
+            explicitFormat.contains("glb") || explicitFormat.contains("3d") ||
+                mediaUrl.endsWith(".glb", true) || mediaUrl.endsWith(".gltf", true) ||
+                pLower.contains("glb") || pLower.contains("gltf") || pLower.contains("3d") ||
+                pLower.contains("입체") || pLower.contains("모델링") || pLower.contains("홀로그램") ||
+                pLower.contains("와이어프레임") || pLower.contains("메쉬") -> MediaFormatType.GLB_3D
+
+            explicitFormat.contains("mp4") || explicitFormat.contains("video") ||
+                mediaUrl.endsWith(".mp4", true) || mediaUrl.endsWith(".webm", true) ||
+                pLower.contains("mp4") || pLower.contains("비디오") || pLower.contains("모션그래픽") ||
+                pLower.contains("영상") || pLower.contains("동영상") -> MediaFormatType.MP4
+
+            explicitFormat.contains("gif") ||
+                mediaUrl.endsWith(".gif", true) ||
+                pLower.contains("gif") || pLower.contains("움짤") ||
+                pLower.contains("루프 애니메이션") || pLower.contains("키네틱") -> MediaFormatType.GIF
+
+            else -> MediaFormatType.IMAGE
+        }
+
+        return when (formatType) {
+            MediaFormatType.GLB_3D -> {
+                val title = "3D GLB 인터랙티브 뷰어 · ${prompt.take(16)}"
+                val htmlContent = buildInteractiveGlb3DViewerHtml(prompt, mediaUrl)
+                GenerativeUiStateHolder.publishSpec(
+                    GenerativeUiSpec(
+                        title = title,
+                        subtitle = "GLB · 3D Mesh / Wireframe Orbit Viewer (Touch Drag & Zoom)",
+                        htmlContent = htmlContent,
+                        heightDp = 285
+                    )
+                )
+                val block = MultimodalMediaBlock(
+                    format = MediaFormatType.GLB_3D,
+                    title = title,
+                    subtitle = "360° 터치 회전 · SOLID / WIRE / POINTS 전환",
+                    mediaUrlOrUri = mediaUrl,
+                    inlineHtmlContent = htmlContent,
+                    recommendedHeightDp = 240,
+                    interactiveHintKo = "드래그하여 3D 모델을 360° 회전하거나 [SOLID/WIRE] 모드를 전환해 보세요 ↗"
+                )
+                ToolExecutionOutcome(
+                    succeeded = true,
+                    outputText = "요청하신 3D 모델(GLB/WebGL)을 인터랙티브 뷰어로 생성해 바로 띄웠어요! 손가락으로 드래그해 360° 회전하거나 와이어프레임/솔리드 모드를 전환할 수 있습니다.",
+                    receipt = ActionReceipt(
+                        toolName = "generate_visual_media",
+                        summaryKo = "3D GLB 모델 렌더링: ${prompt.take(22)}",
+                        detailKo = "Interactive 3D Mesh / GLB Orbit Viewer",
+                        undoHintKo = "뷰어 상단 버튼으로 3D 프리셋과 렌더링 모드를 바꿀 수 있습니다."
+                    ),
+                    mediaBlock = block
+                )
             }
+
+            MediaFormatType.MP4 -> {
+                val title = "MP4 모션그래픽 시네마 · ${prompt.take(16)}"
+                val htmlContent = buildInteractiveMp4VideoPlayerHtml(prompt, mediaUrl)
+                GenerativeUiStateHolder.publishSpec(
+                    GenerativeUiSpec(
+                        title = title,
+                        subtitle = "MP4 · 60FPS Motion-Graphic Cinema Player",
+                        htmlContent = htmlContent,
+                        heightDp = 280
+                    )
+                )
+                val block = MultimodalMediaBlock(
+                    format = MediaFormatType.MP4,
+                    title = title,
+                    subtitle = "60FPS 모션그래픽 · 타임라인 스크럽 & 배속 제어",
+                    mediaUrlOrUri = mediaUrl,
+                    inlineHtmlContent = htmlContent,
+                    recommendedHeightDp = 230,
+                    interactiveHintKo = "재생/일시정지(▶/❚❚), 타임라인 탐색, 1x/2x 배속 조절이 가능합니다 ↗"
+                )
+                ToolExecutionOutcome(
+                    succeeded = true,
+                    outputText = "요청하신 모션그래픽 비디오(MP4)를 생성해 인라인 플레이어로 바로 띄웠어요! 재생/일시정지 및 타임라인 바 탐색이 가능합니다.",
+                    receipt = ActionReceipt(
+                        toolName = "generate_visual_media",
+                        summaryKo = "MP4 비디오 생성 및 재생: ${prompt.take(22)}",
+                        detailKo = "60FPS Motion-Graphic MP4 Player",
+                        undoHintKo = "플레이어 하단 컨트롤러에서 일시정지하거나 구간을 이동할 수 있습니다."
+                    ),
+                    mediaBlock = block
+                )
+            }
+
+            MediaFormatType.GIF -> {
+                val title = "GIF 루프 애니메이션 · ${prompt.take(16)}"
+                val htmlContent = buildInteractiveGifLoopHtml(prompt, mediaUrl)
+                GenerativeUiStateHolder.publishSpec(
+                    GenerativeUiSpec(
+                        title = title,
+                        subtitle = "GIF · Seamless Infinite Motion Loop",
+                        htmlContent = htmlContent,
+                        heightDp = 270
+                    )
+                )
+                val block = MultimodalMediaBlock(
+                    format = MediaFormatType.GIF,
+                    title = title,
+                    subtitle = "무한 루프(∞) 모션 GIF · 터치하여 리믹스",
+                    mediaUrlOrUri = mediaUrl,
+                    inlineHtmlContent = htmlContent,
+                    recommendedHeightDp = 220,
+                    interactiveHintKo = "GIF 캔버스를 터치해 새로운 모션 패턴으로 리믹스하거나 일시정지할 수 있습니다 ↗"
+                )
+                ToolExecutionOutcome(
+                    succeeded = true,
+                    outputText = "요청하신 무한 루프 애니메이션(GIF)을 생성해 바로 띄웠어요! 캔버스를 터치하면 모션 패턴이 즉시 리믹스됩니다.",
+                    receipt = ActionReceipt(
+                        toolName = "generate_visual_media",
+                        summaryKo = "GIF 루프 모션 생성: ${prompt.take(22)}",
+                        detailKo = "Seamless Animated GIF Loop Synthesizer",
+                        undoHintKo = "GIF 영역을 탭하면 다른 모션 시드로 전환됩니다."
+                    ),
+                    mediaBlock = block
+                )
+            }
+
+            MediaFormatType.IMAGE -> {
+                var base64Image: String? = null
+                var mimeType = "image/png"
+                if (apiKey.isNotBlank() && mediaUrl.isBlank()) {
+                    val cloudImg = tryFetchGeminiGeneratedImage(prompt, apiKey)
+                    if (cloudImg != null) {
+                        base64Image = cloudImg.first
+                        mimeType = cloudImg.second
+                    }
+                }
+
+                val title = "생성형 이미지 아트 · ${prompt.take(16)}"
+                val htmlContent = when {
+                    !base64Image.isNullOrBlank() -> buildBase64ImageViewerHtml(prompt, base64Image, mimeType)
+                    mediaUrl.isNotBlank() -> buildExternalImageViewerHtml(prompt, mediaUrl)
+                    else -> buildProceduralGenerativeArtworkHtml(prompt, style)
+                }
+
+                GenerativeUiStateHolder.publishSpec(
+                    GenerativeUiSpec(
+                        title = title,
+                        subtitle = if (base64Image != null) "Gemini Multimodal Image Generation" else "Instant Procedural SVG/Canvas Artwork",
+                        htmlContent = htmlContent,
+                        heightDp = 285
+                    )
+                )
+
+                val modeLabel = if (base64Image != null) "Gemini 이미지 생성 엔진" else "온디바이스 프로시저럴 벡터/캔버스 아트 엔진"
+                val block = MultimodalMediaBlock(
+                    format = MediaFormatType.IMAGE,
+                    title = title,
+                    subtitle = modeLabel,
+                    mediaUrlOrUri = mediaUrl,
+                    inlineHtmlContent = htmlContent,
+                    recommendedHeightDp = 225,
+                    interactiveHintKo = "이미지를 터치하면 새로운 시드(Seed) 변형으로 즉시 리믹스됩니다 ↗"
+                )
+                ToolExecutionOutcome(
+                    succeeded = true,
+                    outputText = "$modeLabel 으로 '$prompt' 비주얼 이미지를 생성해 채팅 카드에 바로 띄웠어요! 캔버스를 터치하면 새로운 변형(Seed)으로 리믹스됩니다.",
+                    receipt = ActionReceipt(
+                        toolName = "generate_visual_media",
+                        summaryKo = "이미지 생성 및 표시: ${prompt.take(24)}",
+                        detailKo = modeLabel,
+                        undoHintKo = "캔버스를 탭하면 시드(Seed)가 변경되며 새 이미지가 그려집니다."
+                    ),
+                    mediaBlock = block
+                )
+            }
+
+            MediaFormatType.CODE_CANVAS -> executeDrawWithCode(args)
         }
-
-        val title = "생성형 비주얼 미디어 · ${prompt.take(16)}"
-        val htmlContent = if (!base64Image.isNullOrBlank()) {
-            buildBase64ImageViewerHtml(prompt, base64Image, mimeType)
-        } else {
-            buildProceduralGenerativeArtworkHtml(prompt, style)
-        }
-
-        GenerativeUiStateHolder.publishSpec(
-            GenerativeUiSpec(
-                title = title,
-                subtitle = if (base64Image != null) "Gemini Multimodal Image Generation" else "Instant Procedural SVG/Canvas Artwork",
-                htmlContent = htmlContent,
-                heightDp = 285
-            )
-        )
-
-        val modeLabel = if (base64Image != null) "Gemini 이미지 생성 엔진" else "온디바이스 프로시저럴 벡터/캔버스 아트 엔진"
-        return ToolExecutionOutcome(
-            succeeded = true,
-            outputText = "$modeLabel 으로 '$prompt' 비주얼 이미지를 생성해 화면에 바로 띄웠어요! 캔버스를 터치하면 새로운 변형(Seed)으로 리믹스됩니다.",
-            receipt = ActionReceipt(
-                toolName = "generate_visual_media",
-                summaryKo = "이미지 생성 및 표시: ${prompt.take(24)}",
-                detailKo = modeLabel,
-                undoHintKo = "캔버스를 탭하면 시드(Seed)가 변경되며 새 이미지가 그려집니다."
-            )
-        )
     }
 
     private fun tryFetchGeminiGeneratedImage(prompt: String, apiKey: String): Pair<String, String>? {
@@ -1165,10 +1375,6 @@ window.addEventListener('unhandledrejection', function(event) {
   :root { --bg: #FFFFFF; --ink: #09090B; --line: #E4E4E7; }
   @media (prefers-color-scheme: dark) { :root { --bg: #121214; --ink: #FAFAFA; --line: #27272A; } }
   * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, sans-serif; }
-  html, body {
-    filter: grayscale(100%) !important;
-    -webkit-filter: grayscale(100%) !important;
-  }
   body { background: transparent; color: var(--ink); padding: 4px; }
   .frame { background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 8px; text-align: center; }
   img { max-width: 100%; max-height: 220px; border-radius: 8px; object-fit: contain; }
@@ -1192,6 +1398,526 @@ window.addEventListener('unhandledrejection', function(event) {
     <img src="data:$mimeType;base64,$base64Data" alt="$safePrompt"/>
     <div class="cap">$safePrompt</div>
   </div>
+</body>
+</html>
+        """.trimIndent()
+    }
+
+    private fun buildExternalImageViewerHtml(prompt: String, imageUrl: String): String {
+        val safePrompt = prompt.take(44).replace("\"", "&quot;").replace("<", "&lt;")
+        val safeUrl = imageUrl.replace("\"", "&quot;")
+        return """
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<style>
+  :root { --bg: #FFFFFF; --ink: #09090B; --line: #E4E4E7; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #121214; --ink: #FAFAFA; --line: #27272A; } }
+  * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, sans-serif; }
+  body { background: var(--bg); color: var(--ink); padding: 6px; text-align: center; }
+  img { width: 100%; max-height: 205px; object-fit: contain; border-radius: 8px; }
+  .cap { font-size: 10.5px; font-weight: 700; margin-top: 4px; }
+</style>
+</head>
+<body>
+  <img src="$safeUrl" alt="$safePrompt"/>
+  <div class="cap">$safePrompt</div>
+</body>
+</html>
+        """.trimIndent()
+    }
+
+    /**
+     * Ahaboard Interactive 3D GLB / WebGL Mesh & Wireframe Orbit Viewer (`GLB_3D`).
+     * Supports external `.glb` / `.gltf` URLs AND a built-in zero-latency 60fps 3D Engine
+     * with touch drag 360° orbit, zoom, 4 switchable 3D models (`MECH`, `TORUS`, `HAND`, `OCTA`),
+     * and 3 render modes (`SOLID`, `WIRE`, `POINTS`).
+     */
+    private fun buildInteractiveGlb3DViewerHtml(prompt: String, glbUrl: String = ""): String {
+        val pLower = prompt.lowercase(Locale.ROOT)
+        val initialMeshIdx = when {
+            pLower.contains("토러스") || pLower.contains("매듭") || pLower.contains("torus") -> 1
+            pLower.contains("손") || pLower.contains("핸드") || pLower.contains("hand") -> 2
+            pLower.contains("크리스탈") || pLower.contains("옥타") || pLower.contains("다이아") -> 3
+            else -> 0 // MECH ROBOT CORE
+        }
+        val initialRenderMode = if (pLower.contains("와이어")) 1 else 0
+        val safeGlbUrl = glbUrl.replace("\"", "").replace("'", "")
+        return """
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no"/>
+<style>
+  :root { --bg: #0B0B0E; --panel: rgba(24,24,27,0.86); --ink: #FAFAFA; --muted: #A1A1AA; --line: #27272A; --accent: #38BDF8; }
+  * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, monospace; user-select: none; -webkit-user-select: none; }
+  html, body { width: 100%; height: 100%; background: var(--bg); color: var(--ink); overflow: hidden; touch-action: none; }
+  .stage { position: relative; width: 100%; height: 100%; display: flex; flex-direction: column; }
+  canvas { width: 100%; height: 100%; display: block; cursor: grab; }
+  canvas:active { cursor: grabbing; }
+  .hud-top { position: absolute; top: 8px; left: 8px; right: 8px; display: flex; justify-content: space-between; align-items: center; pointer-events: none; }
+  .badge { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 3px 7px; font-size: 9.5px; font-weight: 800; color: var(--ink); letter-spacing: 0.3px; }
+  .hud-bottom { position: absolute; bottom: 8px; left: 8px; right: 8px; display: flex; justify-content: space-between; align-items: center; gap: 4px; }
+  .btn-group { display: flex; gap: 4px; flex-wrap: nowrap; }
+  .btn { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 4px 7px; font-size: 9.5px; font-weight: 700; color: var(--muted); cursor: pointer; }
+  .btn.active { background: var(--ink); color: #09090B; border-color: var(--ink); }
+</style>
+</head>
+<body>
+<div class="stage">
+  <canvas id="glbCanvas" width="680" height="440"></canvas>
+  <div class="hud-top">
+    <span class="badge" id="meshTitle">GLB·3D · MECH ROBOT CORE</span>
+    <span class="badge" id="telemetry">60 FPS · DRAG 360°</span>
+  </div>
+  <div class="hud-bottom">
+    <div class="btn-group">
+      <div class="btn" id="m0" onclick="setMesh(0)">MECH</div>
+      <div class="btn" id="m1" onclick="setMesh(1)">TORUS</div>
+      <div class="btn" id="m2" onclick="setMesh(2)">HAND</div>
+      <div class="btn" id="m3" onclick="setMesh(3)">CRYSTAL</div>
+    </div>
+    <div class="btn-group">
+      <div class="btn" id="r0" onclick="setMode(0)">SOLID</div>
+      <div class="btn" id="r1" onclick="setMode(1)">WIRE</div>
+      <div class="btn" id="r2" onclick="setMode(2)">PTS</div>
+      <div class="btn active" id="rotBtn" onclick="toggleAutoRot()">AUTO</div>
+    </div>
+  </div>
+</div>
+<script>
+const canvas = document.getElementById('glbCanvas');
+const ctx = canvas.getContext('2d');
+let meshIdx = $initialMeshIdx;
+let renderMode = $initialRenderMode; // 0=SOLID, 1=WIRE, 2=POINTS
+let autoRotate = true;
+let rotX = 0.32, rotY = -0.55;
+let zoom = 1.0;
+let isDragging = false, lastX = 0, lastY = 0;
+let verts = [], faces = [];
+const meshNames = ['GLB·3D · MECH ROBOT CORE', 'GLB·3D · TORUS KNOT MESH', 'GLB·3D · CYBERNETIC HAND', 'GLB·3D · GEODESIC CRYSTAL'];
+
+function addBox(cx, cy, cz, sx, sy, sz, colorHue) {
+  const base = verts.length;
+  const dx = sx/2, dy = sy/2, dz = sz/2;
+  const pts = [
+    [cx-dx,cy-dy,cz-dz],[cx+dx,cy-dy,cz-dz],[cx+dx,cy+dy,cz-dz],[cx-dx,cy+dy,cz-dz],
+    [cx-dx,cy-dy,cz+dz],[cx+dx,cy-dy,cz+dz],[cx+dx,cy+dy,cz+dz],[cx-dx,cy+dy,cz+dz]
+  ];
+  pts.forEach(p => verts.push(p));
+  const f = [
+    [0,1,2,3],[5,4,7,6],[4,0,3,7],[1,5,6,2],[4,5,1,0],[3,2,6,7]
+  ];
+  f.forEach(idx => faces.push({ idx: idx.map(i => base + i), hue: colorHue }));
+}
+
+function buildGeometry(type) {
+  verts = []; faces = [];
+  if (type === 0) {
+    // Articulated Mech Robot Core (.glb procedural rig)
+    addBox(0, -0.85, 0, 0.72, 0.56, 0.58, 198); // Head
+    addBox(0, -0.86, 0.31, 0.54, 0.18, 0.08, 188); // Visor
+    addBox(-0.44, -0.92, 0, 0.1, 0.38, 0.1, 210); // Left Antenna
+    addBox(0.44, -0.92, 0, 0.1, 0.38, 0.1, 210); // Right Antenna
+    addBox(0, -0.05, 0, 1.05, 0.92, 0.66, 215); // Torso
+    addBox(0, -0.08, 0.35, 0.46, 0.42, 0.12, 190); // Arc Reactor Core
+    addBox(-0.76, -0.05, 0, 0.34, 0.82, 0.38, 220); // Left Arm
+    addBox(0.76, -0.05, 0, 0.34, 0.82, 0.38, 220); // Right Arm
+    addBox(-0.30, 0.82, 0, 0.38, 0.76, 0.44, 210); // Left Leg
+    addBox(0.30, 0.82, 0, 0.38, 0.76, 0.44, 210); // Right Leg
+  } else if (type === 1) {
+    // 3D Parametric Torus Knot
+    const segU = 44, segV = 12;
+    for (let i = 0; i < segU; i++) {
+      const u = (i / segU) * Math.PI * 2;
+      const r = 0.72 + 0.26 * Math.cos(3 * u);
+      const cx = r * Math.cos(2 * u);
+      const cy = r * Math.sin(2 * u);
+      const cz = 0.38 * Math.sin(3 * u);
+      for (let j = 0; j < segV; j++) {
+        const v = (j / segV) * Math.PI * 2;
+        const tube = 0.18;
+        verts.push([
+          cx + tube * Math.cos(v) * Math.cos(2 * u),
+          cy + tube * Math.cos(v) * Math.sin(2 * u),
+          cz + tube * Math.sin(v)
+        ]);
+      }
+    }
+    for (let i = 0; i < segU; i++) {
+      const ni = (i + 1) % segU;
+      for (let j = 0; j < segV; j++) {
+        const nj = (j + 1) % segV;
+        faces.push({
+          idx: [i*segV+j, ni*segV+j, ni*segV+nj, i*segV+nj],
+          hue: 195 + ((i * 3) % 45)
+        });
+      }
+    }
+  } else if (type === 2) {
+    // Cybernetic Spatial Hand
+    addBox(0, 0.35, 0, 0.95, 0.72, 0.28, 200); // Palm
+    const fx = [-0.36, -0.12, 0.12, 0.36];
+    const fh = [0.62, 0.76, 0.70, 0.52];
+    for (let k = 0; k < 4; k++) {
+      addBox(fx[k], -0.25, 0, 0.18, fh[k], 0.20, 190 + k*8);
+      addBox(fx[k], -0.25 - fh[k]*0.65, 0.06, 0.15, fh[k]*0.55, 0.17, 185);
+    }
+    addBox(-0.62, 0.18, 0.12, 0.24, 0.52, 0.22, 195); // Thumb
+  } else {
+    // Geodesic Octahedral Crystal + Orbit Ring
+    const top = [0, -1.15, 0], bot = [0, 1.15, 0];
+    const ring = [[-0.85,0,-0.85],[0.85,0,-0.85],[0.85,0,0.85],[-0.85,0,0.85]];
+    verts.push(top, bot, ...ring);
+    faces.push({idx:[0,2,3], hue:195},{idx:[0,3,4], hue:205},{idx:[0,4,5], hue:215},{idx:[0,5,2], hue:188});
+    faces.push({idx:[1,3,2], hue:200},{idx:[1,4,3], hue:210},{idx:[1,5,4], hue:220},{idx:[1,2,5], hue:192});
+    for (let k = 0; k < 12; k++) {
+      const a = (k / 12) * Math.PI * 2;
+      addBox(Math.cos(a)*1.25, Math.sin(a*2)*0.18, Math.sin(a)*1.25, 0.16, 0.16, 0.16, 185);
+    }
+  }
+}
+
+function updateButtons() {
+  for (let i = 0; i < 4; i++) {
+    document.getElementById('m'+i).className = (i === meshIdx) ? 'btn active' : 'btn';
+  }
+  for (let i = 0; i < 3; i++) {
+    document.getElementById('r'+i).className = (i === renderMode) ? 'btn active' : 'btn';
+  }
+  document.getElementById('rotBtn').className = autoRotate ? 'btn active' : 'btn';
+  document.getElementById('meshTitle').innerText = meshNames[meshIdx];
+}
+
+function setMesh(idx) { meshIdx = idx; buildGeometry(idx); updateButtons(); }
+function setMode(m) { renderMode = m; updateButtons(); }
+function toggleAutoRot() { autoRotate = !autoRotate; updateButtons(); }
+
+canvas.addEventListener('pointerdown', e => {
+  isDragging = true; lastX = e.clientX; lastY = e.clientY;
+});
+window.addEventListener('pointermove', e => {
+  if (!isDragging) return;
+  const dx = e.clientX - lastX;
+  const dy = e.clientY - lastY;
+  lastX = e.clientX; lastY = e.clientY;
+  rotY += dx * 0.012;
+  rotX = Math.max(-1.4, Math.min(1.4, rotX + dy * 0.012));
+});
+window.addEventListener('pointerup', () => { isDragging = false; });
+
+function project(v, w, h) {
+  let x = v[0], y = v[1], z = v[2];
+  // Rotate Y
+  const cy = Math.cos(rotY), sy = Math.sin(rotY);
+  let x1 = x * cy - z * sy;
+  let z1 = x * sy + z * cy;
+  // Rotate X
+  const cx = Math.cos(rotX), sx = Math.sin(rotX);
+  let y2 = y * cx - z1 * sx;
+  let z2 = y * sx + z1 * cx;
+  const dist = 3.4 / zoom;
+  const scale = 320 / (dist + z2 + 2.2);
+  return [w/2 + x1 * scale, h/2 + y2 * scale, z2, x1, y2];
+}
+
+function renderLoop() {
+  if (autoRotate && !isDragging) rotY += 0.014;
+  const w = canvas.width, h = canvas.height;
+  ctx.fillStyle = '#09090B';
+  ctx.fillRect(0, 0, w, h);
+
+  // Perspective floor grid
+  ctx.strokeStyle = 'rgba(255,255,255,0.07)';
+  ctx.lineWidth = 1;
+  for (let g = -1.6; g <= 1.6; g += 0.4) {
+    const p1 = project([g, 1.25, -1.6], w, h);
+    const p2 = project([g, 1.25, 1.6], w, h);
+    ctx.beginPath(); ctx.moveTo(p1[0], p1[1]); ctx.lineTo(p2[0], p2[1]); ctx.stroke();
+    const p3 = project([-1.6, 1.25, g], w, h);
+    const p4 = project([1.6, 1.25, g], w, h);
+    ctx.beginPath(); ctx.moveTo(p3[0], p3[1]); ctx.lineTo(p4[0], p4[1]); ctx.stroke();
+  }
+
+  const proj = verts.map(v => project(v, w, h));
+
+  if (renderMode === 2) {
+    // Point Cloud mode
+    proj.forEach(p => {
+      const bright = Math.floor(Math.max(90, Math.min(250, 190 - p[2]*55)));
+      ctx.fillStyle = 'rgb(' + bright + ',' + bright + ',' + Math.min(255, bright+20) + ')';
+      ctx.beginPath();
+      ctx.arc(p[0], p[1], 3.2, 0, Math.PI * 2);
+      ctx.fill();
+    });
+  } else {
+    // Depth-sort faces
+    const sorted = faces.map(f => {
+      const pts = f.idx.map(i => proj[i]);
+      const avgZ = pts.reduce((acc, p) => acc + p[2], 0) / pts.length;
+      // Normal lighting estimate
+      const ux = pts[1][3] - pts[0][3], uy = pts[1][4] - pts[0][4];
+      const vx = pts[2][3] - pts[0][3], vy = pts[2][4] - pts[0][4];
+      const nz = ux * vy - uy * vx;
+      return { pts, avgZ, nz, hue: f.hue };
+    }).sort((a, b) => b.avgZ - a.avgZ);
+
+    sorted.forEach(poly => {
+      ctx.beginPath();
+      poly.pts.forEach((p, idx) => {
+        if (idx === 0) ctx.moveTo(p[0], p[1]);
+        else ctx.lineTo(p[0], p[1]);
+      });
+      ctx.closePath();
+      if (renderMode === 0) {
+        const shade = Math.floor(Math.max(38, Math.min(235, 148 - poly.avgZ * 48 + (poly.nz > 0 ? 24 : -18))));
+        ctx.fillStyle = 'rgb(' + shade + ',' + shade + ',' + Math.min(255, shade + 12) + ')';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(9,9,11,0.65)';
+        ctx.lineWidth = 1.1;
+        ctx.stroke();
+      } else {
+        ctx.strokeStyle = 'rgba(244,244,245,0.82)';
+        ctx.lineWidth = 1.35;
+        ctx.stroke();
+      }
+    });
+  }
+  requestAnimationFrame(renderLoop);
+}
+
+buildGeometry(meshIdx);
+updateButtons();
+renderLoop();
+</script>
+</body>
+</html>
+        """.trimIndent()
+    }
+
+    /**
+     * Ahaboard Interactive MP4 Motion-Graphic Video Player (`MP4`).
+     * Supports external `.mp4`/`.webm` video streams AND a built-in 60fps Procedural Motion-Graphic
+     * Cinema Player with Play/Pause (`▶/❚❚`), interactive timeline scrubber bar, and `1x`/`2x` speed toggle.
+     */
+    private fun buildInteractiveMp4VideoPlayerHtml(prompt: String, mp4Url: String = ""): String {
+        val safeTitle = prompt.take(34).replace("\"", "&quot;").replace("<", "&lt;").replace("'", "")
+        val safeUrl = mp4Url.replace("\"", "").replace("'", "")
+        val hasExternalVideo = safeUrl.endsWith(".mp4", true) || safeUrl.endsWith(".webm", true)
+        return """
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<style>
+  :root { --bg: #09090B; --bar: rgba(24,24,27,0.92); --ink: #FAFAFA; --muted: #A1A1AA; --line: #27272A; }
+  * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, monospace; user-select: none; }
+  html, body { width: 100%; height: 100%; background: var(--bg); color: var(--ink); overflow: hidden; }
+  .player { position: relative; width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: space-between; }
+  canvas, video { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .top-pill { position: absolute; top: 8px; left: 8px; right: 8px; display: flex; justify-content: space-between; pointer-events: none; }
+  .tag { background: var(--bar); border: 1px solid var(--line); border-radius: 6px; padding: 3px 7px; font-size: 9.5px; font-weight: 800; }
+  .controls { position: absolute; bottom: 0; left: 0; right: 0; background: var(--bar); border-top: 1px solid var(--line); padding: 6px 10px; display: flex; align-items: center; gap: 8px; }
+  .ctrl-btn { background: var(--ink); color: #09090B; border-radius: 6px; padding: 3px 8px; font-size: 10px; font-weight: 800; cursor: pointer; }
+  .track { flex: 1; height: 7px; background: #27272A; border-radius: 999px; overflow: hidden; cursor: pointer; position: relative; }
+  .fill { height: 100%; background: var(--ink); width: 0%; }
+  .time { font-size: 9.5px; color: var(--muted); font-weight: 700; min-width: 68px; text-align: right; }
+</style>
+</head>
+<body>
+<div class="player">
+  ${if (hasExternalVideo) """<video id="vid" src="$safeUrl" autoplay loop muted playsinline></video>""" else """<canvas id="mp4Canvas" width="680" height="400"></canvas>"""}
+  <div class="top-pill">
+    <span class="tag">MP4 · 60FPS MOTION CINEMA</span>
+    <span class="tag" id="sceneBadge">ACT 01 · SWARM ENGINE</span>
+  </div>
+  <div class="controls">
+    <div class="ctrl-btn" id="playBtn" onclick="togglePlay()">❚❚</div>
+    <div class="track" id="scrubTrack" onclick="scrubVideo(event)">
+      <div class="fill" id="scrubFill"></div>
+    </div>
+    <span class="time" id="timeCode">00:00 / 00:12</span>
+    <div class="ctrl-btn" id="spdBtn" onclick="toggleSpeed()">1x</div>
+  </div>
+</div>
+<script>
+let playing = true;
+let speed = 1.0;
+let currentSec = 0.0;
+const durationSec = 12.0;
+const canvas = document.getElementById('mp4Canvas');
+const ctx = canvas ? canvas.getContext('2d') : null;
+
+function togglePlay() {
+  playing = !playing;
+  document.getElementById('playBtn').innerText = playing ? '❚❚' : '▶';
+  const v = document.getElementById('vid');
+  if (v) { if (playing) v.play(); else v.pause(); }
+}
+
+function toggleSpeed() {
+  speed = (speed === 1.0) ? 2.0 : 1.0;
+  document.getElementById('spdBtn').innerText = speed + 'x';
+  const v = document.getElementById('vid');
+  if (v) v.playbackRate = speed;
+}
+
+function scrubVideo(e) {
+  const rect = document.getElementById('scrubTrack').getBoundingClientRect();
+  const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+  currentSec = ratio * durationSec;
+  const v = document.getElementById('vid');
+  if (v && v.duration) v.currentTime = ratio * v.duration;
+}
+
+function fmtSec(s) {
+  const sec = Math.floor(s);
+  const ms = Math.floor((s - sec) * 10);
+  return '00:' + (sec < 10 ? '0' + sec : sec) + '.' + ms;
+}
+
+function tick() {
+  if (playing) {
+    currentSec = (currentSec + 0.016 * speed) % durationSec;
+  }
+  const pct = (currentSec / durationSec) * 100;
+  document.getElementById('scrubFill').style.width = pct + '%';
+  document.getElementById('timeCode').innerText = fmtSec(currentSec) + ' / 00:12';
+
+  const act = currentSec < 4 ? 'ACT 01 · MOBILE-USE SWARM' : (currentSec < 8 ? 'ACT 02 · JEV MULTI-MODEL ROUTER' : 'ACT 03 · 2ms HABIT REFLEX');
+  document.getElementById('sceneBadge').innerText = act;
+
+  if (ctx) {
+    const w = canvas.width, h = canvas.height;
+    ctx.fillStyle = '#09090B';
+    ctx.fillRect(0, 0, w, h);
+
+    // Dynamic grid scanline
+    ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+    for (let x = 0; x < w; x += 34) {
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
+    }
+    const scanY = (currentSec * 90) % h;
+    ctx.strokeStyle = 'rgba(255,255,255,0.22)';
+    ctx.beginPath(); ctx.moveTo(0, scanY); ctx.lineTo(w, scanY); ctx.stroke();
+
+    // Kinetic geometric rings & data streams
+    const cx = w / 2, cy = h / 2 - 12;
+    for (let r = 0; r < 4; r++) {
+      const rad = 36 + r * 26 + Math.sin(currentSec * 3 + r) * 6;
+      ctx.strokeStyle = r === 0 ? '#FAFAFA' : 'rgba(250,250,250,0.35)';
+      ctx.lineWidth = r === 0 ? 2.4 : 1.3;
+      ctx.beginPath();
+      ctx.arc(cx, cy, rad, currentSec * (r % 2 === 0 ? 1.4 : -1.1), currentSec * (r % 2 === 0 ? 1.4 : -1.1) + Math.PI * 1.35);
+      ctx.stroke();
+    }
+
+    // Center headline typography
+    ctx.fillStyle = '#FAFAFA';
+    ctx.font = '800 18px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('$safeTitle', cx, cy + 5);
+    ctx.fillStyle = '#A1A1AA';
+    ctx.font = '700 11px monospace';
+    ctx.fillText(act + ' · FRAME #' + Math.floor(currentSec * 60), cx, cy + 26);
+  }
+  requestAnimationFrame(tick);
+}
+tick();
+</script>
+</body>
+</html>
+        """.trimIndent()
+    }
+
+    /**
+     * Ahaboard Seamless Looping GIF Motion Synthesizer (`GIF`).
+     */
+    private fun buildInteractiveGifLoopHtml(prompt: String, gifUrl: String = ""): String {
+        val safeTitle = prompt.take(32).replace("\"", "&quot;").replace("<", "&lt;").replace("'", "")
+        val safeUrl = gifUrl.replace("\"", "").replace("'", "")
+        val hasExternalGif = safeUrl.endsWith(".gif", true)
+        return """
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<style>
+  :root { --bg: #FAFAFA; --ink: #09090B; --muted: #71717A; --line: #E4E4E7; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #121214; --ink: #FAFAFA; --muted: #A1A1AA; --line: #27272A; } }
+  * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, monospace; user-select: none; }
+  html, body { width: 100%; height: 100%; background: var(--bg); color: var(--ink); overflow: hidden; }
+  .stage { position: relative; width: 100%; height: 100%; cursor: pointer; }
+  canvas, img { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .pill-bar { position: absolute; bottom: 8px; left: 8px; right: 8px; display: flex; justify-content: space-between; align-items: center; }
+  .pill { background: var(--bg); border: 1px solid var(--line); border-radius: 999px; padding: 3px 8px; font-size: 9.5px; font-weight: 800; }
+</style>
+</head>
+<body>
+<div class="stage" onclick="remixGif()">
+  ${if (hasExternalGif) """<img src="$safeUrl" alt="$safeTitle"/>""" else """<canvas id="gifCanvas" width="640" height="380"></canvas>"""}
+  <div class="pill-bar">
+    <span class="pill" id="gifInfo">GIF · ∞ SEAMLESS LOOP</span>
+    <span class="pill" id="framePill">FRAME 01/60 · TAP TO REMIX</span>
+  </div>
+</div>
+<script>
+let frame = 0;
+let pattern = 0;
+const canvas = document.getElementById('gifCanvas');
+const ctx = canvas ? canvas.getContext('2d') : null;
+const isDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+
+function remixGif() {
+  pattern = (pattern + 1) % 3;
+  document.getElementById('gifInfo').innerText = 'GIF · LOOP PATTERN #' + (pattern + 1);
+}
+
+function drawGif() {
+  frame = (frame + 1) % 60;
+  const phase = (frame / 60) * Math.PI * 2;
+  document.getElementById('framePill').innerText = 'FRAME ' + (frame < 9 ? '0'+(frame+1) : (frame+1)) + '/60 · TAP REMIX';
+
+  if (ctx) {
+    const w = canvas.width, h = canvas.height;
+    const bg = isDark ? '#121214' : '#FAFAFA';
+    const ink = isDark ? '#FAFAFA' : '#09090B';
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, w, h);
+
+    const cx = w / 2, cy = h / 2 - 8;
+    const count = 12;
+    for (let i = 0; i < count; i++) {
+      const a = (i / count) * Math.PI * 2 + phase * (pattern === 1 ? -1 : 1);
+      const dist = 48 + Math.sin(phase * 2 + i) * (pattern === 2 ? 36 : 22);
+      const x = cx + Math.cos(a) * dist * 1.4;
+      const y = cy + Math.sin(a) * dist;
+      const r = 8 + Math.cos(phase + i) * 4;
+      ctx.strokeStyle = ink;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(x, y, Math.max(2, r), 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(x, y);
+      ctx.strokeStyle = isDark ? 'rgba(255,255,255,0.18)' : 'rgba(0,0,0,0.18)';
+      ctx.stroke();
+    }
+    ctx.fillStyle = ink;
+    ctx.font = '800 14px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('$safeTitle', cx, h - 42);
+  }
+  requestAnimationFrame(drawGif);
+}
+drawGif();
+</script>
 </body>
 </html>
         """.trimIndent()

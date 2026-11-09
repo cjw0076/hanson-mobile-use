@@ -82,6 +82,7 @@ import com.hanson.mobileuse.agent.StructuredUiCard
 import com.hanson.mobileuse.agent.StructuredUiTemplateType
 import com.hanson.mobileuse.notification.InterceptedNotification
 import com.hanson.mobileuse.ui.components.AhaboardDotGridBox
+import com.hanson.mobileuse.ui.components.AhaboardMultimodalMediaView
 import com.hanson.mobileuse.ui.components.CodeBadge
 import com.hanson.mobileuse.ui.components.GenerativeUiStateHolder
 import com.hanson.mobileuse.ui.components.GenerativeUiSurfaceCard
@@ -158,12 +159,13 @@ fun CommandCenterScreen(
 
     val starterPrompts = remember {
         listOf(
-            "브라우저로 해커뉴스 최신 글 요약해줘",
-            "메모리 상태 확인하고 최적화해줘",
-            "코드로 시스템 구조도 그려서 띄워줘",
+            "3D GLB 로봇 모델 띄워줘",
+            "MP4 모션그래픽 영상 만들어줘",
+            "GIF 루프 애니메이션 띄워줘",
             "기하학 아트워크 이미지 생성해서 보여줘",
-            "주변 블루투스 기기 상태 알려줘",
-            "적재적소 멀티모델 모드로 바꿔줘"
+            "코드로 시스템 구조도 그려서 띄워줘",
+            "브라우저로 해커뉴스 최신 글 요약해줘",
+            "메모리 상태 확인하고 최적화해줘"
         )
     }
 
@@ -479,7 +481,7 @@ fun CommandCenterScreen(
                 }
             }
 
-            // 4. Clean Whiteboard Stage (Human Summaries + Pre-Structured UI Cards + Tap-to-Open Details)
+            // 4. Clean Whiteboard Stage (Human Summaries + Ahaboard Multimodal Media Blocks + Pre-Structured UI Cards)
             LazyColumn(
                 state = listState,
                 modifier = Modifier
@@ -488,8 +490,7 @@ fun CommandCenterScreen(
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                val hasDynamicVisualBoard = activeGenSpec != null && activeGenSpec?.id != "gen_ui_achromatic_board"
-                if ((BoardMode.entries[selectedModeIdx] == BoardMode.BOARD || hasDynamicVisualBoard) && !isKeyboardOpen) {
+                if (BoardMode.entries[selectedModeIdx] == BoardMode.BOARD && !isKeyboardOpen) {
                     item(key = "gen_ui_board") {
                         GenerativeUiSurfaceCard(
                             onRunCommand = { cmd -> onSendChatMessage(cmd) }
@@ -554,7 +555,7 @@ fun CommandCenterScreen(
                     }
                 }
 
-                // Human-Readable Conversation Cards + Structured UI Templates
+                // Human-Readable Conversation Cards + Ahaboard Multimodal Media Blocks (GLB/MP4/GIF/IMAGE/CODE) + Structured UI Templates
                 items(chatMessages, key = { it.id }) { msg ->
                     val isUser = msg.sender == ChatSender.USER
                     Row(
@@ -583,10 +584,10 @@ fun CommandCenterScreen(
                                 cornerRadius = 15.dp,
                                 containerColor = ObsidianColors.Surface,
                                 borderColor = ObsidianColors.GlassBorder,
-                                tactileBottomLip = msg.structuredCard != null,
+                                tactileBottomLip = msg.structuredCard != null || msg.mediaBlock != null,
                                 contentPadding = PaddingValues(13.dp)
                             ) {
-                                // Top Badge Row: Specialist Model / Tool Badge + Template Type Pill
+                                // Top Badge Row: Specialist Model / Tool Badge + Media Format / Template Type Pill
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -599,8 +600,9 @@ fun CommandCenterScreen(
                                         fontFamily = FontFamily.Monospace,
                                         fontWeight = FontWeight.Bold
                                     )
-                                    if (msg.structuredCard != null) {
-                                        CodeBadge(msg.structuredCard.templateType.labelKo)
+                                    when {
+                                        msg.mediaBlock != null -> CodeBadge(msg.mediaBlock.format.labelKo)
+                                        msg.structuredCard != null -> CodeBadge(msg.structuredCard.templateType.labelKo)
                                     }
                                 }
 
@@ -611,9 +613,19 @@ fun CommandCenterScreen(
                                     text = msg.text,
                                     color = ObsidianColors.TextPrimary,
                                     fontSize = 13.5.sp,
-                                    fontWeight = if (msg.structuredCard != null) FontWeight.SemiBold else FontWeight.Normal,
+                                    fontWeight = if (msg.structuredCard != null || msg.mediaBlock != null) FontWeight.SemiBold else FontWeight.Normal,
                                     lineHeight = 19.sp
                                 )
+
+                                // Ahaboard Inline Multimodal Media Block (GLB 3D / MP4 Video / GIF Loop / Image / Code Widget)
+                                if (msg.mediaBlock != null) {
+                                    Spacer(modifier = Modifier.height(10.dp))
+                                    AhaboardMultimodalMediaView(
+                                        block = msg.mediaBlock,
+                                        onExpandClick = { selectedDetailMessage = msg },
+                                        onRunCommand = { cmd -> onSendChatMessage(cmd) }
+                                    )
+                                }
 
                                 // Pre-Structured UI Card (if present)
                                 if (msg.structuredCard != null) {
@@ -1164,6 +1176,16 @@ private fun ChatDetailModalDialog(
                                     )
                                 }
                             }
+                        }
+
+                        // 1.5. Full-Height Interactive Multimodal Media Stage (GLB 3D / MP4 / GIF / Image / Code)
+                        if (msg.mediaBlock != null) {
+                            AhaboardMultimodalMediaView(
+                                block = msg.mediaBlock,
+                                heightDpOverride = 300,
+                                onExpandClick = null,
+                                onRunCommand = { cmd -> onRunFollowUp(cmd) }
+                            )
                         }
 
                         // 2. Full Structured Items (if present)
