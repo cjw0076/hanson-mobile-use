@@ -1,0 +1,308 @@
+rules_version = '2';
+
+// ===============================================================
+// Hanson Mobile Agent v6.0 — Cloud Firestore Security Rules
+// Optional BYO Cross-Device Human-Convenience Sync
+// ===============================================================
+//
+// Zero-Leak Notice:
+//   - Zero hardcoded project IDs, zero personal/private identifiers.
+//   - Strictly owner-scoped under /users/{userId}.
+//   - Blind Credential Vault secrets (/users/{userId}/vault/**) are
+//     unconditionally denied in Firestore (AES-256-GCM stays on-device).
+//
+// ===============================================================
+// Assumed Data Models
+// ===============================================================
+//
+// Collection: users/{userId}
+//   - Root document is locked down (client read/write denied);
+//     all synced collections live in validated subcollections below.
+//
+// Subcollection: users/{userId}/bubbles/{bubbleId}
+//   Fields (all required, strict schema via hasOnly):
+//     - id: string (1..128 chars, must match bubbleId, immutable on update)
+//     - emoji: string (1..32 chars)
+//     - category: string (1..32 chars)
+//     - factKo: string (1..500 chars)
+//     - enabled: bool
+//     - updatedAtMs: int (0..253402300799999 epoch ms)
+//
+// Subcollection: users/{userId}/routines/{routineId}
+//   Fields (all required, strict schema via hasOnly):
+//     - id: string (1..128 chars, must match routineId, immutable on update)
+//     - titleKo: string (1..200 chars)
+//     - emoji: string (1..32 chars)
+//     - goalPrompt: string (1..1000 chars)
+//     - sourceBadge: string (1..64 chars)
+//     - pinned: bool
+//     - stepCount: int (1..50)
+//     - createdAtMs: int (0..253402300799999 epoch ms, immutable on update)
+//
+// Subcollection: users/{userId}/watchers/{watcherId}
+//   Fields (all required, strict schema via hasOnly):
+//     - id: string (1..128 chars, must match watcherId, immutable on update)
+//     - title: string (1..200 chars)
+//     - targetAppOrUrl: string (0..500 chars)
+//     - keywords: list<string> (1..20 items, each item string 1..100 chars)
+//     - mode: string ('NOTIFY_ONLY' | 'HOLD_FOR_APPROVAL')
+//     - enabled: bool
+//     - hitCount: int (0..1000000)
+//     - updatedAtMs: int (0..253402300799999 epoch ms)
+//
+// Subcollection: users/{userId}/receipts/{receiptId}
+//   Fields (all required, strict schema via hasOnly):
+//     - id: string (1..128 chars, must match receiptId, immutable on update)
+//     - timestampMs: int (0..253402300799999 epoch ms, immutable on update)
+//     - toolName: string (1..100 chars, immutable on update)
+//     - summaryKo: string (1..500 chars)
+//     - detailKo: string (0..1000 chars)
+//     - undoHintKo: string (0..500 chars)
+//     - undoToolName: string (0..100 chars, immutable on update)
+//     - undoArgsJson: string (0..1000 chars, immutable on update)
+//     - undone: bool
+//
+// Subcollection: users/{userId}/vault/{document=**}
+//   - Explicitly DENIED for all reads and writes.
+//
+// ===============================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+
+    // Check if the caller is authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Check if the caller owns the user-scoped document path
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // Verify all required keys are present in the resulting document
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    // Enforce strict schema with no extraneous fields
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    // Explicitly reject sensitive secret/credential field names
+    function hasNoForbiddenSecretKeys() {
+      return !request.resource.data.keys().hasAny([
+        'plaintext',
+        'secret',
+        'ciphertextBase64',
+        'password',
+        'apiKey',
+        'privateKey',
+        'token'
+      ]);
+    }
+
+    // Strict string type and bounded length check
+    function isValidString(val, minLen, maxLen) {
+      return val is string && val.size() >= minLen && val.size() <= maxLen;
+    }
+
+    // Bounded string check capped at 1000 characters
+    function isValidBoundedString(val) {
+      return val is string && val.size() <= 1000;
+    }
+
+    // Strict integer type and inclusive range check
+    function isValidIntInRange(val, minVal, maxVal) {
+      return val is int && val >= minVal && val <= maxVal;
+    }
+
+    // Strict integer epoch millisecond check (rejects floats, negative, NaN, Infinity, and overflow)
+    function isValidTimestampMs(val) {
+      return val is int && val >= 0 && val <= 253402300799999;
+    }
+
+    // Validate a single keyword item at index if present
+    function isValidKeywordElement(listVal, idx) {
+      return idx >= listVal.size() ||
+        (listVal[idx] is string && listVal[idx].size() >= 1 && listVal[idx].size() <= 100);
+    }
+
+    // Validate watcher keywords list (1..20 non-empty bounded strings)
+    function isValidKeywordsList(listVal) {
+      return listVal is list &&
+        listVal.size() >= 1 &&
+        listVal.size() <= 20 &&
+        isValidKeywordElement(listVal, 0) &&
+        isValidKeywordElement(listVal, 1) &&
+        isValidKeywordElement(listVal, 2) &&
+        isValidKeywordElement(listVal, 3) &&
+        isValidKeywordElement(listVal, 4) &&
+        isValidKeywordElement(listVal, 5) &&
+        isValidKeywordElement(listVal, 6) &&
+        isValidKeywordElement(listVal, 7) &&
+        isValidKeywordElement(listVal, 8) &&
+        isValidKeywordElement(listVal, 9) &&
+        isValidKeywordElement(listVal, 10) &&
+        isValidKeywordElement(listVal, 11) &&
+        isValidKeywordElement(listVal, 12) &&
+        isValidKeywordElement(listVal, 13) &&
+        isValidKeywordElement(listVal, 14) &&
+        isValidKeywordElement(listVal, 15) &&
+        isValidKeywordElement(listVal, 16) &&
+        isValidKeywordElement(listVal, 17) &&
+        isValidKeywordElement(listVal, 18) &&
+        isValidKeywordElement(listVal, 19);
+    }
+
+    // Ensure immutable fields are not modified on update
+    function areImmutableFieldsUnchanged(fields) {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(fields);
+    }
+
+    // ===============================================================
+    // Domain Validators (Used in BOTH create and update)
+    // ===============================================================
+
+    function isValidBubble(data) {
+      let allowed = ['id', 'emoji', 'category', 'factKo', 'enabled', 'updatedAtMs'];
+      return hasNoForbiddenSecretKeys() &&
+        hasRequiredFields(allowed) &&
+        hasOnlyAllowedFields(allowed) &&
+        isValidString(data.id, 1, 128) &&
+        isValidString(data.emoji, 1, 32) &&
+        isValidString(data.category, 1, 32) &&
+        isValidString(data.factKo, 1, 500) &&
+        data.enabled is bool &&
+        isValidTimestampMs(data.updatedAtMs);
+    }
+
+    function isValidRoutine(data) {
+      let allowed = ['id', 'titleKo', 'emoji', 'goalPrompt', 'sourceBadge', 'pinned', 'stepCount', 'createdAtMs'];
+      return hasNoForbiddenSecretKeys() &&
+        hasRequiredFields(allowed) &&
+        hasOnlyAllowedFields(allowed) &&
+        isValidString(data.id, 1, 128) &&
+        isValidString(data.titleKo, 1, 200) &&
+        isValidString(data.emoji, 1, 32) &&
+        isValidBoundedString(data.goalPrompt) &&
+        data.goalPrompt.size() >= 1 &&
+        isValidString(data.sourceBadge, 1, 64) &&
+        data.pinned is bool &&
+        isValidIntInRange(data.stepCount, 1, 50) &&
+        isValidTimestampMs(data.createdAtMs);
+    }
+
+    function isValidWatcher(data) {
+      let allowed = ['id', 'title', 'targetAppOrUrl', 'keywords', 'mode', 'enabled', 'hitCount', 'updatedAtMs'];
+      return hasNoForbiddenSecretKeys() &&
+        hasRequiredFields(allowed) &&
+        hasOnlyAllowedFields(allowed) &&
+        isValidString(data.id, 1, 128) &&
+        isValidString(data.title, 1, 200) &&
+        isValidString(data.targetAppOrUrl, 0, 500) &&
+        isValidKeywordsList(data.keywords) &&
+        isValidString(data.mode, 1, 64) &&
+        data.mode in ['NOTIFY_ONLY', 'HOLD_FOR_APPROVAL'] &&
+        data.enabled is bool &&
+        isValidIntInRange(data.hitCount, 0, 1000000) &&
+        isValidTimestampMs(data.updatedAtMs);
+    }
+
+    function isValidReceipt(data) {
+      let allowed = ['id', 'timestampMs', 'toolName', 'summaryKo', 'detailKo', 'undoHintKo', 'undoToolName', 'undoArgsJson', 'undone'];
+      return hasNoForbiddenSecretKeys() &&
+        hasRequiredFields(allowed) &&
+        hasOnlyAllowedFields(allowed) &&
+        isValidString(data.id, 1, 128) &&
+        isValidTimestampMs(data.timestampMs) &&
+        isValidString(data.toolName, 1, 100) &&
+        isValidString(data.summaryKo, 1, 500) &&
+        isValidBoundedString(data.detailKo) &&
+        isValidString(data.undoHintKo, 0, 500) &&
+        isValidString(data.undoToolName, 0, 100) &&
+        isValidBoundedString(data.undoArgsJson) &&
+        data.undone is bool;
+    }
+
+    // ===============================================================
+    // User-Scoped Sync Rules (/users/{userId})
+    // ===============================================================
+
+    match /users/{userId} {
+      // Bare user root document is not writable/readable directly;
+      // sync collections are strictly isolated to validated subcollections.
+      allow read, write: if false;
+
+      // 1. Human Memory Bubbles
+      match /bubbles/{bubbleId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) &&
+          isValidBubble(request.resource.data) &&
+          request.resource.data.id == bubbleId;
+        allow update: if isOwner(userId) &&
+          isValidBubble(request.resource.data) &&
+          request.resource.data.id == bubbleId &&
+          areImmutableFieldsUnchanged(['id']);
+        allow delete: if isOwner(userId);
+      }
+
+      // 2. Personal Routines
+      match /routines/{routineId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) &&
+          isValidRoutine(request.resource.data) &&
+          request.resource.data.id == routineId;
+        allow update: if isOwner(userId) &&
+          isValidRoutine(request.resource.data) &&
+          request.resource.data.id == routineId &&
+          areImmutableFieldsUnchanged(['id', 'createdAtMs']);
+        allow delete: if isOwner(userId);
+      }
+
+      // 3. Proactive Watchers
+      match /watchers/{watcherId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) &&
+          isValidWatcher(request.resource.data) &&
+          request.resource.data.id == watcherId;
+        allow update: if isOwner(userId) &&
+          isValidWatcher(request.resource.data) &&
+          request.resource.data.id == watcherId &&
+          areImmutableFieldsUnchanged(['id']);
+        allow delete: if isOwner(userId);
+      }
+
+      // 4. Action Receipts (1-Tap Undo Metadata)
+      match /receipts/{receiptId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) &&
+          isValidReceipt(request.resource.data) &&
+          request.resource.data.id == receiptId;
+        allow update: if isOwner(userId) &&
+          isValidReceipt(request.resource.data) &&
+          request.resource.data.id == receiptId &&
+          areImmutableFieldsUnchanged(['id', 'timestampMs', 'toolName', 'undoToolName', 'undoArgsJson']);
+        allow delete: if isOwner(userId);
+      }
+
+      // 5. Blind Credential Vault — NEVER permitted in Firestore
+      match /vault/{document=**} {
+        allow read, write: if false;
+      }
+    }
+
+    // ===============================================================
+    // Global Default Deny Catch-All
+    // ===============================================================
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

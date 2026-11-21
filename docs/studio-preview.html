@@ -1,0 +1,1995 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Hanson v6.1 — Flagship Generative Motion &amp; Companion UI</title>
+  <style>
+    :root {
+      --paper: #FAFAFA;
+      --surface: #FFFFFF;
+      --surface-high: #F4F4F5;
+      --surface-top: #E4E4E7;
+      --line: #E4E4E7;
+      --line-strong: #D4D4D8;
+      --ink: #09090B;
+      --ink-secondary: #52525B;
+      --muted: #71717A;
+      --on-ink: #FAFAFA;
+      --dot: rgba(9, 9, 11, 0.08);
+      --scrim: rgba(9, 9, 11, 0.45);
+      --stage-bg: #F4F4F5;
+      --spring-figma: linear(0, 0.0202, 0.0728, 0.1473, 0.2349, 0.329, 0.4242, 0.5165, 0.6032, 0.6824, 0.753, 0.8145, 0.867, 0.9109, 0.9466, 0.975, 0.9969, 1.0132, 1.0247, 1.0322, 1.0365, 1.0383, 1.0381, 1.0365, 1.0339, 1.0307, 1.0272, 1.0235, 1.0199, 1.0165, 1.0133, 1.0105, 1.008, 1.0059, 1.004, 1.0025, 1.0014, 1.0004, 0.9997, 0.9992, 0.9989, 0.9986, 0.9985, 1);
+      --ease-out-expo: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+
+    body.carbon-dark {
+      --paper: #09090B;
+      --surface: #121214;
+      --surface-high: #18181B;
+      --surface-top: #27272A;
+      --line: #27272A;
+      --line-strong: #3F3F46;
+      --ink: #FAFAFA;
+      --ink-secondary: #A1A1AA;
+      --muted: #71717A;
+      --on-ink: #09090B;
+      --dot: rgba(250, 250, 250, 0.07);
+      --scrim: rgba(9, 9, 11, 0.72);
+      --stage-bg: #09090B;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html, body {
+      height: 100%;
+      background: var(--stage-bg);
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Pretendard", "Noto Sans KR", "Inter", sans-serif;
+      -webkit-font-smoothing: antialiased;
+      transition: background-color 0.28s ease, color 0.28s ease;
+    }
+
+    .mono {
+      font-family: "JetBrains Mono", "SFMono-Regular", Consolas, Menlo, monospace;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .hidden { display: none !important; }
+
+    button {
+      font: inherit;
+      color: inherit;
+      background: none;
+      border: none;
+      cursor: pointer;
+      user-select: none;
+      transition: transform 0.16s var(--ease-out-expo), background-color 0.18s ease, border-color 0.18s ease, opacity 0.18s ease;
+    }
+    button:active { transform: scale(0.96); }
+
+    /* Showcase Layout Stage */
+    .stage {
+      min-height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+
+    /* Figma 390x844 Mobile Canvas (auto-fits shorter laptop/IDE viewports cleanly) */
+    .device-frame {
+      position: relative;
+      width: 390px;
+      height: min(844px, calc(100vh - 28px));
+      min-height: 600px;
+      max-width: 100%;
+      background-color: var(--paper);
+      background-image: radial-gradient(var(--dot) 1.15px, transparent 1.15px);
+      background-size: 24px 24px;
+      background-position: 12px 12px;
+      border: 1.5px solid var(--line-strong);
+      border-radius: 38px;
+      box-shadow: 0 4px 0 0 var(--ink), 0 24px 48px rgba(0, 0, 0, 0.08);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      transition: background-color 0.28s ease, border-color 0.28s ease;
+    }
+
+    @media (max-height: 820px) and (min-width: 421px) {
+      .hero-stage {
+        padding: 6px 8px 2px !important;
+        gap: 10px !important;
+      }
+      .hero-stage:not(.compact) .orb-canvas {
+        width: 108px !important;
+        height: 108px !important;
+      }
+      .hero-stage:not(.compact) .orb-orbit {
+        inset: 12px !important;
+      }
+      .hero-stage:not(.compact) .orb-core {
+        width: 56px !important;
+        height: 56px !important;
+      }
+      .hero-title {
+        font-size: 21px !important;
+      }
+      .hero-stage.compact {
+        padding: 2px 2px 0 !important;
+      }
+      .surface-card {
+        padding: 14px !important;
+      }
+      .storyboard-box {
+        padding: 9px 11px !important;
+        margin-bottom: 9px !important;
+      }
+      .sb-svg {
+        height: 32px !important;
+      }
+      .morph-chip-row {
+        margin-bottom: 10px !important;
+      }
+    }
+
+    @media (max-width: 420px) {
+      .stage { padding: 0; }
+      .device-frame {
+        width: 100vw;
+        height: 100vh;
+        border-radius: 0;
+        border: none;
+        box-shadow: none;
+      }
+    }
+
+    /* 1. Breathable Minimal Top Bar (Figma Node 5:4) */
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 18px 10px;
+      z-index: 10;
+      flex-shrink: 0;
+    }
+
+    .mode-segment {
+      display: inline-flex;
+      gap: 4px;
+      padding: 3px;
+      border-radius: 999px;
+      background: var(--surface-high);
+      border: 1px solid var(--line);
+    }
+
+    .mode-pill {
+      height: 30px;
+      padding: 0 14px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--ink-secondary);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .mode-pill.active {
+      background: var(--ink);
+      color: var(--on-ink);
+      font-weight: 800;
+    }
+
+    .topbar-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .circle-btn {
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      color: var(--ink);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .circle-btn:hover {
+      border-color: var(--line-strong);
+      background: var(--surface-high);
+    }
+
+    .circle-btn.active {
+      background: var(--ink);
+      color: var(--on-ink);
+      border-color: var(--ink);
+    }
+
+    /* 2. Morphing Dynamic Execution Island (Figma Node 5:143) */
+    .dynamic-island-wrap {
+      padding: 0 18px;
+      margin-bottom: 4px;
+      flex-shrink: 0;
+    }
+
+    .dynamic-island {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 9px 10px 9px 14px;
+      border-radius: 999px;
+      background: var(--surface-high);
+      border: 1.3px solid var(--ink);
+      animation: figmaSpringX 0.45s var(--spring-figma) both;
+    }
+
+    .island-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--ink);
+      flex-shrink: 0;
+      animation: figmaIslandPulse 1.6s ease-in-out infinite;
+    }
+
+    .island-text {
+      flex: 1;
+      min-width: 0;
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .island-stop {
+      height: 26px;
+      padding: 0 11px;
+      border-radius: 999px;
+      background: var(--ink);
+      color: var(--on-ink);
+      font-size: 11px;
+      font-weight: 800;
+    }
+
+    /* 3. Scrollable Main Canvas */
+    .main-viewport {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 4px 18px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      scrollbar-width: none;
+    }
+    .main-viewport::-webkit-scrollbar { display: none; }
+
+    /* 4. Living Presence Hero Stage (Figma Node 5:20) */
+    .hero-stage {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      text-align: center;
+      padding: 18px 8px 6px;
+      transition: padding 0.35s var(--ease-out-expo), gap 0.35s var(--ease-out-expo);
+      gap: 16px;
+      flex-shrink: 0;
+    }
+
+    .hero-stage.compact {
+      flex-direction: row;
+      text-align: left;
+      padding: 6px 4px 2px;
+      gap: 12px;
+    }
+
+    .orb-canvas {
+      position: relative;
+      width: 148px;
+      height: 148px;
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: width 0.35s var(--ease-out-expo), height 0.35s var(--ease-out-expo);
+    }
+
+    .hero-stage.compact .orb-canvas {
+      width: 54px;
+      height: 54px;
+    }
+
+    .orb-halo {
+      position: absolute;
+      inset: 2px;
+      border-radius: 50%;
+      border: 1.2px solid var(--line-strong);
+      animation: figmaHaloBreath 3s ease-in-out infinite;
+    }
+
+    .orb-orbit {
+      position: absolute;
+      inset: 18px;
+      border-radius: 50%;
+      border: 1.2px dashed var(--ink);
+      opacity: 0.72;
+      animation: figmaOrbitRotate 3s linear infinite;
+    }
+
+    .hero-stage.compact .orb-orbit {
+      inset: 6px;
+    }
+
+    .orb-satellite {
+      position: absolute;
+      top: -4px;
+      left: 50%;
+      width: 8px;
+      height: 8px;
+      margin-left: -4px;
+      border-radius: 50%;
+      background: var(--ink);
+    }
+
+    .hero-stage.compact .orb-satellite {
+      width: 5px;
+      height: 5px;
+      top: -2.5px;
+      margin-left: -2.5px;
+    }
+
+    .orb-core {
+      position: relative;
+      width: 76px;
+      height: 76px;
+      border-radius: 50%;
+      background: var(--ink);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 3.5px;
+      transition: width 0.35s var(--ease-out-expo), height 0.35s var(--ease-out-expo), transform 0.25s ease;
+    }
+
+    .orb-canvas:hover .orb-core { transform: scale(1.04); }
+
+    .hero-stage.compact .orb-core {
+      width: 34px;
+      height: 34px;
+      gap: 2px;
+    }
+
+    .wave-bar {
+      width: 3.5px;
+      border-radius: 999px;
+      background: var(--on-ink);
+      transform-origin: center center;
+      animation: figmaWaveBar 3s ease-in-out infinite;
+    }
+
+    .hero-stage.compact .wave-bar { width: 2px; }
+    .wb-0 { height: 14px; animation-delay: 0s; }
+    .wb-1 { height: 24px; animation-delay: 0.14s; }
+    .wb-2 { height: 32px; animation-delay: 0.28s; }
+    .wb-3 { height: 22px; animation-delay: 0.42s; }
+    .wb-4 { height: 13px; animation-delay: 0.56s; }
+    .hero-stage.compact .wb-0 { height: 8px; }
+    .hero-stage.compact .wb-1 { height: 14px; }
+    .hero-stage.compact .wb-2 { height: 18px; }
+    .hero-stage.compact .wb-3 { height: 12px; }
+    .hero-stage.compact .wb-4 { height: 7px; }
+
+    .orb-canvas.listening .orb-halo,
+    .orb-canvas.listening .orb-orbit,
+    .orb-canvas.listening .wave-bar {
+      animation-duration: 1.1s;
+    }
+
+    .hero-copy {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .hero-title {
+      font-size: 25px;
+      font-weight: 800;
+      letter-spacing: -0.6px;
+      line-height: 1.25;
+      color: var(--ink);
+    }
+
+    .hero-stage.compact .hero-title {
+      font-size: 15px;
+      letter-spacing: -0.2px;
+    }
+
+    .stagger-word {
+      display: inline-block;
+      animation: figmaTextStaggerWord 0.55s var(--ease-out-expo) both;
+    }
+    .stagger-word:nth-child(2) { animation-delay: 0.16s; }
+
+    .hero-sub {
+      font-size: 13px;
+      line-height: 1.5;
+      color: var(--ink-secondary);
+      max-width: 280px;
+    }
+
+    .hero-stage.compact .hero-sub {
+      font-size: 11.5px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    /* 5. Single Contextual Focus Card & Interactive Morph Card (Figma Nodes 5:34 & 5:91) */
+    .brand-card {
+      background: var(--surface);
+      border: 1.4px solid var(--ink);
+      border-radius: 26px;
+      padding: 18px;
+      box-shadow: 0 3px 0 0 var(--ink);
+      animation: figmaCardSpringEnter 0.56s var(--spring-figma) both;
+    }
+
+    .surface-card {
+      background: var(--surface);
+      border: 1px solid var(--line-strong);
+      border-radius: 26px;
+      padding: 18px;
+      animation: figmaCardSpringEnter 0.52s var(--spring-figma) both;
+    }
+
+    .focus-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+
+    .soft-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: var(--surface-high);
+      border: 1px solid var(--line);
+      font-size: 10.5px;
+      font-weight: 700;
+      color: var(--ink-secondary);
+    }
+
+    .pager-controls {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      color: var(--muted);
+      font-weight: 700;
+    }
+
+    .pager-btn {
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--ink);
+      font-weight: 800;
+    }
+    .pager-btn:hover { background: var(--surface-high); }
+
+    .focus-title {
+      font-size: 16px;
+      font-weight: 800;
+      line-height: 1.35;
+      margin-bottom: 6px;
+      letter-spacing: -0.2px;
+    }
+
+    .focus-body {
+      font-size: 12.5px;
+      line-height: 1.5;
+      color: var(--ink-secondary);
+      margin-bottom: 12px;
+    }
+
+    .progress-track {
+      width: 100%;
+      height: 4px;
+      border-radius: 999px;
+      background: var(--surface-high);
+      overflow: hidden;
+      margin-bottom: 14px;
+    }
+
+    .progress-fill {
+      height: 100%;
+      border-radius: 999px;
+      background: var(--ink);
+      transition: width 0.4s var(--ease-out-expo);
+    }
+
+    .cta-row {
+      display: flex;
+      gap: 8px;
+    }
+
+    .btn-primary {
+      flex: 1.25;
+      height: 40px;
+      padding: 0 14px;
+      border-radius: 999px;
+      background: var(--ink);
+      color: var(--on-ink);
+      font-size: 12px;
+      font-weight: 800;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+    }
+
+    .btn-secondary {
+      flex: 0.85;
+      height: 40px;
+      padding: 0 14px;
+      border-radius: 999px;
+      background: var(--surface-high);
+      border: 1px solid var(--line);
+      color: var(--ink);
+      font-size: 12px;
+      font-weight: 700;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    /* 6. NL-to-Interactive Morph Moat Stage (Figma Screen 2) */
+    .morph-synthesis-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      border-radius: 999px;
+      background: var(--surface);
+      border: 1px solid var(--line-strong);
+      font-size: 11px;
+      font-weight: 700;
+      align-self: flex-start;
+      animation: figmaCardSpringEnter 0.36s var(--ease-out-expo) both;
+    }
+
+    .user-bubble-row {
+      display: flex;
+      justify-content: flex-end;
+      animation: figmaCardSpringEnter 0.3s var(--ease-out-expo) both;
+    }
+
+    .user-bubble {
+      max-width: 82%;
+      padding: 10px 14px;
+      border-radius: 20px;
+      background: var(--ink);
+      color: var(--on-ink);
+      font-size: 12.5px;
+      font-weight: 700;
+      line-height: 1.45;
+    }
+
+    /* Interactive Motion Storyboard Canvas inside Morph Card */
+    .storyboard-box {
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 12px;
+      margin-bottom: 12px;
+      cursor: pointer;
+    }
+
+    .sb-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 8px;
+    }
+
+    .sb-svg {
+      width: 100%;
+      height: 44px;
+      display: block;
+    }
+
+    .sb-stops {
+      display: flex;
+      justify-content: space-between;
+      gap: 6px;
+      margin: 4px 0 8px;
+    }
+
+    .sb-stop {
+      text-align: left;
+      flex: 1;
+      padding: 4px 6px;
+      border-radius: 8px;
+      transition: background-color 0.16s ease;
+    }
+    .sb-stop.active { background: var(--surface-high); }
+
+    .sb-stop-name { font-size: 10.5px; font-weight: 700; color: var(--ink); }
+    .sb-stop-time { font-size: 9.5px; color: var(--muted); }
+
+    .sb-scrub {
+      position: relative;
+      height: 4px;
+      border-radius: 999px;
+      background: var(--surface-high);
+      cursor: pointer;
+    }
+
+    .sb-scrub-fill {
+      position: absolute;
+      left: 0;
+      top: 0;
+      height: 100%;
+      background: var(--ink);
+      border-radius: 999px;
+      width: 0%;
+    }
+
+    .sb-playhead {
+      position: absolute;
+      top: -3px;
+      width: 12px;
+      height: 10px;
+      margin-left: -6px;
+      border-radius: 999px;
+      background: var(--ink);
+      left: 0%;
+    }
+
+    /* Split Bill Interactive Row */
+    .split-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+
+    .split-amount {
+      font-size: 26px;
+      font-weight: 900;
+      letter-spacing: -0.6px;
+      line-height: 1.1;
+    }
+
+    .stepper-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 5px 8px;
+      border-radius: 999px;
+      background: var(--surface-high);
+      border: 1px solid var(--line-strong);
+    }
+
+    .step-btn {
+      width: 26px;
+      height: 26px;
+      border-radius: 50%;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      font-size: 15px;
+      font-weight: 800;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .morph-chip-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 14px;
+    }
+
+    .toggle-chip {
+      padding: 5px 11px;
+      border-radius: 999px;
+      background: var(--surface-high);
+      border: 1px solid var(--line);
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--ink-secondary);
+    }
+    .toggle-chip.active {
+      background: var(--ink);
+      color: var(--on-ink);
+      border-color: var(--ink);
+    }
+
+    /* Selectable Morph Items (Menu / Timeline / Call) */
+    .morph-option-list {
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+      margin-bottom: 14px;
+    }
+
+    .morph-option {
+      width: 100%;
+      text-align: left;
+      padding: 11px 13px;
+      border-radius: 16px;
+      background: var(--surface-high);
+      border: 1px solid var(--line);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .morph-option.selected {
+      background: var(--ink);
+      color: var(--on-ink);
+      border-color: var(--ink);
+    }
+
+    .morph-option-sub {
+      font-size: 11px;
+      opacity: 0.78;
+      margin-top: 2px;
+    }
+
+    /* High Stakes Approval Card inside viewport (Figma Screen 3) */
+    .safety-card {
+      background: var(--surface);
+      border: 1.5px solid var(--ink);
+      border-radius: 26px;
+      padding: 18px;
+      animation: figmaCardSpringEnter 0.44s var(--spring-figma) both;
+    }
+
+    /* 7. Bottom Dock Stack (Spring Undo Pill + Quick Pill Dock + Floating Composer) */
+    .bottom-stack {
+      padding: 4px 16px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      flex-shrink: 0;
+      z-index: 12;
+    }
+
+    .undo-toast {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 8px 8px 14px;
+      border-radius: 999px;
+      background: var(--ink);
+      color: var(--on-ink);
+      animation: figmaUndoSpringUp 0.52s var(--spring-figma) both;
+    }
+
+    .undo-toast-text {
+      flex: 1;
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .undo-cta {
+      padding: 6px 12px;
+      border-radius: 999px;
+      background: var(--paper);
+      color: var(--ink);
+      font-size: 11.5px;
+      font-weight: 800;
+    }
+
+    .quick-dock {
+      display: flex;
+      gap: 5px;
+      overflow-x: auto;
+      scrollbar-width: none;
+      padding-bottom: 2px;
+      animation: figmaDockSpringUp 0.58s var(--spring-figma) both;
+    }
+    .quick-dock::-webkit-scrollbar { display: none; }
+
+    .dock-pill {
+      flex-shrink: 0;
+      height: 30px;
+      padding: 0 9.5px;
+      border-radius: 999px;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--ink);
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .dock-pill.active {
+      background: var(--ink);
+      color: var(--on-ink);
+      border-color: var(--ink);
+    }
+
+    .composer-pill {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 7px 7px 9px;
+      border-radius: 28px;
+      background: var(--surface);
+      border: 1.2px solid var(--line-strong);
+      box-shadow: 0 2px 12px rgba(0, 0, 0, 0.04);
+    }
+
+    .composer-mic {
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      background: var(--surface-high);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    .composer-mic.active {
+      background: var(--ink);
+      color: var(--on-ink);
+    }
+
+    .composer-input {
+      flex: 1;
+      min-width: 0;
+      border: none;
+      background: transparent;
+      color: var(--ink);
+      font-family: inherit;
+      font-size: 13px;
+      font-weight: 500;
+      outline: none;
+    }
+    .composer-input::placeholder { color: var(--muted); }
+
+    .composer-send {
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      background: var(--ink);
+      color: var(--on-ink);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+
+    /* 8. Modal Bottom Sheet Drawer (Figma Screen 4, Node 5:202) */
+    .sheet-backdrop {
+      position: absolute;
+      inset: 0;
+      background: var(--scrim);
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-end;
+      z-index: 40;
+      animation: fadeOverlay 0.2s ease both;
+    }
+
+    .bottom-sheet {
+      background: var(--surface);
+      border-top: 1.4px solid var(--line-strong);
+      border-radius: 28px 28px 0 0;
+      padding: 10px 18px 22px;
+      max-height: 78%;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      animation: figmaSheetSlideUp 0.46s var(--spring-figma) both;
+    }
+
+    .drag-handle {
+      width: 36px;
+      height: 4px;
+      border-radius: 999px;
+      background: var(--line-strong);
+      margin: 0 auto;
+    }
+
+    .sheet-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .sheet-tabs {
+      display: flex;
+      gap: 6px;
+      overflow-x: auto;
+      scrollbar-width: none;
+    }
+
+    .sheet-scroll {
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding-bottom: 8px;
+    }
+
+    .sheet-box {
+      background: var(--surface-high);
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      padding: 13px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .bubble-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 9px 12px;
+      border-radius: 999px;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .bubble-item.on {
+      background: var(--ink);
+      color: var(--on-ink);
+      border-color: var(--ink);
+    }
+
+    .sheet-input-row {
+      display: flex;
+      gap: 6px;
+      margin-top: 2px;
+    }
+
+    .sheet-input {
+      flex: 1;
+      height: 36px;
+      padding: 0 12px;
+      border-radius: 999px;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      color: var(--ink);
+      font-size: 12px;
+      outline: none;
+    }
+
+    /* Studio Mode View */
+    .studio-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 10px 12px;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+    }
+
+    /* Keyframes synced with Figma get_motion_context */
+    @keyframes figmaHaloBreath {
+      0%, 100% { transform: scale(1); opacity: 0.45; }
+      50% { transform: scale(1.14); opacity: 0.92; }
+    }
+
+    @keyframes figmaOrbitRotate {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(-360deg); }
+    }
+
+    @keyframes figmaWaveBar {
+      0%, 100% { transform: scaleY(0.58); }
+      35% { transform: scaleY(1.38); }
+      65% { transform: scaleY(0.68); }
+      85% { transform: scaleY(1.22); }
+    }
+
+    @keyframes figmaTextStaggerWord {
+      from {
+        opacity: 0;
+        transform: translateY(14px);
+        filter: blur(7px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+        filter: blur(0);
+      }
+    }
+
+    @keyframes figmaCardSpringEnter {
+      from {
+        opacity: 0;
+        transform: translateY(22px) scale(0.94);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+      }
+    }
+
+    @keyframes figmaUndoSpringUp {
+      from {
+        opacity: 0;
+        transform: translateY(36px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    @keyframes figmaDockSpringUp {
+      from {
+        opacity: 0;
+        transform: translateY(16px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    @keyframes figmaSheetSlideUp {
+      from {
+        opacity: 0.25;
+        transform: translateY(140px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    @keyframes figmaSpringX {
+      from { transform: scaleX(0.86); opacity: 0; }
+      to { transform: scaleX(1); opacity: 1; }
+    }
+
+    @keyframes figmaIslandPulse {
+      0%, 100% { transform: scale(1); opacity: 1; }
+      50% { transform: scale(1.45); opacity: 0.65; }
+    }
+
+    @keyframes fadeOverlay {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="stage">
+    <main class="device-frame" aria-label="Hanson Flagship Mobile Agent Preview">
+
+      <!-- 1. Minimal Mode Header (일상 | 스튜디오) + Action Circles -->
+      <header class="topbar">
+        <div class="mode-segment" role="tablist" aria-label="화면 모드">
+          <button id="mode-human-btn" class="mode-pill active" role="tab" aria-selected="true" onclick="setUxMode('human')">일상</button>
+          <button id="mode-studio-btn" class="mode-pill" role="tab" aria-selected="false" onclick="setUxMode('studio')">스튜디오</button>
+        </div>
+
+        <div class="topbar-actions">
+          <button id="voice-toggle-btn" class="circle-btn" title="실시간 보이스 파형" aria-label="보이스 전환" onclick="toggleVoiceState()">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Zm7 10a7 7 0 0 1-14 0M12 19v3M8 22h8"/></svg>
+          </button>
+          <button id="theme-toggle-btn" class="circle-btn" title="Paper Light / Carbon Dark 전환" aria-label="명암 테마 전환" onclick="toggleTheme()">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 3v18a9 9 0 0 0 0-18Z" fill="currentColor"/></svg>
+          </button>
+          <button id="shield-drawer-btn" class="circle-btn" title="안전·취향·클라우드 동기화 서랍" aria-label="도우미 서랍 열기" onclick="openDrawer('safety')">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <!-- 2. Morphing Dynamic Execution Island -->
+      <div id="dynamic-island-wrap" class="dynamic-island-wrap hidden">
+        <div class="dynamic-island">
+          <span class="island-dot"></span>
+          <span id="island-status-text" class="island-text">D-Artemis 정렬 · 작업 준비 중</span>
+          <button id="island-stop-btn" class="island-stop" onclick="stopActiveTask()">중지</button>
+        </div>
+      </div>
+
+      <!-- 3. Scrollable Main Canvas -->
+      <section class="main-viewport">
+
+        <!-- Human View -->
+        <div id="human-view" style="display:flex;flex-direction:column;gap:14px;">
+          <!-- Living Presence Orb Hero -->
+          <div id="hero-stage" class="hero-stage">
+            <div id="living-orb" class="orb-canvas" title="탭해서 말하거나 파형 반응 보기" onclick="toggleVoiceState()">
+              <div class="orb-halo"></div>
+              <div class="orb-orbit"><span class="orb-satellite"></span></div>
+              <div class="orb-core">
+                <span class="wave-bar wb-0"></span>
+                <span class="wave-bar wb-1"></span>
+                <span class="wave-bar wb-2"></span>
+                <span class="wave-bar wb-3"></span>
+                <span class="wave-bar wb-4"></span>
+              </div>
+            </div>
+            <div class="hero-copy">
+              <h1 id="hero-greeting" class="hero-title">
+                <span class="stagger-word">편안한</span> <span class="stagger-word">저녁이에요</span>
+              </h1>
+              <p id="hero-subtitle" class="hero-sub">말 한마디를 살아있는 화면과 행동으로 바꿔드려요</p>
+            </div>
+          </div>
+
+          <!-- Single Contextual Focus Card (Idle Home) OR NL-to-Interactive Morph Stage -->
+          <div id="focus-deck-container">
+            <article class="brand-card" id="focus-card">
+              <div class="focus-head">
+                <span id="focus-badge" class="soft-tag">오늘 브리핑 · D-Artemis 정렬됨</span>
+                <div class="pager-controls">
+                  <span id="focus-counter" class="mono">1 / 3</span>
+                  <button id="focus-prev-btn" class="pager-btn" aria-label="이전 카드" onclick="stepFocusSlide(-1)">‹</button>
+                  <button id="focus-next-btn" class="pager-btn" aria-label="다음 카드" onclick="stepFocusSlide(1)">›</button>
+                </div>
+              </div>
+              <h2 id="focus-title" class="focus-title">성수동 저녁 약속 · 출발 25분 전</h2>
+              <p id="focus-body" class="focus-body">기억해 둔 ‘조용한 창가 자리’ 취향에 맞춰 3곳을 동선 순으로 정리했어요.</p>
+              <div class="progress-track">
+                <div id="focus-progress" class="progress-fill" style="width:66%;"></div>
+              </div>
+              <div class="cta-row">
+                <button id="focus-primary-btn" class="btn-primary" onclick="runFocusPrimary()">✦ 코스 UI로 변형하기</button>
+                <button id="focus-secondary-btn" class="btn-secondary" onclick="runFocusSecondary()">타이머 3분</button>
+              </div>
+            </article>
+          </div>
+
+          <!-- Live NL -> Interactive Morph Surface Stage -->
+          <div id="morph-stage" class="hidden" style="display:flex;flex-direction:column;gap:10px;">
+            <div id="morph-user-row" class="user-bubble-row">
+              <div id="morph-user-bubble" class="user-bubble"></div>
+            </div>
+            <div class="morph-synthesis-pill">
+              <span class="mono" style="font-size:10px;">✦</span>
+              <span id="morph-latency-label">자연어 → 인터랙티브 UI + 모션 합성 (64ms)</span>
+            </div>
+            <article class="surface-card" id="morph-card-root"></article>
+          </div>
+
+          <!-- High-Stakes Safety Card / Takeover Card (Shown only when triggered) -->
+          <div id="safety-alert-container" class="hidden"></div>
+        </div>
+
+        <!-- Studio Pro View -->
+        <div id="studio-view" class="hidden" style="display:flex;flex-direction:column;gap:12px;">
+          <div class="studio-bar">
+            <div>
+              <div style="font-size:13px;font-weight:800;">Studio Pro Cockpit</div>
+              <div class="mono" style="font-size:10.5px;color:var(--muted);">v6.0 · 42 tools · MCP 12</div>
+            </div>
+            <div class="mode-segment">
+              <button class="mode-pill active" id="st-auto" onclick="setStudioWorkMode('Auto')">Auto</button>
+              <button class="mode-pill" id="st-plan" onclick="setStudioWorkMode('Plan')">Plan</button>
+              <button class="mode-pill" id="st-build" onclick="setStudioWorkMode('Build')">Build</button>
+            </div>
+          </div>
+
+          <article class="surface-card" style="padding:14px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+              <span class="soft-tag" id="studio-mode-label">WORK MODE · Auto</span>
+              <span class="mono" style="font-size:10.5px;color:var(--muted);">Bridge :18889 READY</span>
+            </div>
+            <div style="font-size:13.5px;font-weight:800;margin-bottom:4px;">Work-with-Apps &amp; 생성형 마이크로 보드</div>
+            <p style="font-size:12px;color:var(--ink-secondary);line-height:1.45;margin-bottom:10px;">일상 모드에서 변형한 인터랙티브 위젯이 무채색 마이크로 앱으로 바로 연결됩니다.</p>
+            <div id="studio-board-preview" style="background:var(--surface-high);border:1px solid var(--line);border-radius:16px;padding:12px;font-size:12px;">
+              현재 보드에 고정된 위젯: <strong id="studio-pinned-name">기본 4분면 원터치 보드</strong>
+            </div>
+          </article>
+
+          <article class="surface-card" style="padding:14px;">
+            <div style="font-size:12px;font-weight:800;margin-bottom:8px;">슬래시 · 멘션 빠른 실행</div>
+            <div class="morph-chip-row" style="margin-bottom:0;">
+              <button class="toggle-chip" onclick="dispatchUserPrompt('성수동 저녁 4명 148,000원 더치페이하고 코스 영상 보드 만들어줘');setUxMode('human')">/morph 더치페이</button>
+              <button class="toggle-chip" onclick="openDrawer('safety')">/vault 안전 금고</button>
+              <button class="toggle-chip" onclick="triggerTakeoverDemo()">/takeover 시뮬레이션</button>
+            </div>
+          </article>
+        </div>
+
+      </section>
+
+      <!-- 4. Bottom Dock: Spring Undo Toast + Quick Pill Dock + Floating Composer -->
+      <footer class="bottom-stack">
+        <div id="undo-toast" class="undo-toast hidden">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6M3 13a9 9 0 1 0 3-6.7L3 7"/></svg>
+          <span id="undo-toast-text" class="undo-toast-text">3분 파스타 타이머 시작됨</span>
+          <button id="undo-action-btn" class="undo-cta" onclick="executeUndo()">되돌리기</button>
+        </div>
+
+        <nav class="quick-dock" aria-label="빠른 도구">
+          <button id="dock-bubbles-btn" class="dock-pill" onclick="openDrawer('bubbles')">🫧 취향 <span id="dock-bubbles-count">3</span></button>
+          <button id="dock-routines-btn" class="dock-pill" onclick="openDrawer('routines')">⚡ 루틴 <span id="dock-routines-count">3</span></button>
+          <button id="dock-morph-btn" class="dock-pill" onclick="cycleMorphShowcase()">✦ UI 변형</button>
+          <button id="dock-call-btn" class="dock-pill" onclick="openDrawer('call')">📞 전화</button>
+          <button id="dock-safety-btn" class="dock-pill" onclick="openDrawer('safety')">🛡️ 볼트</button>
+        </nav>
+
+        <form class="composer-pill" onsubmit="event.preventDefault();submitComposer();">
+          <button type="button" id="composer-mic-btn" class="composer-mic" aria-label="음성 입력" onclick="toggleVoiceState()">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Zm7 10a7 7 0 0 1-14 0M12 19v3M8 22h8"/></svg>
+          </button>
+          <input id="prompt-input" class="composer-input" type="text" placeholder="말 한마디면 UI·모션·실행으로 바뀌어요" autocomplete="off" />
+          <button id="composer-send-btn" type="submit" class="composer-send" aria-label="보내기">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+          </button>
+        </form>
+      </footer>
+
+      <!-- 5. On-Demand Modal Bottom Sheet (Figma Screen 4) -->
+      <div id="sheet-backdrop" class="sheet-backdrop hidden" onclick="if(event.target===this) closeDrawer()">
+        <div class="bottom-sheet" role="dialog" aria-modal="true" aria-label="나만의 한슨 도우미 서랍">
+          <div class="drag-handle"></div>
+          <div class="sheet-header">
+            <strong style="font-size:16px;font-weight:800;">나만의 한슨 도우미 서랍</strong>
+            <button id="sheet-close-btn" class="toggle-chip" onclick="closeDrawer()">닫기</button>
+          </div>
+          <div class="sheet-tabs">
+            <button id="tab-bubbles" class="dock-pill active" onclick="switchDrawerTab('bubbles')">🫧 취향</button>
+            <button id="tab-routines" class="dock-pill" onclick="switchDrawerTab('routines')">⚡ 루틴</button>
+            <button id="tab-call" class="dock-pill" onclick="switchDrawerTab('call')">📞 전화</button>
+            <button id="tab-safety" class="dock-pill" onclick="switchDrawerTab('safety')">🛡️ 안전·동기화</button>
+          </div>
+          <div id="sheet-body" class="sheet-scroll"></div>
+        </div>
+      </div>
+
+    </main>
+  </div>
+
+  <script>
+    const state = {
+      uxMode: "human",
+      dark: false,
+      voiceListening: false,
+      focusIndex: 0,
+      morphIndex: 0,
+      activeMorph: null,
+      sbPlaying: true,
+      sbProgress: 0.25,
+      sbTimerId: null,
+      drawerTab: "bubbles",
+      drawerOpen: false,
+      recordingDemo: false,
+      recordedSteps: 0,
+      studioWorkMode: "Auto",
+      activeUndo: null,
+      bubbles: [
+        { id: "b1", emoji: "🍗", fact: "음식은 덜 맵게 선호", category: "FOOD", enabled: true },
+        { id: "b2", emoji: "☕", fact: "아메리카노는 연하게", category: "FOOD", enabled: true },
+        { id: "b3", emoji: "🪟", fact: "조용한 창가 자리 선호", category: "PLACE", enabled: true },
+        { id: "b4", emoji: "🚇", fact: "20분 이내 거리는 지하철", category: "COMMUTE", enabled: false }
+      ],
+      routines: [
+        { id: "r1", title: "☕ 출근 3분 브리핑", prompt: "오늘 일정이랑 지하철 도착 정보 브리핑해줘" },
+        { id: "r2", title: "🍜 덜 매운 저녁 추천", prompt: "배민에서 오늘 저녁 메뉴 추천해줘" },
+        { id: "r3", title: "🧾 모임 1/N 더치페이", prompt: "성수동 저녁 4명 148,000원 더치페이하고 코스 영상 보드 만들어줘" }
+      ],
+      cloudSync: {
+        enabled: false,
+        projectId: "my-hanson-project",
+        lastStatus: "로컬 모드 (Vault 비밀키는 절대 업로드 안 됨)"
+      }
+    };
+
+    const MORPH_PRESETS = [
+      "성수동 저녁 4명 148,000원 더치페이하고 코스 영상 보드 만들어줘",
+      "배민에서 오늘 저녁 메뉴 추천해줘",
+      "성수동 산책 동선 스토리보드 만들어줘",
+      "식당에 창가석 전화 대본 준비해줘"
+    ];
+
+    const FOCUS_SLIDES = [
+      {
+        badge: "오늘 브리핑 · D-Artemis 정렬됨",
+        title: "성수동 저녁 약속 · 출발 25분 전",
+        body: "기억해 둔 ‘조용한 창가 자리’ 취향에 맞춰 3곳을 동선 순으로 정리했어요.",
+        progress: "68%",
+        primaryLabel: "✦ 코스 UI로 변형하기",
+        secondaryLabel: "타이머 3분"
+      },
+      {
+        badge: "클립보드 감지 · 바로 실행",
+        title: "방금 복사한 계좌·금액 (148,000원 · 4명)",
+        body: "복사된 정산 금액을 바로 계산 가능한 인터랙티브 더치페이 카드로 바꿀까요?",
+        progress: "100%",
+        primaryLabel: "✦ 더치페이 UI 열기",
+        secondaryLabel: "닫기"
+      },
+      {
+        badge: "시작 준비 · 3/3 연결됨",
+        title: "화면 도우미 · 미니창 · AI 모두 준비 완료",
+        body: "결제나 인증 같은 중요 화면에서는 한슨이 자동으로 멈추고 확인을 요청합니다.",
+        progress: "100%",
+        primaryLabel: "✦ 메뉴 추천 UI 보기",
+        secondaryLabel: "안전 허브"
+      }
+    ];
+
+    function formatWon(n) {
+      return Math.max(0, Math.round(n)).toLocaleString("ko-KR") + "원";
+    }
+
+    function setUxMode(mode) {
+      state.uxMode = mode;
+      const isHuman = mode === "human";
+      document.getElementById("human-view").classList.toggle("hidden", !isHuman);
+      document.getElementById("studio-view").classList.toggle("hidden", isHuman);
+      document.getElementById("mode-human-btn").classList.toggle("active", isHuman);
+      document.getElementById("mode-studio-btn").classList.toggle("active", !isHuman);
+      document.getElementById("mode-human-btn").setAttribute("aria-selected", String(isHuman));
+      document.getElementById("mode-studio-btn").setAttribute("aria-selected", String(!isHuman));
+    }
+
+    function toggleTheme() {
+      state.dark = !state.dark;
+      document.body.classList.toggle("carbon-dark", state.dark);
+    }
+
+    function toggleVoiceState() {
+      state.voiceListening = !state.voiceListening;
+      const orb = document.getElementById("living-orb");
+      const topMic = document.getElementById("voice-toggle-btn");
+      const botMic = document.getElementById("composer-mic-btn");
+      const sub = document.getElementById("hero-subtitle");
+      orb.classList.toggle("listening", state.voiceListening);
+      topMic.classList.toggle("active", state.voiceListening);
+      botMic.classList.toggle("active", state.voiceListening);
+      sub.textContent = state.voiceListening
+        ? "듣고 있어요 · 말씀하시면 바로 인터랙티브 UI로 바뀝니다"
+        : "말 한마디를 살아있는 화면과 행동으로 바꿔드려요";
+    }
+
+    function setStudioWorkMode(m) {
+      state.studioWorkMode = m;
+      document.getElementById("studio-mode-label").textContent = "WORK MODE · " + m;
+      ["Auto", "Plan", "Build"].forEach(k => {
+        document.getElementById("st-" + k.toLowerCase()).classList.toggle("active", k === m);
+      });
+    }
+
+    function renderFocusSlide() {
+      const s = FOCUS_SLIDES[state.focusIndex];
+      document.getElementById("focus-badge").textContent = s.badge;
+      document.getElementById("focus-counter").textContent = `${state.focusIndex + 1} / ${FOCUS_SLIDES.length}`;
+      document.getElementById("focus-title").textContent = s.title;
+      document.getElementById("focus-body").textContent = s.body;
+      document.getElementById("focus-progress").style.width = s.progress;
+      document.getElementById("focus-primary-btn").textContent = s.primaryLabel;
+      document.getElementById("focus-secondary-btn").textContent = s.secondaryLabel;
+    }
+
+    function stepFocusSlide(delta) {
+      state.focusIndex = (state.focusIndex + delta + FOCUS_SLIDES.length) % FOCUS_SLIDES.length;
+      renderFocusSlide();
+    }
+
+    function runFocusPrimary() {
+      if (state.focusIndex === 2) {
+        dispatchUserPrompt(MORPH_PRESETS[1]);
+      } else {
+        dispatchUserPrompt(MORPH_PRESETS[0]);
+      }
+    }
+
+    function runFocusSecondary() {
+      if (state.focusIndex === 0) {
+        dispatchUserPrompt("3분 파스타 타이머 맞춰줘");
+      } else if (state.focusIndex === 1) {
+        stepFocusSlide(1);
+      } else {
+        openDrawer("safety");
+      }
+    }
+
+    function cycleMorphShowcase() {
+      const prompt = MORPH_PRESETS[state.morphIndex % MORPH_PRESETS.length];
+      state.morphIndex = (state.morphIndex + 1) % MORPH_PRESETS.length;
+      dispatchUserPrompt(prompt);
+    }
+
+    function parseAmount(text) {
+      const m1 = text.match(/(\d+(?:\.\d+)?)\s*만(?:\s*(\d+)\s*천)?\s*원?/);
+      if (m1) return Math.round(Number(m1[1]) * 10000 + (m1[2] ? Number(m1[2]) * 1000 : 0));
+      const m2 = text.match(/(\d[\d,]{2,})\s*원?/);
+      return m2 ? Number(m2[1].replace(/,/g, "")) : null;
+    }
+
+    function parsePeople(text) {
+      const m = text.match(/(\d{1,2})\s*(?:명|인분|인)/);
+      return m ? Math.min(30, Math.max(1, Number(m[1]))) : null;
+    }
+
+    function synthesizeMorph(prompt) {
+      const lower = prompt.toLowerCase();
+      const activeFood = state.bubbles.filter(b => b.enabled && (b.category === "FOOD" || b.category === "PLACE"));
+      const amount = parseAmount(prompt);
+      const people = parsePeople(prompt);
+
+      if (lower.includes("더치페이") || lower.includes("정산") || (amount && people)) {
+        const hasCourse = lower.includes("코스") || lower.includes("동선") || lower.includes("영상") || lower.includes("모션") || lower.includes("성수");
+        return {
+          kind: "SPLIT_BILL",
+          prompt,
+          latencyMs: 58,
+          badge: hasCourse ? "더치페이 + 모션 동선 보드" : "실시간 더치페이 계산기",
+          totalWon: amount || 148000,
+          headcount: people || 4,
+          roundTo100: true,
+          stops: hasCourse ? [
+            { name: "뚝섬 18:30", note: "지하철 도착" },
+            { name: "성수 로스터리 19:15", note: "창가석" },
+            { name: "서울숲 20:30", note: "산책 귀가" }
+          ] : [],
+          selectedStop: 0
+        };
+      }
+
+      if (lower.includes("메뉴") || lower.includes("족발") || lower.includes("추천") || lower.includes("배민") || lower.includes("식당")) {
+        return {
+          kind: "FOOD_CURATOR",
+          prompt,
+          latencyMs: 64,
+          badge: "취향 자동 반영 메뉴 보드",
+          bubblesApplied: activeFood.map(b => `${b.emoji} ${b.fact}`),
+          options: [
+            { id: "o1", title: "덜 매운 마늘보쌈 & 순한 족발 (중)", sub: "‘음식은 덜 맵게’ 취향 자동 필터 적용", badge: "38,000원" },
+            { id: "o2", title: "성수 로스터리 담백 브런치 세트", sub: "조용한 창가석 예약 가능 · 도보 6분", badge: "29,000원" },
+            { id: "o3", title: "저자극 들기름 막국수 & 수육", sub: "별점 4.9 · 배달 24분 예정", badge: "31,000원" }
+          ],
+          selectedId: "o1"
+        };
+      }
+
+      if (lower.includes("스토리보드") || lower.includes("동선") || lower.includes("코스") || lower.includes("모션") || lower.includes("산책")) {
+        return {
+          kind: "MEDIA_STORYBOARD",
+          prompt,
+          latencyMs: 71,
+          badge: "모션 동선 스토리보드",
+          stops: [
+            { name: "뚝섬 18:30", note: "출발 포인트" },
+            { name: "성수 로스터리 19:15", note: "창가석 카페" },
+            { name: "서울숲 20:30", note: "저녁 산책" }
+          ],
+          selectedStop: 0
+        };
+      }
+
+      if (lower.includes("전화") || lower.includes("통화") || lower.includes("대본")) {
+        return {
+          kind: "CALL_CONCIERGE",
+          prompt,
+          latencyMs: 52,
+          badge: "전화 전 말할 대본 보드",
+          options: [
+            { id: "c1", title: "1. 인사와 예약 시간 확인", sub: "“안녕하세요, 오늘 저녁 7시 4명 자리 문의드려요.”", badge: "도입" },
+            { id: "c2", title: "2. 조용한 창가석 · 순한맛 요청", sub: "“조용한 창가 쪽과 덜 매운 메뉴 가능할까요?”", badge: "취향" },
+            { id: "c3", title: "3. 확정 후 감사 마무리", sub: "“네, 7시에 성함 한슨으로 뵙겠습니다.”", badge: "완료" }
+          ],
+          selectedId: "c2"
+        };
+      }
+
+      return null;
+    }
+
+    function submitComposer() {
+      const inp = document.getElementById("prompt-input");
+      const val = inp.value.trim();
+      if (!val) return;
+      inp.value = "";
+      dispatchUserPrompt(val);
+    }
+
+    function dispatchUserPrompt(prompt) {
+      const lower = prompt.toLowerCase();
+      document.getElementById("safety-alert-container").classList.add("hidden");
+
+      if (lower.includes("타이머") || lower.includes("알람")) {
+        showDynamicIsland(`실행 중 · ${prompt}`);
+        setTimeout(() => {
+          hideDynamicIsland();
+          showUndoToast(`${prompt} 설정 완료`);
+        }, 650);
+        return;
+      }
+
+      const morph = synthesizeMorph(prompt);
+      if (morph) {
+        state.activeMorph = morph;
+        renderMorphStage();
+      } else {
+        showDynamicIsland(`D-Artemis 정렬 · '${prompt}' 처리 중`);
+        setTimeout(() => {
+          hideDynamicIsland();
+          showUndoToast(`‘${prompt}’ 실행 완료`);
+        }, 800);
+      }
+    }
+
+    function stopStoryboardLoop() {
+      if (state.sbTimerId) {
+        clearInterval(state.sbTimerId);
+        state.sbTimerId = null;
+      }
+    }
+
+    function startStoryboardLoop() {
+      stopStoryboardLoop();
+      state.sbPlaying = true;
+      state.sbTimerId = setInterval(() => {
+        if (!state.sbPlaying) return;
+        state.sbProgress += 0.015;
+        if (state.sbProgress > 1) state.sbProgress = 0;
+        updatePlayheadDom();
+      }, 45);
+    }
+
+    function updatePlayheadDom() {
+      const fill = document.getElementById("sb-scrub-fill");
+      const head = document.getElementById("sb-playhead");
+      const time = document.getElementById("sb-time");
+      if (!fill || !head) return;
+      const pct = Math.max(0, Math.min(100, state.sbProgress * 100));
+      fill.style.width = pct + "%";
+      head.style.left = pct + "%";
+      if (time) {
+        const sec = String(Math.floor(state.sbProgress * 12)).padStart(2, "0");
+        time.textContent = `00:${sec} / 00:12`;
+      }
+    }
+
+    function toggleStoryboardPlay() {
+      state.sbPlaying = !state.sbPlaying;
+      const btn = document.getElementById("sb-play-label");
+      if (btn) btn.textContent = state.sbPlaying ? "❚❚ MOTION STORYBOARD" : "▶ PAUSED · TAP TO PLAY";
+    }
+
+    function renderMorphStage() {
+      const m = state.activeMorph;
+      const hero = document.getElementById("hero-stage");
+      const focusDeck = document.getElementById("focus-deck-container");
+      const stage = document.getElementById("morph-stage");
+      const root = document.getElementById("morph-card-root");
+
+      if (!m) {
+        stopStoryboardLoop();
+        hero.classList.remove("compact");
+        focusDeck.classList.remove("hidden");
+        stage.classList.add("hidden");
+        return;
+      }
+
+      hero.classList.add("compact");
+      focusDeck.classList.add("hidden");
+      stage.classList.remove("hidden");
+      document.getElementById("morph-user-bubble").textContent = m.prompt;
+      document.getElementById("morph-latency-label").textContent = `자연어 → ${m.badge} (${m.latencyMs}ms 합성)`;
+
+      let storyboardHtml = "";
+      if (m.stops && m.stops.length > 0) {
+        const stopsHtml = m.stops.map((st, idx) => `
+          <button type="button" class="sb-stop ${m.selectedStop === idx ? 'active' : ''}" onclick="selectMorphStop(${idx})">
+            <div class="sb-stop-name">${st.name}</div>
+            <div class="sb-stop-time">${st.note}</div>
+          </button>
+        `).join("");
+
+        storyboardHtml = `
+          <div class="storyboard-box" onclick="toggleStoryboardPlay()">
+            <div class="sb-head">
+              <span id="sb-play-label" class="soft-tag mono" style="font-size:10px;">${state.sbPlaying ? '❚❚ MOTION STORYBOARD' : '▶ PAUSED'}</span>
+              <span id="sb-time" class="mono" style="font-size:10px;color:var(--muted);">00:03 / 00:12</span>
+            </div>
+            <svg class="sb-svg" viewBox="0 0 280 44" fill="none">
+              <path d="M18 32 C 88 6, 192 38, 262 12" stroke="currentColor" stroke-width="2" stroke-dasharray="4 4" opacity="0.8"/>
+              <circle cx="18" cy="32" r="${m.selectedStop===0?7:5}" fill="currentColor"/>
+              <circle cx="140" cy="22" r="${m.selectedStop===1?7:5}" fill="currentColor"/>
+              <circle cx="262" cy="12" r="${m.selectedStop===2?7:5}" fill="currentColor"/>
+            </svg>
+            <div class="sb-stops" onclick="event.stopPropagation()">${stopsHtml}</div>
+            <div class="sb-scrub" onclick="event.stopPropagation();scrubStoryboard(event,this)">
+              <div id="sb-scrub-fill" class="sb-scrub-fill"></div>
+              <div id="sb-playhead" class="sb-playhead"></div>
+            </div>
+          </div>
+        `;
+      }
+
+      let bodyHtml = "";
+      if (m.kind === "SPLIT_BILL") {
+        const raw = Math.ceil(m.totalWon / m.headcount);
+        const per = m.roundTo100 ? Math.ceil(raw / 100) * 100 : raw;
+        bodyHtml = `
+          ${storyboardHtml}
+          <div class="split-row">
+            <div>
+              <div style="font-size:11px;color:var(--ink-secondary);margin-bottom:2px;">1인 정산 금액 (총 ${formatWon(m.totalWon)})</div>
+              <div id="split-per-person" class="split-amount">${formatWon(per)}</div>
+            </div>
+            <div class="stepper-pill">
+              <button type="button" id="split-minus-btn" class="step-btn" onclick="adjustSplitHeadcount(-1)">−</button>
+              <span id="split-headcount-val" style="font-size:13px;font-weight:800;min-width:30px;text-align:center;">${m.headcount}명</span>
+              <button type="button" id="split-plus-btn" class="step-btn" onclick="adjustSplitHeadcount(1)">+</button>
+            </div>
+          </div>
+          <div class="morph-chip-row">
+            <button type="button" id="split-round-toggle" class="toggle-chip ${m.roundTo100 ? 'active' : ''}" onclick="toggleSplitRounding()">${m.roundTo100 ? '✓ 100원 깔끔 정산' : '원 단위 정확 계산'}</button>
+            <span class="toggle-chip">🫧 창가석 조건 반영됨</span>
+          </div>
+          <div class="cta-row">
+            <button type="button" id="morph-execute-btn" class="btn-primary" onclick="executeActiveMorph()">카톡 정산 카드 보내기</button>
+            <button type="button" class="btn-secondary" onclick="closeActiveMorph()">홈으로</button>
+          </div>
+        `;
+      } else if (m.kind === "MEDIA_STORYBOARD") {
+        bodyHtml = `
+          ${storyboardHtml}
+          <div class="focus-title" style="font-size:15px;">성수동 3코스 모션 타임라인</div>
+          <p class="focus-body" style="margin-bottom:12px;">위 경로나 정차 지점을 눌러 바로 길찾기와 알림을 시작하세요.</p>
+          <div class="cta-row">
+            <button type="button" id="morph-execute-btn" class="btn-primary" onclick="executeActiveMorph()">선택 구간 길찾기</button>
+            <button type="button" class="btn-secondary" onclick="closeActiveMorph()">닫기</button>
+          </div>
+        `;
+      } else {
+        const bubbleHtml = (m.bubblesApplied && m.bubblesApplied.length)
+          ? `<div class="morph-chip-row" style="margin-bottom:10px;">${m.bubblesApplied.map(b => `<span class="toggle-chip">${escapeHtml(b)}</span>`).join("")}</div>`
+          : "";
+        const optHtml = m.options.map(o => `
+          <button type="button" class="morph-option ${o.id === m.selectedId ? 'selected' : ''}" onclick="selectMorphOption('${escapeHtml(o.id)}')">
+            <div style="min-width:0;">
+              <div style="font-size:12.5px;font-weight:800;">${escapeHtml(o.title)}</div>
+              <div class="morph-option-sub">${escapeHtml(o.sub)}</div>
+            </div>
+            <span class="mono" style="font-size:11px;font-weight:700;flex-shrink:0;">${escapeHtml(o.badge)}</span>
+          </button>
+        `).join("");
+
+        bodyHtml = `
+          ${bubbleHtml}
+          <div class="morph-option-list">${optHtml}</div>
+          <div class="cta-row">
+            <button type="button" id="morph-execute-btn" class="btn-primary" onclick="executeActiveMorph()">${m.kind === 'CALL_CONCIERGE' ? '승인 후 전화 대본 열기' : '선택 항목 바로 실행'}</button>
+            <button type="button" class="btn-secondary" onclick="closeActiveMorph()">닫기</button>
+          </div>
+        `;
+      }
+
+      root.innerHTML = bodyHtml;
+      document.getElementById("studio-pinned-name").textContent = m.badge;
+      if (m.stops && m.stops.length > 0) {
+        updatePlayheadDom();
+        startStoryboardLoop();
+      } else {
+        stopStoryboardLoop();
+      }
+    }
+
+    function closeActiveMorph() {
+      state.activeMorph = null;
+      renderMorphStage();
+    }
+
+    function adjustSplitHeadcount(delta) {
+      if (!state.activeMorph || state.activeMorph.kind !== "SPLIT_BILL") return;
+      state.activeMorph.headcount = Math.min(30, Math.max(1, state.activeMorph.headcount + delta));
+      renderMorphStage();
+    }
+
+    function toggleSplitRounding() {
+      if (!state.activeMorph || state.activeMorph.kind !== "SPLIT_BILL") return;
+      state.activeMorph.roundTo100 = !state.activeMorph.roundTo100;
+      renderMorphStage();
+    }
+
+    function selectMorphOption(id) {
+      if (!state.activeMorph) return;
+      state.activeMorph.selectedId = id;
+      renderMorphStage();
+    }
+
+    function selectMorphStop(idx) {
+      if (!state.activeMorph) return;
+      state.activeMorph.selectedStop = idx;
+      state.sbProgress = idx === 0 ? 0.1 : (idx === 1 ? 0.5 : 0.92);
+      renderMorphStage();
+    }
+
+    function scrubStoryboard(e, track) {
+      const rect = track.getBoundingClientRect();
+      state.sbProgress = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+      updatePlayheadDom();
+    }
+
+    function executeActiveMorph() {
+      const m = state.activeMorph;
+      if (!m) return;
+      if (m.kind === "FOOD_CURATOR") {
+        showDynamicIsland("D-Artemis 정렬 · ‘음식은 덜 맵게’ 필터 적용 중 (2/3)");
+        setTimeout(() => {
+          showHighStakesApproval("장충동 족발 · 순한맛 중 (38,000원)", "결제 직전에 안전하게 멈췄어요. 한 번만 승인하면 계속할게요.");
+        }, 500);
+        return;
+      }
+      if (m.kind === "SPLIT_BILL") {
+        const raw = Math.ceil(m.totalWon / m.headcount);
+        const per = m.roundTo100 ? Math.ceil(raw / 100) * 100 : raw;
+        showDynamicIsland(`카카오톡 정산 카드 전송 준비 중 (${m.headcount}명 · ${formatWon(per)})`);
+        setTimeout(() => {
+          hideDynamicIsland();
+          showUndoToast(`${m.headcount}명 정산 초안 (${formatWon(per)}) 작성됨`);
+        }, 700);
+        return;
+      }
+      showDynamicIsland(`실행 중 · ${m.badge}`);
+      setTimeout(() => {
+        hideDynamicIsland();
+        showUndoToast(`${m.badge} 실행 완료`);
+      }, 650);
+    }
+
+    function showDynamicIsland(text) {
+      document.getElementById("island-status-text").textContent = text;
+      document.getElementById("dynamic-island-wrap").classList.remove("hidden");
+    }
+
+    function hideDynamicIsland() {
+      document.getElementById("dynamic-island-wrap").classList.add("hidden");
+    }
+
+    function stopActiveTask() {
+      hideDynamicIsland();
+      document.getElementById("safety-alert-container").classList.add("hidden");
+      showUndoToast("실행을 즉시 멈췄어요");
+    }
+
+    function showHighStakesApproval(merchant, desc) {
+      const box = document.getElementById("safety-alert-container");
+      box.classList.remove("hidden");
+      box.innerHTML = `
+        <article class="safety-card">
+          <div style="font-size:14.5px;font-weight:800;margin-bottom:4px;">결제 직전 1회 승인 필요</div>
+          <p style="font-size:12px;color:var(--ink-secondary);line-height:1.5;margin-bottom:12px;">${escapeHtml(merchant)} — ${escapeHtml(desc)}</p>
+          <div class="cta-row">
+            <button type="button" class="btn-secondary" onclick="stopActiveTask()">취소</button>
+            <button type="button" class="btn-primary" onclick="approveOnceOrder()">이번 한 번만 승인</button>
+          </div>
+        </article>
+      `;
+    }
+
+    function approveOnceOrder() {
+      document.getElementById("safety-alert-container").classList.add("hidden");
+      hideDynamicIsland();
+      showUndoToast("1회 승인 완료 · 주문 접수됨");
+    }
+
+    function triggerTakeoverDemo() {
+      closeDrawer();
+      setUxMode("human");
+      showDynamicIsland("사람 확인 필요 · 보안 키패드 감지됨");
+      const box = document.getElementById("safety-alert-container");
+      box.classList.remove("hidden");
+      box.innerHTML = `
+        <article class="safety-card">
+          <div class="soft-tag" style="margin-bottom:8px;">Non-Bypassable Human Takeover</div>
+          <div style="font-size:14.5px;font-weight:800;margin-bottom:4px;">직접 확인이 필요한 보안 화면이에요</div>
+          <p style="font-size:12px;color:var(--ink-secondary);line-height:1.5;margin-bottom:12px;">CAPTCHA·간편인증·결제 비밀번호는 절대 우회하지 않고 멈춥니다.</p>
+          <button type="button" class="btn-primary" style="width:100%;" onclick="stopActiveTask()">직접 인증 완료 · 다시 이어받기</button>
+        </article>
+      `;
+    }
+
+    function showUndoToast(label) {
+      state.activeUndo = label;
+      document.getElementById("undo-toast-text").textContent = label;
+      document.getElementById("undo-toast").classList.remove("hidden");
+    }
+
+    function executeUndo() {
+      state.activeUndo = null;
+      document.getElementById("undo-toast").classList.add("hidden");
+      document.getElementById("hero-subtitle").textContent = "방금 실행한 작업을 안전하게 되돌렸어요";
+    }
+
+    function openDrawer(tab) {
+      state.drawerOpen = true;
+      state.drawerTab = tab || "bubbles";
+      document.getElementById("sheet-backdrop").classList.remove("hidden");
+      renderDrawer();
+    }
+
+    function closeDrawer() {
+      state.drawerOpen = false;
+      document.getElementById("sheet-backdrop").classList.add("hidden");
+    }
+
+    function switchDrawerTab(tab) {
+      state.drawerTab = tab;
+      renderDrawer();
+    }
+
+    function updateDockCounts() {
+      document.getElementById("dock-bubbles-count").textContent = state.bubbles.filter(b => b.enabled).length;
+      document.getElementById("dock-routines-count").textContent = state.routines.length;
+    }
+
+    function toggleBubbleItem(id) {
+      const target = state.bubbles.find(b => b.id === id);
+      if (target) target.enabled = !target.enabled;
+      updateDockCounts();
+      renderDrawer();
+      if (state.activeMorph && state.activeMorph.kind === "FOOD_CURATOR") {
+        state.activeMorph = synthesizeMorph(state.activeMorph.prompt);
+        renderMorphStage();
+      }
+    }
+
+    function addBubbleFromDrawer() {
+      const inp = document.getElementById("new-bubble-input");
+      const val = inp ? inp.value.trim() : "";
+      if (!val) return;
+      state.bubbles.push({
+        id: "b_" + Date.now(),
+        emoji: "🫧",
+        fact: val,
+        category: "FOOD",
+        enabled: true
+      });
+      updateDockCounts();
+      renderDrawer();
+    }
+
+    function toggleDemoRecorder() {
+      if (!state.recordingDemo) {
+        state.recordingDemo = true;
+        state.recordedSteps = 3;
+      } else {
+        state.recordingDemo = false;
+        state.routines.push({
+          id: "r_" + Date.now(),
+          title: "✨ 방금 시연한 카페 주문",
+          prompt: "아이스 아메리카노 연하게 주문 준비해줘"
+        });
+        state.recordedSteps = 0;
+        updateDockCounts();
+      }
+      renderDrawer();
+    }
+
+    function toggleCloudSyncState() {
+      state.cloudSync.enabled = !state.cloudSync.enabled;
+      state.cloudSync.lastStatus = state.cloudSync.enabled
+        ? "내 Firebase 동기화 켜짐 · 취향·루틴 동기화됨 (Vault 키 제외)"
+        : "로컬 모드 (Vault 비밀키는 절대 업로드 안 됨)";
+      renderDrawer();
+    }
+
+    function escapeHtml(value) {
+      return String(value == null ? "" : value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
+    function renderDrawer() {
+      ["bubbles", "routines", "call", "safety"].forEach(t => {
+        document.getElementById("tab-" + t).classList.toggle("active", state.drawerTab === t);
+      });
+      const body = document.getElementById("sheet-body");
+      if (state.drawerTab === "bubbles") {
+        const list = state.bubbles.map(b => `
+          <button type="button" class="bubble-item ${b.enabled ? 'on' : ''}" onclick="toggleBubbleItem('${escapeHtml(b.id)}')">
+            <span>${escapeHtml(b.emoji)} ${escapeHtml(b.fact)}</span>
+            <span style="font-size:11px;opacity:0.8;">${b.enabled ? '켜짐' : '꺼짐'}</span>
+          </button>
+        `).join("");
+        body.innerHTML = `
+          <div class="sheet-box">
+            <div style="font-size:12px;font-weight:700;color:var(--ink-secondary);">눌러서 켜고 끄는 내 취향 기억 (${state.bubbles.filter(b=>b.enabled).length}개 활성)</div>
+            ${list}
+            <div class="sheet-input-row">
+              <input id="new-bubble-input" class="sheet-input" placeholder="+ 취향 추가 (예: 고수는 빼주세요)" />
+              <button type="button" class="dock-pill active" onclick="addBubbleFromDrawer()">추가</button>
+            </div>
+          </div>
+        `;
+      } else if (state.drawerTab === "routines") {
+        const list = state.routines.map(r => `
+          <button type="button" class="bubble-item" onclick="closeDrawer();dispatchUserPrompt('${escapeHtml(r.prompt).replace(/\\/g, '\\\\')}')">
+            <span>${escapeHtml(r.title)}</span>
+            <span style="font-size:11px;color:var(--muted);">실행 ↗</span>
+          </button>
+        `).join("");
+        body.innerHTML = `
+          <div class="sheet-box">
+            <div style="font-size:12px;font-weight:700;color:var(--ink-secondary);">1탭 자주 쓰는 루틴</div>
+            ${list}
+          </div>
+          <div class="sheet-box" style="background:var(--surface);border-color:var(--ink);">
+            <div style="font-size:13px;font-weight:800;">🎬 직접 보여주고 가르치기 (Show-Me-Once)</div>
+            <div style="font-size:11.5px;color:var(--ink-secondary);">원하는 앱에서 1회 동작을 보여주면 나만의 루틴으로 저장됩니다.</div>
+            <button type="button" class="btn-primary" style="margin-top:4px;" onclick="toggleDemoRecorder()">${state.recordingDemo ? '● 3단계 기록 완료 · 저장하기' : '시연 녹화 시작'}</button>
+          </div>
+        `;
+      } else if (state.drawerTab === "call") {
+        body.innerHTML = `
+          <div class="sheet-box">
+            <div style="font-size:13px;font-weight:800;">📞 전화 전 말할 대본 미리보기</div>
+            <div style="font-size:12px;color:var(--ink-secondary);line-height:1.5;">1. “안녕하세요, 오늘 저녁 7시 4명 예약 문의드려요.”<br/>2. “조용한 창가 자리와 덜 매운 옵션 가능할까요?”<br/>3. “네, 7시에 뵙겠습니다. 감사합니다.”</div>
+            <button type="button" class="btn-primary" style="margin-top:6px;" onclick="closeDrawer();dispatchUserPrompt('식당에 창가석 전화 대본 준비해줘')">전화 대본 인터랙티브 보드 열기</button>
+          </div>
+        `;
+      } else {
+        body.innerHTML = `
+          <div class="sheet-box">
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+              <strong style="font-size:13px;">☁️ 선택형 클라우드 동기화</strong>
+              <span class="soft-tag">Vault 비밀키는 업로드되지 않음</span>
+            </div>
+            <div style="font-size:12px;color:var(--ink-secondary);">${escapeHtml(state.cloudSync.lastStatus)}</div>
+            <button type="button" class="btn-primary" onclick="toggleCloudSyncState()">${state.cloudSync.enabled ? '클라우드 동기화 끄기' : '내 Firebase로 동기화 켜기'}</button>
+          </div>
+          <div class="sheet-box">
+            <strong style="font-size:13px;">🛡️ CAPTCHA · 보안 키패드 안전 정지</strong>
+            <div style="font-size:12px;color:var(--ink-secondary);">자동화 도중 인증·결제 창을 만나면 즉시 일시정지하고 사용자에게 인계합니다.</div>
+            <button id="demo-captcha-btn" type="button" class="btn-secondary" onclick="triggerTakeoverDemo()">Takeover 동작 미리보기</button>
+          </div>
+        `;
+      }
+    }
+
+    updateDockCounts();
+    renderFocusSlide();
+  </script>
+</body>
+</html>

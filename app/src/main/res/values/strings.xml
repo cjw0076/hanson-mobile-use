@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Hanson Mobile-Use AI</string>
+    <string name="accessibility_service_label">Hanson × Artemis Mobile-Use Accessibility Engine</string>
+    <string name="accessibility_service_description">Google Artemis 호환 멀티윈도우 UI 트리 분석, 아토믹 스크린샷 캡처, 정밀 제스처 주입 및 온디바이스 AI 모바일 자동화를 수행합니다.</string>
+    <string name="notification_listener_label">Hanson Screen-Off Notification &amp; Quick-Reply Bridge</string>
+</resources>

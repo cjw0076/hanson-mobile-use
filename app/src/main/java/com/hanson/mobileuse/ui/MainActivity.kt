@@ -1,0 +1,845 @@
+package com.hanson.mobileuse.ui
+
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.os.Bundle
+import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.core.view.WindowCompat
+import com.hanson.mobileuse.accessibility.GestureController
+import com.hanson.mobileuse.accessibility.HansonAccessibilityService
+import com.hanson.mobileuse.agent.ClipboardQuickSuggestion
+import com.hanson.mobileuse.agent.HansonRuntimeHolder
+import com.hanson.mobileuse.agent.MobileUseAgentEngine
+import com.hanson.mobileuse.agent.PermissionHubManager
+import com.hanson.mobileuse.agent.QuickIntentKind
+import com.hanson.mobileuse.agent.SmartClipboardAndShareIntentDetector
+import com.hanson.mobileuse.agent.UserDemonstrationRecorder
+import com.hanson.mobileuse.agent.VaultSecretCategory
+import com.hanson.mobileuse.agent.WatcherActionMode
+import com.hanson.mobileuse.notification.RemoteInputSessionCache
+import com.hanson.mobileuse.service.FloatingHudService
+import com.hanson.mobileuse.service.HansonForegroundService
+import com.hanson.mobileuse.service.HansonSystemNexusReceiverActivity
+import com.hanson.mobileuse.ui.screens.CommandCenterScreen
+import com.hanson.mobileuse.ui.screens.InspectorBridgeScreen
+import com.hanson.mobileuse.ui.screens.PermissionsHubScreen
+import com.hanson.mobileuse.ui.screens.SettingsScreen
+import com.hanson.mobileuse.ui.screens.SkillsAndReceiptsScreen
+import com.hanson.mobileuse.ui.theme.HansonObsidianTheme
+import com.hanson.mobileuse.ui.theme.ObsidianColors
+import com.hanson.mobileuse.workspace.AgentSessionStore
+import com.hanson.mobileuse.workspace.MobileWorkspaceEngine
+import kotlinx.coroutines.flow.MutableStateFlow
+
+/**
+ * 5 Navigation tabs matching Figma UI prototype (figma-ui-prototype/index.html lines 598-620).
+ *
+ * 1. COMMAND_CENTER (커맨드, ⚡) -> CommandCenterScreen
+ * 2. PERMISSIONS_HUB (권한 허브, 🛡️) -> PermissionsHubScreen
+ * 3. INSPECTOR_BRIDGE (인스펙터, 🌲) -> InspectorBridgeScreen
+ * 4. SKILLS_RECEIPTS (스킬·영수증, ✨) -> SkillsAndReceiptsScreen
+ * 5. SETTINGS (설정, ⚙️) -> SettingsScreen
+ */
+enum class MainTab(
+    val titleKo: String,
+    val iconEmoji: String
+) {
+    COMMAND_CENTER("커맨드", "⚡"),
+    PERMISSIONS_HUB("권한 허브", "🛡️"),
+    INSPECTOR_BRIDGE("인스펙터", "🌲"),
+    SKILLS_RECEIPTS("스킬·영수증", "✨"),
+    SETTINGS("설정", "⚙️");
+
+    val labelKo: String get() = titleKo
+    val route: String get() = name.lowercase()
+}
+
+typealias HansonNavTab = MainTab
+typealias MainNavigationTab = MainTab
+
+/**
+ * Single-Surface Ahaboard Achromatic Activity.
+ * - Restores 5-tab NavigationBar per Figma specification.
+ * - Mounts all 5 Compose screens: CommandCenter, PermissionsHub, InspectorBridge, SkillsAndReceipts, Settings.
+ * - Preserves state across tab switches using [rememberSaveableStateHolder].
+ * - Automatically hides the external Floating HUD overlay while `MainActivity` is in the foreground.
+ * - Dynamically hides the bottom navigation bar when the IME soft keyboard is open.
+ */
+class MainActivity : ComponentActivity() {
+
+    private lateinit var permissionHub: PermissionHubManager
+    private lateinit var workspaceEngine: MobileWorkspaceEngine
+    private lateinit var sessionStore: AgentSessionStore
+    private lateinit var agentEngine: MobileUseAgentEngine
+
+    private val clipboardSuggestionsFlow = MutableStateFlow<List<ClipboardQuickSuggestion>>(emptyList())
+    private var lastSeenClipboardText: String = ""
+    private var dismissedClipboardText: String = ""
+
+    private val requestPermissionsLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) {
+        permissionHub.refreshStatus()
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+        } else {
+            @Suppress("DEPRECATION")
+            window.addFlags(
+                android.view.WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                android.view.WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+            )
+        }
+
+        permissionHub = HansonRuntimeHolder.getPermissionHub(applicationContext)
+        workspaceEngine = HansonRuntimeHolder.getWorkspaceEngine(applicationContext)
+        sessionStore = HansonRuntimeHolder.getSessionStore(applicationContext)
+        agentEngine = HansonRuntimeHolder.getAgentEngine(applicationContext)
+
+        HansonForegroundService.start(applicationContext)
+        FloatingHudService.setMainActivityForeground(applicationContext, true)
+        FloatingHudService.onApprovalDecision = { approved ->
+            agentEngine.resolvePendingApproval(approved, alwaysAllowCapability = false)
+        }
+        handleExternalNexusIntent(intent)
+
+        setContent {
+            HansonObsidianTheme {
+                var currentTab by rememberSaveable { mutableStateOf(MainTab.COMMAND_CENTER) }
+                val saveableStateHolder = rememberSaveableStateHolder()
+
+                BackHandler(enabled = currentTab != MainTab.COMMAND_CENTER) {
+                    currentTab = MainTab.COMMAND_CENTER
+                }
+
+                val a11yState by HansonAccessibilityService.engineState.collectAsState()
+                val permissionState by permissionHub.state.collectAsState()
+                val session by agentEngine.currentSession.collectAsState()
+                val chatMessages by agentEngine.chatMessages.collectAsState()
+                val allReceipts by agentEngine.allReceipts.collectAsState()
+                val config by agentEngine.config.collectAsState()
+                val memoryState by agentEngine.memoryManager.state.collectAsState()
+                val routerState by agentEngine.aiInfrastructureRouter.state.collectAsState()
+                val recentNotifications by RemoteInputSessionCache.recentNotifications.collectAsState()
+                val isHudShowing by FloatingHudService.isShowing.collectAsState()
+                val isDaemonRunning by HansonForegroundService.isRunning.collectAsState()
+                val workspaceState by workspaceEngine.state.collectAsState()
+                val sessionStoreState by sessionStore.state.collectAsState()
+                val workMode by agentEngine.workMode.collectAsState()
+                val vaultHandles by agentEngine.resolvedVault.handles.collectAsState()
+                val watcherRules by agentEngine.resolvedWatcherEngine.rules.collectAsState()
+                val scratchpadEntries by agentEngine.resolvedScratchpad.entries.collectAsState()
+                val uxMode by agentEngine.uxMode.collectAsState()
+                val memoryBubbles by agentEngine.resolvedMemoryBubbles.bubbles.collectAsState()
+                val personalRoutines by agentEngine.resolvedPersonalRoutines.routines.collectAsState()
+                val isRecordingDemo by UserDemonstrationRecorder.isRecording.collectAsState()
+                val recordedSteps by UserDemonstrationRecorder.recordedSteps.collectAsState()
+                val clipboardSuggestions by clipboardSuggestionsFlow.collectAsState()
+                val cloudSyncState by agentEngine.resolvedCloudSync.state.collectAsState()
+                val latestReversibleReceipt = remember(allReceipts) {
+                    allReceipts.firstOrNull { it.canOneTapUndo }
+                }
+
+                LaunchedEffect(Unit) {
+                    refreshClipboardSuggestions()
+                }
+                LaunchedEffect(isRecordingDemo, recordedSteps.size) {
+                    FloatingHudService.updateRecordingBadge(isRecordingDemo, recordedSteps.size)
+                }
+                LaunchedEffect(latestReversibleReceipt?.id, latestReversibleReceipt?.undone) {
+                    val reversible = latestReversibleReceipt
+                    if (reversible != null && reversible.canOneTapUndo && !reversible.undone) {
+                        FloatingHudService.updateUndoAvailability(true, reversible.undoHintKo.ifBlank { "되돌리기" })
+                    } else {
+                        FloatingHudService.updateUndoAvailability(false, "")
+                    }
+                }
+
+                val startDemoRecording: () -> Unit = {
+                    UserDemonstrationRecorder.startRecording()
+                    FloatingHudService.updateRecordingBadge(true, 0)
+                    Toast.makeText(
+                        this@MainActivity,
+                        "시연 녹화를 시작했어요. 원하는 앱에서 동작을 보여준 뒤 저장하세요.",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+                val finishDemoRecording: (String) -> Unit = { title ->
+                    val saved = agentEngine.finishDemonstrationAndSaveRoutine(title)
+                    FloatingHudService.updateRecordingBadge(false, 0)
+                    Toast.makeText(
+                        this@MainActivity,
+                        if (saved != null) "'${saved.titleKo}' 루틴으로 저장했어요." else "기록된 단계가 없어 녹화를 마쳤어요.",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+                val cancelDemoRecording: () -> Unit = {
+                    UserDemonstrationRecorder.stopAndCompile()
+                    FloatingHudService.updateRecordingBadge(false, 0)
+                    Toast.makeText(this@MainActivity, "시연 녹화를 취소했어요.", Toast.LENGTH_SHORT).show()
+                }
+                val undoReceiptAction: (String) -> Unit = { receiptId ->
+                    val ok = agentEngine.executeOneTapUndo(receiptId)
+                    Toast.makeText(
+                        this@MainActivity,
+                        if (ok) "방금 실행한 작업을 되돌렸어요." else "되돌릴 수 있는 작업이 없어요.",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+                val approveAndDialAction: (String, String, String, String) -> Unit =
+                    { calleeLabel, phoneNumber, purposeKo, scriptText ->
+                        val cleanCallee = calleeLabel.ifBlank { "통화 대상" }
+                        val cleanPhone = phoneNumber.trim()
+                        val noteKey = "call_script_${cleanCallee.take(16)}"
+                        agentEngine.resolvedScratchpad.put(
+                            key = noteKey,
+                            value = buildString {
+                                appendLine("대상: $cleanCallee ($cleanPhone)")
+                                if (purposeKo.isNotBlank()) appendLine("목적: $purposeKo")
+                                if (scriptText.isNotBlank()) appendLine(scriptText)
+                            }.trim()
+                        )
+                        val dialTarget = cleanPhone.filter { it.isDigit() || it == '+' || it == '-' }
+                        val dialUri = if (dialTarget.isNotBlank()) {
+                            Uri.parse("tel:${Uri.encode(dialTarget)}")
+                        } else {
+                            Uri.parse("tel:")
+                        }
+                        runCatching {
+                            startActivity(Intent(Intent.ACTION_DIAL, dialUri))
+                        }
+                        Toast.makeText(
+                            this@MainActivity,
+                            "통화 안내 문구를 메모에 저장하고 전화 앱을 열었어요.",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+
+                val density = LocalDensity.current
+                val imeBottomPx = WindowInsets.ime.getBottom(density)
+                val isKeyboardOpen = imeBottomPx > 0
+
+                Scaffold(
+                    containerColor = ObsidianColors.Background,
+                    contentWindowInsets = WindowInsets(0, 0, 0, 0),
+                    bottomBar = {
+                        if (!isKeyboardOpen) {
+                            HansonBottomNavigationBar(
+                                currentTab = currentTab,
+                                onTabSelected = { selected -> currentTab = selected }
+                            )
+                        }
+                    }
+                ) { innerPadding ->
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(innerPadding)
+                            .consumeWindowInsets(innerPadding)
+                            .statusBarsPadding()
+                    ) {
+                        Crossfade(
+                            targetState = currentTab,
+                            animationSpec = tween(durationMillis = 180),
+                            label = "MainTabTransition",
+                            modifier = Modifier.fillMaxSize()
+                        ) { tab ->
+                            saveableStateHolder.SaveableStateProvider(key = tab.name) {
+                                when (tab) {
+                                    MainTab.COMMAND_CENTER -> {
+                                        CommandCenterScreen(
+                                            session = session,
+                                            chatMessages = chatMessages,
+                                            modelName = config.modelName,
+                                            apiKey = config.apiKey,
+                                            ttsEnabled = config.ttsVoiceReply,
+                                            a11yState = a11yState,
+                                            permissionState = permissionState,
+                                            memoryState = memoryState,
+                                            routerState = routerState,
+                                            notifications = recentNotifications,
+                                            onSendChatMessage = { msg -> agentEngine.sendChatMessage(msg) },
+                                            onStopAgent = { agentEngine.stopRun() },
+                                            onClearChat = { agentEngine.clearLiveChat() },
+                                            onOptimizeMemory = { agentEngine.runMemoryOptimization() },
+                                            onToggleTts = {
+                                                agentEngine.updateConfig(ttsVoiceReply = !config.ttsVoiceReply)
+                                            },
+                                            onToggleOverlayHud = { enable ->
+                                                if (!enable || isHudShowing) {
+                                                    FloatingHudService.stop(this@MainActivity)
+                                                } else {
+                                                    if (!FloatingHudService.startIfPermitted(this@MainActivity, forceEvenInApp = true)) {
+                                                        triggerOneTouchSetup()
+                                                    }
+                                                }
+                                            },
+                                            onOneTouchAutoSetup = {
+                                                triggerOneTouchSetup()
+                                            },
+                                            onOpenDeepSettings = {
+                                                currentTab = MainTab.SETTINGS
+                                            },
+                                            workspaceState = workspaceState,
+                                            sessionStoreState = sessionStoreState,
+                                            workMode = workMode,
+                                            onSelectWorkMode = { mode -> agentEngine.setWorkMode(mode) },
+                                            onSelectSession = { sessionId ->
+                                                sessionStore.selectSession(sessionId)
+                                                sessionStore.markAllRead(sessionId)
+                                                sessionStore.state.value.activeSession?.mode?.let { mode ->
+                                                    agentEngine.setWorkMode(mode)
+                                                }
+                                            },
+                                            onCreateSession = {
+                                                val created = sessionStore.createSession(
+                                                    title = "Studio ${sessionStore.state.value.sessions.size + 1}",
+                                                    mode = workMode,
+                                                    isForeground = true
+                                                )
+                                                agentEngine.setWorkMode(created.mode)
+                                            },
+                                            onToggleSessionForeground = { sessionId ->
+                                                sessionStore.toggleForeground(sessionId)
+                                            },
+                                            onSelectWorkspaceFile = { relPath ->
+                                                workspaceEngine.selectFile(relPath)
+                                            },
+                                            onSaveWorkspaceFile = { relPath, newContent ->
+                                                workspaceEngine.writeFile(relPath, newContent)
+                                            },
+                                            onInitAgentsMd = {
+                                                workspaceEngine.initAgentsMd()
+                                            },
+                                            onCreateCheckpoint = { label ->
+                                                workspaceEngine.captureCheckpoint(label)
+                                            },
+                                            onRestoreCheckpoint = { checkpointId ->
+                                                workspaceEngine.restoreCheckpoint(checkpointId)
+                                            },
+                                            onRunWorkspaceCheck = {
+                                                workspaceEngine.execWorkspaceCommand("ls")
+                                            },
+                                            onApprovePlanAndBuild = {
+                                                agentEngine.approveAndExecutePlan()
+                                            },
+                                            onApprovalDecision = { approved, alwaysAllow ->
+                                                agentEngine.resolvePendingApproval(approved, alwaysAllowCapability = alwaysAllow)
+                                            },
+                                            vaultHandles = vaultHandles,
+                                            watcherRules = watcherRules,
+                                            scratchpadEntries = scratchpadEntries,
+                                            onPutVaultSecret = { key, label, plaintext, category ->
+                                                agentEngine.resolvedVault.putSecret(key, label, plaintext, category)
+                                            },
+                                            onDeleteVaultSecret = { key ->
+                                                agentEngine.resolvedVault.deleteSecret(key)
+                                            },
+                                            onAddWatcherRule = { title, target, keywords, mode ->
+                                                agentEngine.resolvedWatcherEngine.addRule(
+                                                    title = title,
+                                                    targetAppOrUrl = target,
+                                                    matchKeywords = keywords,
+                                                    mode = mode
+                                                )
+                                            },
+                                            onToggleWatcherRule = { ruleId, enabled ->
+                                                agentEngine.resolvedWatcherEngine.toggleRule(ruleId, enabled)
+                                            },
+                                            onRemoveWatcherRule = { ruleId ->
+                                                agentEngine.resolvedWatcherEngine.removeRule(ruleId)
+                                            },
+                                            onPutScratchpad = { key, value ->
+                                                agentEngine.resolvedScratchpad.put(key, value)
+                                            },
+                                            onRemoveScratchpad = { key ->
+                                                agentEngine.resolvedScratchpad.remove(key)
+                                            },
+                                            onClearScratchpad = {
+                                                agentEngine.resolvedScratchpad.clear()
+                                            },
+                                            onResolveHumanTakeover = { completedByHuman ->
+                                                agentEngine.resolveHumanTakeover(completedByHuman)
+                                            },
+                                            uxMode = uxMode,
+                                            onSelectUxMode = { mode -> agentEngine.setUxMode(mode) },
+                                            memoryBubbles = memoryBubbles,
+                                            onAddBubble = { text ->
+                                                agentEngine.resolvedMemoryBubbles.addBubble(factKo = text)
+                                            },
+                                            onToggleBubble = { bubbleId ->
+                                                agentEngine.resolvedMemoryBubbles.toggleBubble(bubbleId)
+                                            },
+                                            onRemoveBubble = { bubbleId ->
+                                                agentEngine.resolvedMemoryBubbles.removeBubble(bubbleId)
+                                            },
+                                            personalRoutines = personalRoutines,
+                                            isRecordingDemo = isRecordingDemo,
+                                            recordedStepCount = recordedSteps.size,
+                                            onStartDemoRecord = startDemoRecording,
+                                            onFinishDemoRecord = finishDemoRecording,
+                                            onCancelDemoRecord = cancelDemoRecording,
+                                            onRemoveRoutine = { routineId ->
+                                                agentEngine.resolvedPersonalRoutines.removeRoutine(routineId)
+                                            },
+                                            latestReversibleReceipt = latestReversibleReceipt,
+                                            onUndoReceipt = undoReceiptAction,
+                                            clipboardSuggestions = clipboardSuggestions,
+                                            onDismissClipboardSuggestions = {
+                                                dismissedClipboardText = lastSeenClipboardText
+                                                clipboardSuggestionsFlow.value = emptyList()
+                                            },
+                                            onApproveAndDial = approveAndDialAction,
+                                            cloudSyncState = cloudSyncState,
+                                            onSaveCloudSyncConfig = { enabled, projectId, appId, apiKeyPlaintext, databaseId, editionMode, userUid ->
+                                                agentEngine.resolvedCloudSync.saveByoConfig(
+                                                    enabled = enabled,
+                                                    projectId = projectId,
+                                                    applicationId = appId,
+                                                    apiKeyPlaintext = apiKeyPlaintext,
+                                                    databaseId = databaseId,
+                                                    editionMode = editionMode,
+                                                    userUid = userUid
+                                                )
+                                                Toast.makeText(
+                                                    this@MainActivity,
+                                                    "클라우드 동기화 설정을 저장했어요.",
+                                                    Toast.LENGTH_SHORT
+                                                ).show()
+                                            },
+                                            onTriggerCloudSyncNow = {
+                                                agentEngine.resolvedCloudSync.syncNow(
+                                                    bubblesStore = agentEngine.resolvedMemoryBubbles,
+                                                    routineStore = agentEngine.resolvedPersonalRoutines,
+                                                    watcherEngine = agentEngine.resolvedWatcherEngine,
+                                                    receipts = allReceipts
+                                                )
+                                            }
+                                        )
+                                    }
+
+                                    MainTab.PERMISSIONS_HUB -> {
+                                        PermissionsHubScreen(
+                                            permState = permissionState,
+                                            onRequestAllRuntimePermissions = {
+                                                val perms = permissionHub.getAllRuntimePermissionsToRequest()
+                                                if (perms.isNotEmpty()) {
+                                                    requestPermissionsLauncher.launch(perms)
+                                                }
+                                            },
+                                            onRequestSinglePermissionItem = { item ->
+                                                if (item.isRuntimePermission && item.runtimePermissions.isNotEmpty()) {
+                                                    requestPermissionsLauncher.launch(item.runtimePermissions.toTypedArray())
+                                                } else {
+                                                    try {
+                                                        startActivity(permissionHub.buildSettingsIntent(item))
+                                                    } catch (e: Exception) {
+                                                        Toast.makeText(this@MainActivity, "설정 화면을 열 수 없습니다: ${e.message}", Toast.LENGTH_SHORT).show()
+                                                    }
+                                                }
+                                            },
+                                            onToggleUnrestrictedMode = { enabled ->
+                                                permissionHub.setUnrestrictedMode(enabled)
+                                            },
+                                            onCycleCapabilityGovernance = { cap ->
+                                                permissionHub.cycleCapabilityLevel(cap)
+                                            },
+                                            onRefresh = {
+                                                permissionHub.refreshStatus()
+                                            }
+                                        )
+                                    }
+
+                                    MainTab.INSPECTOR_BRIDGE -> {
+                                        InspectorBridgeScreen(
+                                            a11yState = a11yState,
+                                            onCaptureSnapshot = {
+                                                val service = HansonAccessibilityService.instance
+                                                if (service != null) {
+                                                    service.captureSnapshotNow(includeScreenshot = true)
+                                                    Toast.makeText(this@MainActivity, "아토믹 스냅샷을 캡처했습니다.", Toast.LENGTH_SHORT).show()
+                                                } else {
+                                                    Toast.makeText(this@MainActivity, "접근성 서비스가 연결되지 않았습니다.", Toast.LENGTH_SHORT).show()
+                                                }
+                                            },
+                                            onTestTapElement = { el ->
+                                                val service = HansonAccessibilityService.instance
+                                                if (service != null) {
+                                                    val ok = GestureController.tap(service, el.centerX.toFloat(), el.centerY.toFloat())
+                                                    Toast.makeText(
+                                                        this@MainActivity,
+                                                        if (ok) "[${el.index}] 요소를 탭했습니다." else "탭 주입 실패",
+                                                        Toast.LENGTH_SHORT
+                                                    ).show()
+                                                } else {
+                                                    Toast.makeText(this@MainActivity, "접근성 서비스가 연결되지 않았습니다.", Toast.LENGTH_SHORT).show()
+                                                }
+                                            },
+                                            onTriggerGlobalKey = { key ->
+                                                val service = HansonAccessibilityService.instance
+                                                if (service != null) {
+                                                    val ok = GestureController.performGlobalKey(service, key)
+                                                    if (!ok) {
+                                                        Toast.makeText(this@MainActivity, "$key 실행 실패", Toast.LENGTH_SHORT).show()
+                                                    }
+                                                } else {
+                                                    Toast.makeText(this@MainActivity, "접근성 서비스가 연결되지 않았습니다.", Toast.LENGTH_SHORT).show()
+                                                }
+                                            },
+                                            onToggleBridgeTokenAuth = { enabled ->
+                                                HansonAccessibilityService.instance?.setBridgeRequireToken(enabled)
+                                            },
+                                            onCopyText = { text ->
+                                                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                                clipboard?.setPrimaryClip(ClipData.newPlainText("InspectorBridge", text))
+                                                Toast.makeText(this@MainActivity, "클립보드에 복사되었습니다.", Toast.LENGTH_SHORT).show()
+                                            }
+                                        )
+                                    }
+
+                                    MainTab.SKILLS_RECEIPTS -> {
+                                        SkillsAndReceiptsScreen(
+                                            receipts = allReceipts,
+                                            onRunSkill = { skill ->
+                                                agentEngine.sendChatMessage(skill.goalPrompt)
+                                                currentTab = MainTab.COMMAND_CENTER
+                                                Toast.makeText(this@MainActivity, "'${skill.title}' 실행을 시작했습니다.", Toast.LENGTH_SHORT).show()
+                                            },
+                                            onClearReceipts = {
+                                                agentEngine.clearReceipts()
+                                                Toast.makeText(this@MainActivity, "작업 영수증이 초기화되었습니다.", Toast.LENGTH_SHORT).show()
+                                            },
+                                            personalRoutines = personalRoutines,
+                                            isRecordingDemo = isRecordingDemo,
+                                            recordedStepCount = recordedSteps.size,
+                                            onRunRoutine = { routine ->
+                                                agentEngine.sendChatMessage(routine.goalPrompt)
+                                                currentTab = MainTab.COMMAND_CENTER
+                                                Toast.makeText(this@MainActivity, "'${routine.titleKo}' 루틴을 실행할게요.", Toast.LENGTH_SHORT).show()
+                                            },
+                                            onRemoveRoutine = { routineId ->
+                                                agentEngine.resolvedPersonalRoutines.removeRoutine(routineId)
+                                            },
+                                            onStartDemoRecord = startDemoRecording,
+                                            onFinishDemoRecord = finishDemoRecording,
+                                            onCancelDemoRecord = cancelDemoRecording,
+                                            onUndoReceipt = undoReceiptAction
+                                        )
+                                    }
+
+                                    MainTab.SETTINGS -> {
+                                        SettingsScreen(
+                                            config = config,
+                                            isDaemonRunning = isDaemonRunning,
+                                            onSaveConfig = { key, model, maxIter, autoHud ->
+                                                agentEngine.updateConfig(
+                                                    apiKey = key,
+                                                    modelName = model,
+                                                    maxIterations = maxIter,
+                                                    autoShowFloatingHud = autoHud
+                                                )
+                                                Toast.makeText(this@MainActivity, "엔진 설정이 저장되었습니다.", Toast.LENGTH_SHORT).show()
+                                            },
+                                            onToggleDaemon = { run ->
+                                                if (run) {
+                                                    HansonForegroundService.start(this@MainActivity)
+                                                } else {
+                                                    HansonForegroundService.stop(this@MainActivity)
+                                                }
+                                            },
+                                            onOneTouchAutoSetup = {
+                                                triggerOneTouchSetup()
+                                            },
+                                            onSaveCustomBaseUrl = { customUrl ->
+                                                agentEngine.updateConfig(customBaseUrl = customUrl)
+                                            },
+                                            onClose = {
+                                                currentTab = MainTab.COMMAND_CENTER
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleExternalNexusIntent(intent)
+    }
+
+    private fun handleExternalNexusIntent(incomingIntent: Intent?) {
+        val pendingPrompt = incomingIntent
+            ?.getStringExtra(HansonSystemNexusReceiverActivity.EXTRA_PENDING_EXTERNAL_PROMPT)
+            ?.trim()
+            .orEmpty()
+        if (pendingPrompt.isBlank()) return
+        val preview = incomingIntent
+            ?.getStringExtra(HansonSystemNexusReceiverActivity.EXTRA_PENDING_EXTERNAL_PREVIEW)
+            ?.trim()
+            .orEmpty()
+            .ifBlank { pendingPrompt.take(100) }
+        incomingIntent?.removeExtra(HansonSystemNexusReceiverActivity.EXTRA_PENDING_EXTERNAL_PROMPT)
+        incomingIntent?.removeExtra(HansonSystemNexusReceiverActivity.EXTRA_PENDING_EXTERNAL_PREVIEW)
+
+        val confirmCard = ClipboardQuickSuggestion(
+            kind = QuickIntentKind.DIRECT_COMMAND,
+            badgeKo = "외부 공유 확인",
+            titleKo = "공유된 요청을 실행할까요?",
+            actionPrompt = pendingPrompt,
+            previewText = preview
+        )
+        clipboardSuggestionsFlow.value = listOf(confirmCard) + clipboardSuggestionsFlow.value.filterNot {
+            it.actionPrompt == pendingPrompt
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        permissionHub.refreshStatus()
+        agentEngine.memoryManager.refreshRuntimeMemoryMetrics(agentEngine.chatMessages.value.size)
+        // Always hide external floating HUD while inside MainActivity so it never covers the top bar
+        FloatingHudService.setMainActivityForeground(applicationContext, true)
+        refreshClipboardSuggestions()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) {
+            refreshClipboardSuggestions()
+        }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        FloatingHudService.setMainActivityForeground(applicationContext, false)
+        val status = agentEngine.currentSession.value.status
+        val isActivelyControllingExternalApp = status == com.hanson.mobileuse.agent.AgentRunStatus.OBSERVING ||
+            status == com.hanson.mobileuse.agent.AgentRunStatus.THINKING ||
+            status == com.hanson.mobileuse.agent.AgentRunStatus.ACTING ||
+            UserDemonstrationRecorder.isRecording.value
+        if (agentEngine.config.value.autoShowFloatingHud && isActivelyControllingExternalApp) {
+            FloatingHudService.startIfPermitted(applicationContext)
+        }
+    }
+
+    private fun refreshClipboardSuggestions() {
+        if (!::agentEngine.isInitialized) return
+        val clipText = runCatching {
+            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+            val clip = clipboard?.primaryClip
+            if (clip != null && clip.itemCount > 0) {
+                clip.getItemAt(0).coerceToText(this)?.toString().orEmpty().trim()
+            } else {
+                ""
+            }
+        }.getOrDefault("")
+
+        if (clipText.isBlank()) {
+            clipboardSuggestionsFlow.value = emptyList()
+            return
+        }
+        lastSeenClipboardText = clipText
+        if (clipText == dismissedClipboardText) {
+            return
+        }
+        clipboardSuggestionsFlow.value = SmartClipboardAndShareIntentDetector.analyzeText(
+            rawText = clipText,
+            vault = agentEngine.resolvedVault
+        )
+    }
+
+    private fun triggerOneTouchSetup() {
+        val perms = permissionHub.getAllRuntimePermissionsToRequest()
+        if (perms.isNotEmpty()) {
+            requestPermissionsLauncher.launch(perms)
+        }
+        agentEngine.runOneTouchAutoSetup()
+        Toast.makeText(this, "원터치 환경 자동 구성을 실행했습니다.", Toast.LENGTH_SHORT).show()
+    }
+}
+
+/**
+ * 5-Tab Pure Achromatic Bottom Navigation Bar per Figma UI prototype (lines 486-527, 598-620).
+ * - Fixed 64.dp height with 1.dp hairline top border using [ObsidianColors.GlassBorder].
+ * - Pill-shaped active tab indicator using [ObsidianColors.AccentDim] (999.dp corner radius).
+ * - Strictly 0% hue saturation tokens (ObsidianColors.Surface, GlassBorder, Accent, AccentDim, TextSecondary).
+ * - Adapts to Android navigation bars inset.
+ */
+@Composable
+fun HansonBottomNavigationBar(
+    currentTab: MainTab,
+    onTabSelected: (MainTab) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier
+            .fillMaxWidth()
+            .windowInsetsPadding(WindowInsets.navigationBars),
+        color = ObsidianColors.Surface,
+        border = BorderStroke(1.dp, ObsidianColors.GlassBorder)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(64.dp)
+                .padding(horizontal = 6.dp),
+            horizontalArrangement = Arrangement.SpaceAround,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            MainTab.entries.forEach { tab ->
+                val isSelected = tab == currentTab
+                val interactionSource = remember { MutableInteractionSource() }
+
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable(
+                            interactionSource = interactionSource,
+                            indication = null
+                        ) { onTabSelected(tab) }
+                        .padding(vertical = 6.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(3.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(999.dp))
+                            .then(
+                                if (isSelected) Modifier.background(ObsidianColors.AccentDim)
+                                else Modifier
+                            )
+                            .padding(horizontal = 12.dp, vertical = 2.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = tab.iconEmoji,
+                            fontSize = 16.sp
+                        )
+                    }
+
+                    Text(
+                        text = tab.titleKo,
+                        color = if (isSelected) ObsidianColors.Accent else ObsidianColors.TextSecondary,
+                        fontSize = 10.5.sp,
+                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                        maxLines = 1
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Convenience alias for [HansonBottomNavigationBar].
+ */
+@Composable
+fun HansonBottomNavBar(
+    selectedTab: MainTab,
+    onTabSelected: (MainTab) -> Unit,
+    modifier: Modifier = Modifier
+) = HansonBottomNavigationBar(currentTab = selectedTab, onTabSelected = onTabSelected, modifier = modifier)
+
+/**
+ * Material 3 standard NavigationBar implementation option.
+ */
+@Composable
+fun HansonM3NavigationBar(
+    currentTab: MainTab,
+    onTabSelected: (MainTab) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    NavigationBar(
+        modifier = modifier.height(64.dp),
+        containerColor = ObsidianColors.Surface,
+        contentColor = ObsidianColors.Accent,
+        tonalElevation = 0.dp,
+        windowInsets = WindowInsets.navigationBars
+    ) {
+        MainTab.entries.forEach { tab ->
+            val isSelected = tab == currentTab
+            NavigationBarItem(
+                selected = isSelected,
+                onClick = { onTabSelected(tab) },
+                icon = { Text(text = tab.iconEmoji, fontSize = 16.sp) },
+                label = {
+                    Text(
+                        text = tab.titleKo,
+                        fontSize = 10.5.sp,
+                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                    )
+                },
+                colors = NavigationBarItemDefaults.colors(
+                    selectedIconColor = ObsidianColors.Accent,
+                    selectedTextColor = ObsidianColors.Accent,
+                    unselectedIconColor = ObsidianColors.TextSecondary,
+                    unselectedTextColor = ObsidianColors.TextSecondary,
+                    indicatorColor = ObsidianColors.AccentDim
+                )
+            )
+        }
+    }
+}
