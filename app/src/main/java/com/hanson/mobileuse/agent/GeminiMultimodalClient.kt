@@ -1186,7 +1186,8 @@ Visual Grounding & Safety Rules:
         customBaseUrl: String = "",
         chatHistory: List<Pair<String, String>> = emptyList(),
         enableWebSearch: Boolean = true,
-        bridgeToken: String = ""
+        bridgeToken: String = "",
+        onTextDelta: ((String) -> Unit)? = null
     ): GroundedWebAnswer {
         val cleanGoal = userGoal.trim()
         if (cleanGoal.isEmpty()) {
@@ -1268,7 +1269,8 @@ Visual Grounding & Safety Rules:
                                 qaSystemPrompt = qaSystemPrompt,
                                 userGoal = cleanGoal,
                                 chatHistory = chatHistory,
-                                enableWebSearch = enableWebSearch
+                                enableWebSearch = enableWebSearch,
+                                onTextDelta = onTextDelta
                             )
                         }
                     }
@@ -1430,6 +1432,9 @@ Visual Grounding & Safety Rules:
             append(" Ground answers in real-time web search results whenever up-to-date facts, news, weather, prices, schedules, or URLs are relevant. Never fabricate URLs or unverified facts.")
         }
         append(" Separate voice and visual board channels cleanly: start line 1 with 'SPEAK: ' followed by 1-2 warm spoken Korean sentences written strictly for ears (zero asterisks/markdown/URLs; pronounce currency naturally like '83.16달러'). Then on the next lines write the visual board: 1 crisp summary headline, 2-4 concise '• 항목: 핵심 수치/내용' takeaways, and at most one short closing line without nested markdown noise.")
+        if (systemContext.contains("공동 드로잉") || systemContext.contains("CODRAW")) {
+            append(" When guiding the user on a mobile screen or responding to a user sketch, you may also append optional 0..1 normalized overlay annotations such as 'CODRAW: RING 0.50 0.45 0.11 여기 확인' or 'CODRAW: ARROW 0.25 0.25 0.50 0.45 1단계'.")
+        }
         if (systemContext.isNotBlank()) {
             append("\n\nAdditional Context:\n")
             append(systemContext.trim())
@@ -1557,7 +1562,8 @@ Visual Grounding & Safety Rules:
         qaSystemPrompt: String,
         userGoal: String,
         chatHistory: List<Pair<String, String>>,
-        enableWebSearch: Boolean
+        enableWebSearch: Boolean,
+        onTextDelta: ((String) -> Unit)? = null
     ): GroundedWebAnswer? {
         val preferredGemini = if (isTextOrVlmGeminiModel(requestedModel)) requestedModel else DEFAULT_MODEL
         val candidates = listOf(
@@ -1605,14 +1611,42 @@ Visual Grounding & Safety Rules:
             skippedAllDueToRateLimit = false
 
             val attempt = runCatching {
-                executeGeminiGroundedRequest(
-                    apiKey = apiKey,
-                    modelName = candidateModel,
-                    qaSystemPrompt = qaSystemPrompt,
-                    contentsArr = contentsArr,
-                    enableWebSearch = enableWebSearch,
-                    includeUrlContext = enableWebSearch
-                )
+                if (onTextDelta != null) {
+                    runCatching {
+                        executeGeminiGroundedSseStreamRequest(
+                            apiKey = apiKey,
+                            modelName = candidateModel,
+                            qaSystemPrompt = qaSystemPrompt,
+                            contentsArr = contentsArr,
+                            enableWebSearch = enableWebSearch,
+                            includeUrlContext = enableWebSearch,
+                            onTextDelta = onTextDelta
+                        )
+                    }.recoverCatching { sseErr ->
+                        val sseMsg = sseErr.message.orEmpty()
+                        // Do not mask auth/quota errors; fall back to unary generateContent only for SSE transport issues
+                        if (sseMsg.contains("HTTP 401") || sseMsg.contains("HTTP 402") || sseMsg.contains("HTTP 429") || sseMsg.contains("HTTP 404")) {
+                            throw sseErr
+                        }
+                        executeGeminiGroundedRequest(
+                            apiKey = apiKey,
+                            modelName = candidateModel,
+                            qaSystemPrompt = qaSystemPrompt,
+                            contentsArr = contentsArr,
+                            enableWebSearch = enableWebSearch,
+                            includeUrlContext = enableWebSearch
+                        )
+                    }.getOrThrow()
+                } else {
+                    executeGeminiGroundedRequest(
+                        apiKey = apiKey,
+                        modelName = candidateModel,
+                        qaSystemPrompt = qaSystemPrompt,
+                        contentsArr = contentsArr,
+                        enableWebSearch = enableWebSearch,
+                        includeUrlContext = enableWebSearch
+                    )
+                }
             }
 
             if (attempt.isSuccess) {
@@ -1658,6 +1692,126 @@ Visual Grounding & Safety Rules:
             logCloudError(msg)
         }
         return null
+    }
+
+    private fun executeGeminiGroundedSseStreamRequest(
+        apiKey: String,
+        modelName: String,
+        qaSystemPrompt: String,
+        contentsArr: JSONArray,
+        enableWebSearch: Boolean,
+        includeUrlContext: Boolean,
+        onTextDelta: (String) -> Unit
+    ): GroundedWebAnswer {
+        val payload = JSONObject().apply {
+            put(
+                "systemInstruction",
+                JSONObject().put("parts", JSONArray().put(JSONObject().put("text", qaSystemPrompt)))
+            )
+            put("contents", contentsArr)
+            if (enableWebSearch) {
+                val toolsArr = JSONArray()
+                toolsArr.put(JSONObject().put("google_search", JSONObject()))
+                if (includeUrlContext) {
+                    toolsArr.put(JSONObject().put("url_context", JSONObject()))
+                }
+                put("tools", toolsArr)
+            }
+        }
+
+        // Security invariant: NEVER put API key in URL query param; always send via `x-goog-api-key` header.
+        val url = "https://generativelanguage.googleapis.com/v1beta/models/$modelName:streamGenerateContent?alt=sse"
+        val req = Request.Builder()
+            .url(url)
+            .addHeader("x-goog-api-key", apiKey)
+            .addHeader("Accept", "text/event-stream")
+            .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+            .build()
+
+        httpClient.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) {
+                val errBody = resp.body?.string().orEmpty()
+                throw IllegalStateException("HTTP ${resp.code}: ${errBody.take(220)}")
+            }
+            val stream = resp.body?.byteStream()
+                ?: throw IllegalStateException("Gemini SSE response body was empty")
+
+            val parser = SseLineParser()
+            val textBuilder = StringBuilder()
+            val citations = mutableListOf<Pair<String, String>>()
+            val seenUris = mutableSetOf<String>()
+            var finishReason = ""
+
+            fun processJsonFrame(dataJson: String) {
+                val trimmed = dataJson.trim()
+                if (trimmed.isEmpty() || trimmed == "[DONE]") return
+                val root = runCatching { JSONObject(trimmed) }.getOrNull() ?: return
+                val firstCandidate = root.optJSONArray("candidates")?.optJSONObject(0) ?: return
+                val fr = optNonNullString(firstCandidate, "finishReason")
+                if (fr.isNotEmpty()) finishReason = fr
+
+                val parts = firstCandidate.optJSONObject("content")?.optJSONArray("parts")
+                if (parts != null) {
+                    for (i in 0 until parts.length()) {
+                        val p = parts.optJSONObject(i) ?: continue
+                        if (p.optBoolean("thought", false)) continue
+                        val chunk = optNonNullString(p, "text")
+                        if (chunk.isNotEmpty()) {
+                            textBuilder.append(chunk)
+                            runCatching { onTextDelta(chunk) }
+                        }
+                    }
+                }
+
+                val groundingMeta = firstCandidate.optJSONObject("groundingMetadata")
+                val chunks = groundingMeta?.optJSONArray("groundingChunks")
+                if (chunks != null) {
+                    for (i in 0 until chunks.length()) {
+                        val web = chunks.optJSONObject(i)?.optJSONObject("web") ?: continue
+                        val uri = optNonNullString(web, "uri").trim()
+                        val title = optNonNullString(web, "title").trim().ifBlank { uri }
+                        if (uri.isNotEmpty() && seenUris.add(uri)) {
+                            citations.add(title to uri)
+                        }
+                    }
+                }
+            }
+
+            java.io.BufferedReader(java.io.InputStreamReader(stream, java.nio.charset.StandardCharsets.UTF_8)).use { reader ->
+                while (true) {
+                    val line = reader.readLine() ?: break
+                    val frame = parser.feedLine(line) ?: continue
+                    processJsonFrame(frame.data)
+                }
+                parser.flushPendingFrame()?.let { processJsonFrame(it.data) }
+            }
+
+            if (finishReason == "SAFETY" && textBuilder.isEmpty()) {
+                return GroundedWebAnswer(
+                    succeeded = true,
+                    answerKo = resolveSafetyNotice(finishReason),
+                    citations = emptyList(),
+                    providerBadge = "${modelName.uppercase()}-SSE"
+                )
+            }
+
+            val answerText = textBuilder.toString().trim()
+            if (answerText.isEmpty()) {
+                throw IllegalStateException("Gemini SSE stream returned empty text (finishReason=$finishReason)")
+            }
+
+            val badge = if (citations.isNotEmpty() || enableWebSearch) {
+                "GEMINI-SSE (${modelName.uppercase()})"
+            } else {
+                "${modelName.uppercase()}-SSE"
+            }
+            return GroundedWebAnswer(
+                succeeded = true,
+                answerKo = answerText,
+                citations = citations,
+                providerBadge = badge
+            )
+        }
     }
 
     private fun executeGeminiGroundedRequest(

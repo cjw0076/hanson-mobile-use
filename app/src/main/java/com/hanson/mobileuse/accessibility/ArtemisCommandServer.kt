@@ -3,8 +3,16 @@ package com.hanson.mobileuse.accessibility
 import android.accessibilityservice.AccessibilityService
 import android.util.Log
 import com.hanson.mobileuse.agent.ChatSender
+import com.hanson.mobileuse.agent.CoDrawElement
+import com.hanson.mobileuse.agent.CoDrawingCanvasEngine
+import com.hanson.mobileuse.agent.DynamicSseEnvelope
+import com.hanson.mobileuse.agent.DynamicUiEventBus
 import com.hanson.mobileuse.agent.HansonRuntimeHolder
 import com.hanson.mobileuse.agent.LiveChatMessage
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
@@ -17,6 +25,8 @@ import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -102,7 +112,7 @@ class ArtemisCommandServer(
                 totalRequests.incrementAndGet()
 
                 if (firstLine.startsWith("GET ") || firstLine.startsWith("POST ")) {
-                    handleHttp(firstLine, rawIn, out)
+                    handleHttp(sock, firstLine, rawIn, out)
                 } else {
                     handleJsonRpc(firstLine, out)
                 }
@@ -126,7 +136,7 @@ class ArtemisCommandServer(
         return sb.toString("UTF-8")
     }
 
-    private fun handleHttp(requestLine: String, rawIn: java.io.InputStream, out: OutputStream) {
+    private fun handleHttp(sock: Socket, requestLine: String, rawIn: java.io.InputStream, out: OutputStream) {
         val parts = requestLine.split(" ")
         if (parts.size < 2) return
         val method = parts[0]
@@ -152,6 +162,11 @@ class ArtemisCommandServer(
             when {
                 lower.startsWith("content-length:") -> {
                     contentLength = headerLine.substringAfter(":").trim().toIntOrNull() ?: 0
+                }
+                lower.startsWith("last-event-id:") -> {
+                    if (!queryParams.containsKey("from")) {
+                        queryParams["from"] = headerLine.substringAfter(":").trim()
+                    }
                 }
                 lower.startsWith("x-artemis-token:") -> {
                     queryParams["token"] = headerLine.substringAfter(":").trim()
@@ -219,7 +234,9 @@ class ArtemisCommandServer(
                     put(
                         "capabilities",
                         JSONObject().apply {
-                            put("streaming", false)
+                            put("streaming", true)
+                            put("sseDynamicUi", true)
+                            put("crossAppCoDrawing", true)
                             put("pushNotifications", true)
                             put("stateTransitionHistory", true)
                             put("portalProtocol", "droidrun-portal-v6")
@@ -234,6 +251,9 @@ class ArtemisCommandServer(
                             put("mcpTools", "/mcp/tools")
                             put("snapshot", "/snapshot")
                             put("elements", "/elements")
+                            put("sseBoard", "/sse/board")
+                            put("boardEvents", "/board/events")
+                            put("codrawCommand", "/codraw/command")
                             put("portalPing", "/portal/ping")
                             put("portalState", "/portal/state")
                             put("portalBrief", "/portal/brief")
@@ -243,6 +263,86 @@ class ArtemisCommandServer(
                 }
                 onBridgeEvent?.invoke(path, "200 OK (A2A Card)")
                 sendHttpResponse(out, 200, "application/json", card.toString())
+            }
+            "/sse/board" -> {
+                if (!"GET".equals(method, ignoreCase = true)) {
+                    sendHttpResponse(out, 405, "application/json", """{"status":"error","error":"Method Not Allowed"}""")
+                    return
+                }
+                val fromSeq = queryParams["from"]?.toLongOrNull() ?: 0L
+                onBridgeEvent?.invoke("GET /sse/board", "200 SSE Stream (from=$fromSeq)")
+                streamBoardSse(sock, out, fromSeq)
+            }
+            "/board/events" -> {
+                if (!"POST".equals(method, ignoreCase = true)) {
+                    sendHttpResponse(out, 405, "application/json", """{"status":"error","error":"Method Not Allowed"}""")
+                    return
+                }
+                val parsed = runCatching { JSONObject(body) }.getOrNull()
+                if (parsed == null) {
+                    sendHttpResponse(out, 400, "application/json", """{"status":"error","error":"Invalid JSON body"}""")
+                    return
+                }
+                var ingested = 0
+                val batch = parsed.optJSONArray("events")
+                if (batch != null) {
+                    for (i in 0 until batch.length()) {
+                        val item = batch.optJSONObject(i) ?: continue
+                        val evType = item.optString("event", item.optString("name", "tutor_command"))
+                        if (DynamicUiEventBus.ingestExternalJsonEvent(evType, item)) ingested++
+                    }
+                } else {
+                    val evType = parsed.optString("event", parsed.optString("name", "tutor_command"))
+                    if (DynamicUiEventBus.ingestExternalJsonEvent(evType, parsed)) ingested++
+                }
+                val resp = JSONObject()
+                    .put("status", "ok")
+                    .put("ingested", ingested)
+                    .put("lastSequenceId", DynamicUiEventBus.surfaceState.value.lastSequenceId)
+                onBridgeEvent?.invoke("POST /board/events", "200 OK (ingested=$ingested)")
+                sendHttpResponse(out, 200, "application/json", resp.toString())
+            }
+            "/codraw/command" -> {
+                if (!"POST".equals(method, ignoreCase = true)) {
+                    sendHttpResponse(out, 405, "application/json", """{"status":"error","error":"Method Not Allowed"}""")
+                    return
+                }
+                val parsed = runCatching { JSONObject(body) }.getOrNull()
+                if (parsed == null) {
+                    sendHttpResponse(out, 400, "application/json", """{"status":"error","error":"Invalid JSON body"}""")
+                    return
+                }
+                val action = parsed.optString("action", "").trim().lowercase()
+                var addedCount = 0
+                when (action) {
+                    "clear" -> CoDrawingCanvasEngine.clear()
+                    "overlay_start" -> {
+                        com.hanson.mobileuse.service.DynamicCanvasOverlayService.startIfPermitted(
+                            service.applicationContext,
+                            initialDrawMode = parsed.optBoolean("drawMode", false)
+                        )
+                    }
+                    "overlay_stop" -> {
+                        com.hanson.mobileuse.service.DynamicCanvasOverlayService.stop(service.applicationContext)
+                    }
+                    else -> {
+                        val elementsArr = parsed.optJSONArray("elements")
+                        if (elementsArr != null) {
+                            for (i in 0 until elementsArr.length()) {
+                                val elJson = elementsArr.optJSONObject(i) ?: continue
+                                if (DynamicUiEventBus.ingestExternalJsonEvent("codraw_command", elJson)) addedCount++
+                            }
+                        } else if (CoDrawElement.fromJson(parsed) != null) {
+                            if (DynamicUiEventBus.ingestExternalJsonEvent("codraw_command", parsed)) addedCount++
+                        }
+                    }
+                }
+                val resp = JSONObject()
+                    .put("status", "ok")
+                    .put("added", addedCount)
+                    .put("totalElements", CoDrawingCanvasEngine.state.value.elements.size)
+                onBridgeEvent?.invoke("POST /codraw/command", "200 OK (added=$addedCount)")
+                sendHttpResponse(out, 200, "application/json", resp.toString())
             }
             "/mcp/tools" -> {
                 val mcpTools: Any = com.hanson.mobileuse.agent.ToolSpecRegistry.toMcpToolsJson()
@@ -648,6 +748,59 @@ class ArtemisCommandServer(
         return response
     }
 
+    private fun streamBoardSse(sock: Socket, out: OutputStream, fromSeq: Long) {
+        val sseScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val queue = LinkedBlockingQueue<DynamicSseEnvelope>(256)
+        val collectJob = sseScope.launch {
+            DynamicUiEventBus.envelopes.collect { env ->
+                if (!queue.offer(env)) {
+                    queue.poll()
+                    queue.offer(env)
+                }
+            }
+        }
+        try {
+            sock.soTimeout = 0
+            val headers = buildString {
+                append("HTTP/1.1 200 OK\r\n")
+                append("Content-Type: text/event-stream; charset=utf-8\r\n")
+                append("Cache-Control: no-cache, no-transform\r\n")
+                append("Connection: keep-alive\r\n")
+                append("X-Accel-Buffering: no\r\n")
+                append("X-Content-Type-Options: nosniff\r\n\r\n")
+            }
+            out.write(headers.toByteArray(StandardCharsets.UTF_8))
+            out.flush()
+
+            // Replay buffered events strictly newer than `fromSeq` (`Last-Event-ID`)
+            var lastSent = fromSeq
+            for (env in DynamicUiEventBus.replayEnvelopesSince(fromSeq)) {
+                out.write(env.toSseWireFrame().toByteArray(StandardCharsets.UTF_8))
+                lastSent = maxOf(lastSent, env.sequenceId)
+            }
+            out.write(": connected seq=$lastSent\n\n".toByteArray(StandardCharsets.UTF_8))
+            out.flush()
+
+            while (isRunning.get() && !sock.isClosed) {
+                val next = queue.poll(15, TimeUnit.SECONDS)
+                if (next != null) {
+                    if (next.sequenceId > lastSent) {
+                        out.write(next.toSseWireFrame().toByteArray(StandardCharsets.UTF_8))
+                        out.flush()
+                        lastSent = next.sequenceId
+                    }
+                } else {
+                    out.write(": keepalive\n\n".toByteArray(StandardCharsets.UTF_8))
+                    out.flush()
+                }
+            }
+        } catch (_: Exception) {
+            // Client disconnected cleanly
+        } finally {
+            collectJob.cancel()
+        }
+    }
+
     private fun sendHttpResponse(
         out: OutputStream,
         statusCode: Int,
@@ -656,6 +809,7 @@ class ArtemisCommandServer(
     ) {
         val statusText = when (statusCode) {
             200 -> "OK"
+            400 -> "Bad Request"
             401 -> "Unauthorized"
             403 -> "Forbidden"
             404 -> "Not Found"

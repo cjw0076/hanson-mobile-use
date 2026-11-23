@@ -218,12 +218,36 @@ class MobileUseAgentEngine @JvmOverloads constructor(
         }
         FloatingHudService.onUndoLastClicked = { executeOneTapUndo() }
         FloatingHudService.onFinishRecordingClicked = { finishDemonstrationAndSaveRoutine() }
+        com.hanson.mobileuse.service.DynamicCanvasOverlayService.onAskWithCoDrawSketch = { q ->
+            submitCoDrawingQuery(q)
+        }
         LiveVoiceSessionManager.ensureInitialized(context) { spoken ->
             sendChatMessage(spoken)
         }
         GenerativeUiStateHolder.addErrorListener { telemetry ->
             onCanvasExecutionError(telemetry.rawJson.ifBlank { telemetry.toJsonString() })
         }
+    }
+
+    /**
+     * Submits a Human + AI Co-Drawing ("함께 그리기") query from either the in-app whiteboard
+     * or the cross-app `DynamicCanvasOverlayService`, injecting normalized human stroke regions
+     * and enabling AI `CODRAW:` overlay annotations in the live SSE response.
+     */
+    fun submitCoDrawingQuery(prompt: String) {
+        val cleanPrompt = prompt.trim().ifBlank { "방금 표시한 영역을 분석하고 핵심 위치를 함께 표시해줘" }
+        val activePkg = HansonAccessibilityService.engineState.value.activePackage
+            .substringAfterLast('.')
+            .ifBlank { "현재 화면" }
+        val sketchSummary = CoDrawingCanvasEngine.buildSpatialPromptSummary(
+            foregroundAppLabel = activePkg
+        )
+        val combinedPrompt = if (sketchSummary.isNotBlank()) {
+            "$cleanPrompt\n\n$sketchSummary"
+        } else {
+            "$cleanPrompt\n\n[공동 드로잉 모드] 대상 화면: $activePkg. 필요시 `CODRAW: RING <x> <y> <r> <라벨>` 또는 `CODRAW: ARROW <x1> <y1> <x2> <y2> <라벨>`로 핵심 위치를 함께 표시하세요."
+        }
+        sendChatMessage(combinedPrompt)
     }
 
     private fun logError(message: String, throwable: Throwable? = null) {
@@ -1273,6 +1297,7 @@ class MobileUseAgentEngine @JvmOverloads constructor(
 
         val qaJob = scope.launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
             try {
+                DynamicUiEventBus.beginStream(sourceLabel = "실시간 SSE 브리핑")
                 val answer = multimodalClient.answerTextOrGroundedWebQuery(
                     userGoal = safeGoal,
                     systemContext = systemContext,
@@ -1281,7 +1306,8 @@ class MobileUseAgentEngine @JvmOverloads constructor(
                     customBaseUrl = cfg.customBaseUrl,
                     chatHistory = recentChatHistory,
                     enableWebSearch = true,
-                    bridgeToken = bridgeToken
+                    bridgeToken = bridgeToken,
+                    onTextDelta = { chunk -> DynamicUiEventBus.appendStreamingDelta(chunk) }
                 )
 
                 if (answer.succeeded && answer.answerKo.isNotBlank()) {
@@ -1312,13 +1338,17 @@ class MobileUseAgentEngine @JvmOverloads constructor(
                     }.trim()
 
                     val badge = answer.providerBadge.ifBlank { "GEMINI-WEB" }
-                    val (explicitSpeak, cleanVisualAnswer) = BoardEventStreamCompiler.splitSpeakAndVisual(combinedWithCitations)
+                    val incrementalOut = IncrementalBoardStreamCompiler.compileIncremental(
+                        accumulatedRaw = combinedWithCitations
+                    )
+                    val explicitSpeak = incrementalOut.explicitSpeak
+                    val cleanVisualAnswer = incrementalOut.script.visualBodyText
                     val extractedInlineCitations = HumanSummaryAndCardBuilder.extractVerifiedHttpsCitations(cleanVisualAnswer)
                     val totalCitations = maxOf(verifiedCitations.size, extractedInlineCitations.size)
                     val rawAgentMsg = LiveChatMessage(
                         sender = ChatSender.AGENT,
                         text = cleanVisualAnswer,
-                        subtitle = if (totalCitations > 0) "실시간 웹 검색 · 출처 ${totalCitations}건" else "텍스트 AI 응답",
+                        subtitle = if (totalCitations > 0) "실시간 SSE 웹 검색 · 출처 ${totalCitations}건" else "실시간 SSE AI 응답",
                         toolBadge = badge,
                         succeeded = true
                     )
@@ -1326,14 +1356,15 @@ class MobileUseAgentEngine @JvmOverloads constructor(
                         HumanSummaryAndCardBuilder.transformGroundedWebResponse(
                             msg = rawAgentMsg,
                             cleanedRaw = cleanVisualAnswer,
-                            specialistRoleKo = "실시간 네이티브 웹 그라운딩 Q&A"
+                            specialistRoleKo = "실시간 네이티브 SSE 웹 그라운딩 Q&A"
                         )
                     } else {
                         rawAgentMsg
                     }
-                    val compiledBoardScript = BoardEventStreamCompiler.compile(
+                    val compiledBoardScript = DynamicUiEventBus.completeStreamWithScript(
                         rawText = combinedWithCitations,
-                        citations = formattedMsg.structuredCard?.items.orEmpty()
+                        citations = formattedMsg.structuredCard?.items.orEmpty(),
+                        sourceLabel = badge
                     )
                     val spokenToPlay = explicitSpeak
                         ?: compiledBoardScript.combinedSpokenText.ifBlank { formattedMsg.text }
@@ -1357,6 +1388,7 @@ class MobileUseAgentEngine @JvmOverloads constructor(
                     val errReason = answer.errorReason?.takeIf { it.isNotBlank() }
                         ?: GeminiMultimodalClient.lastCloudApiErrorReason?.takeIf { it.isNotBlank() }
                         ?: "AI API 키 또는 노트북 CLI 브리지(:18889)가 연결되지 않았습니다."
+                    DynamicUiEventBus.failStream(errReason)
                     _lastCloudApiError.value = errReason
                     aiInfrastructureRouter.recordCloudApiError(errReason, badge = "AI 연결 오류")
 

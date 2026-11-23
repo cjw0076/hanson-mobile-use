@@ -126,6 +126,11 @@
             android:name=".service.FloatingHudService"
             android:exported="false" />
 
+        <!-- TIER 2: Cross-App SSE Dynamic UI & Co-Drawing Jetpack Compose Overlay Service -->
+        <service
+            android:name=".service.DynamicCanvasOverlayService"
+            android:exported="false" />
+
         <!-- TIER 5: OS-Wide Quick Settings Tile (Summon Hanson from Notification Shade) -->
         <service
             android:name=".service.HansonQuickTileService"

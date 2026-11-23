@@ -107,6 +107,8 @@ import com.hanson.mobileuse.agent.PersonalRoutine
 import com.hanson.mobileuse.agent.ProactiveDailyBriefEngine
 import com.hanson.mobileuse.agent.ScratchpadEntry
 import com.hanson.mobileuse.agent.StructuredUiCard
+import com.hanson.mobileuse.agent.DynamicUiEventBus
+import com.hanson.mobileuse.agent.SseStreamPhase
 import com.hanson.mobileuse.agent.StructuredUiTemplateType
 import com.hanson.mobileuse.agent.UserExperienceMode
 import com.hanson.mobileuse.agent.VaultHandleSummary
@@ -114,9 +116,11 @@ import com.hanson.mobileuse.agent.VaultSecretCategory
 import com.hanson.mobileuse.agent.WatcherActionMode
 import com.hanson.mobileuse.agent.WatcherRule
 import com.hanson.mobileuse.notification.InterceptedNotification
+import com.hanson.mobileuse.service.DynamicCanvasOverlayService
 import com.hanson.mobileuse.ui.components.AhaboardDotGridBox
 import com.hanson.mobileuse.ui.components.AhaboardMultimodalMediaView
 import com.hanson.mobileuse.ui.components.AhaboardResponseCard
+import com.hanson.mobileuse.ui.components.CoDrawingStudioModalSheet
 import com.hanson.mobileuse.ui.components.CodeBadge
 import com.hanson.mobileuse.ui.components.CompanionDrawerBottomSheet
 import com.hanson.mobileuse.ui.components.CompanionDrawerTab
@@ -143,6 +147,7 @@ import com.hanson.mobileuse.ui.components.PinnedRoutinesAndShowMeCard
 import com.hanson.mobileuse.ui.components.PlanBlueprintActionBanner
 import com.hanson.mobileuse.ui.components.SessionInboxDrawerSheet
 import com.hanson.mobileuse.ui.components.SlashAndMentionPaletteCard
+import com.hanson.mobileuse.ui.components.SseLiveDynamicUiSurface
 import com.hanson.mobileuse.ui.components.StudioComposerCard
 import com.hanson.mobileuse.ui.components.StudioTopHeaderBar
 import com.hanson.mobileuse.ui.components.WorkWithAppsCompanionStrip
@@ -252,6 +257,7 @@ fun CommandCenterScreen(
     var selectedModeIdx by rememberSaveable { mutableIntStateOf(0) }
     var showOverflowMenu by remember { mutableStateOf(false) }
     var showApiKeySheet by rememberSaveable { mutableStateOf(false) }
+    var showCoDrawStudioSheet by rememberSaveable { mutableStateOf(false) }
     var showOnboardingWizard by rememberSaveable { mutableStateOf(showOnboardingInitially) }
     var selectedDetailMessage by remember { mutableStateOf<LiveChatMessage?>(null) }
 
@@ -337,7 +343,26 @@ fun CommandCenterScreen(
     }
 
     val hudShowing by com.hanson.mobileuse.service.FloatingHudService.isShowing.collectAsState()
+    val coDrawOverlayActive by DynamicCanvasOverlayService.isOverlayActive.collectAsState()
+    val sseSurfaceState by DynamicUiEventBus.surfaceState.collectAsState()
     val hudReady = hudShowing || runCatching { Settings.canDrawOverlays(context) }.getOrDefault(false)
+    val toggleCrossAppCoDrawOverlay: () -> Unit = {
+        if (coDrawOverlayActive) {
+            DynamicCanvasOverlayService.stop(context)
+        } else if (Settings.canDrawOverlays(context)) {
+            DynamicCanvasOverlayService.startIfPermitted(context, initialDrawMode = true)
+        } else {
+            runCatching {
+                val intent = Intent(
+                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:${context.packageName}")
+                ).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(intent)
+            }
+        }
+    }
     val workspaceFileCount = remember(workspaceState.files) {
         workspaceState.files.count { !it.isDirectory }
     }
@@ -1166,6 +1191,32 @@ fun CommandCenterScreen(
                         }
                     }
                 }
+
+                // Live SSE Streaming Dynamic UI Surface (progressively renders tokens, quizzes & checklists)
+                val showLiveSseItem = sseSurfaceState.phase == SseStreamPhase.STREAMING ||
+                    sseSurfaceState.phase == SseStreamPhase.CONNECTING ||
+                    sseSurfaceState.widgets.isNotEmpty()
+                if (showLiveSseItem) {
+                    item(key = "live_sse_dynamic_surface") {
+                        SseLiveDynamicUiSurface(
+                            surfaceState = sseSurfaceState,
+                            compactOverlayMode = false,
+                            onCitationClick = { rawUrl ->
+                                if (rawUrl.startsWith("https://", ignoreCase = true)) {
+                                    runCatching {
+                                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(rawUrl)).apply {
+                                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                        }
+                                        context.startActivity(intent)
+                                    }
+                                }
+                            },
+                            onSpeakText = { spoken -> LiveVoiceSessionManager.speakAgentResponse(spoken) },
+                            onAskAboutItem = { followUp -> onSendChatMessage(followUp) },
+                            onOpenCoDraw = { showCoDrawStudioSheet = true }
+                        )
+                    }
+                }
             }
 
             // 4.5 Live Voice Conversation Bar (also surfaces voice errors such as missing mic permission)
@@ -1241,6 +1292,57 @@ fun CommandCenterScreen(
                     )
 
                     if (!isKeyboardOpen) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 3.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(999.dp))
+                                    .background(ObsidianColors.SurfaceHigh)
+                                    .border(1.dp, ObsidianColors.GlassHighlight, RoundedCornerShape(999.dp))
+                                    .clickable { showCoDrawStudioSheet = true }
+                                    .padding(horizontal = 12.dp, vertical = 7.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "✎ 함께 그리기 스튜디오",
+                                    color = ObsidianColors.TextPrimary,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(999.dp))
+                                    .background(if (coDrawOverlayActive) ObsidianColors.Accent else ObsidianColors.SurfaceHigh)
+                                    .border(
+                                        1.dp,
+                                        if (coDrawOverlayActive) ObsidianColors.Accent else ObsidianColors.GlassBorder,
+                                        RoundedCornerShape(999.dp)
+                                    )
+                                    .clickable { toggleCrossAppCoDrawOverlay() }
+                                    .padding(horizontal = 12.dp, vertical = 7.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = if (coDrawOverlayActive) "● 타 앱 오버레이 켜짐" else "타 앱 위 SSE·그리기 ↗",
+                                    color = if (coDrawOverlayActive) ObsidianColors.OnAccent else ObsidianColors.TextPrimary,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+
                         FlagshipQuickPillDock(
                             activeBubblesCount = memoryBubbles.count { it.enabled },
                             routinesCount = personalRoutines.size,
@@ -1458,6 +1560,31 @@ fun CommandCenterScreen(
                     selectedDetailMessage = null
                     onSendChatMessage(followUpPrompt)
                 }
+            )
+        }
+
+        if (showCoDrawStudioSheet) {
+            CoDrawingStudioModalSheet(
+                onDismiss = { showCoDrawStudioSheet = false },
+                onSubmitCoDrawingPrompt = { prompt ->
+                    val engine = com.hanson.mobileuse.agent.HansonRuntimeHolder.getAgentEngine(context)
+                    engine.submitCoDrawingQuery(prompt)
+                },
+                onLaunchCrossAppOverlay = {
+                    showCoDrawStudioSheet = false
+                    toggleCrossAppCoDrawOverlay()
+                },
+                onCitationClick = { rawUrl ->
+                    if (rawUrl.startsWith("https://", ignoreCase = true)) {
+                        runCatching {
+                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(rawUrl)).apply {
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                            context.startActivity(intent)
+                        }
+                    }
+                },
+                onSpeakText = { spoken -> LiveVoiceSessionManager.speakAgentResponse(spoken) }
             )
         }
 

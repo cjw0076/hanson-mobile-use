@@ -149,6 +149,7 @@ class FloatingHudService : Service() {
                 tempPassThroughDepth.updateAndGet { (it - 1).coerceAtLeast(0) } > 0
             }
             instance?.applyTouchPassthroughSync(shouldPassThrough)
+            DynamicCanvasOverlayService.setGesturePassThrough(shouldPassThrough)
         }
 
         /**
@@ -161,6 +162,7 @@ class FloatingHudService : Service() {
             if (!passthrough) {
                 tempPassThroughDepth.set(0)
                 instance?.applyTouchPassthrough(false)
+                DynamicCanvasOverlayService.setGesturePassThrough(false)
             }
         }
     }
