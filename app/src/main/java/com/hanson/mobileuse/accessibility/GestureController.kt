@@ -119,6 +119,61 @@ object GestureController {
     }
 
     /**
+     * Non-Fling Precision Scroll absorbed from `phone-harness/phone-harness` (`android.py:_input_scroll`).
+     *
+     * Standard `swipe()` lifts the finger while still moving, causing Android `VelocityTracker` to
+     * trigger momentum coasting (fling) and skip list items silently.
+     *
+     * This 2-phase chained gesture:
+     * 1. Moves smoothly from `(startX, startY)` to `(endX, endY)` with `willContinue = true`.
+     * 2. Holds the finger stationary at `(endX, endY)` for `settleHoldMs` (default 200ms) before
+     *    lifting (`willContinue = false`) so scroll velocity drops to 0 px/s with zero fling overshoot.
+     */
+    fun scrollWithoutFling(
+        service: AccessibilityService,
+        startX: Float,
+        startY: Float,
+        endX: Float,
+        endY: Float,
+        moveDurationMs: Long = 420L,
+        settleHoldMs: Long = 200L
+    ): Boolean {
+        val sx = startX.coerceAtLeast(0f)
+        val sy = startY.coerceAtLeast(0f)
+        val ex = endX.coerceAtLeast(0f)
+        val ey = endY.coerceAtLeast(0f)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val movePath = Path().apply {
+                moveTo(sx, sy)
+                lineTo(ex, ey)
+            }
+            val moveStroke = GestureDescription.StrokeDescription(
+                movePath,
+                0L,
+                moveDurationMs.coerceIn(180L, 3000L),
+                true
+            )
+            if (!dispatch(service, GestureDescription.Builder().addStroke(moveStroke).build())) {
+                return false
+            }
+            val holdPath = Path().apply {
+                moveTo(ex, ey)
+                lineTo(ex + 0.5f, ey + 0.5f)
+            }
+            val holdStroke = moveStroke.continueStroke(
+                holdPath,
+                0L,
+                settleHoldMs.coerceIn(120L, 600L),
+                false
+            )
+            return dispatch(service, GestureDescription.Builder().addStroke(holdStroke).build())
+        } else {
+            return swipe(service, sx, sy, ex, ey, moveDurationMs + settleHoldMs + 250L)
+        }
+    }
+
+    /**
      * True Haptic Drag-and-Drop Trajectory:
      * Phase 1: Stationary long-press hold at `(startX, startY)` for `holdMs` with `willContinue = true` (triggers pickup haptic).
      * Phase 2: Continuous smooth interpolation to `(endX, endY)` over `dragDurationMs`.

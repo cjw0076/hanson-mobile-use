@@ -1,28 +1,34 @@
-# STATE — Hanson Mobile-Use AI (Mobile Agent Studio v6.4.0)
+# STATE — Hanson Mobile-Use AI (Mobile Agent Studio v6.5.0)
 
-**Updated:** 2026-11-23
-**Branch:** `main` (`origin`: `https://github.com/cjw0076/hanson-mobile-use`, `PUBLIC`, signed `v6.4.0` GitHub Release APK)
+**Updated:** 2026-11-24
+**Branch:** `main` (`origin`: `https://github.com/cjw0076/hanson-mobile-use`, `PUBLIC`, signed `v6.5.0` GitHub Release APK)
 
 ## Completed & Verified
 
-1. **v6.4.0 In-App & Cross-App SSE Dynamic UI + Mobile Co-Drawing Architecture & Jetpack Compose**
-   - **Architecture Specification ([`docs/SSE_DYNAMIC_UI_AND_CODRAW_ARCHITECTURE.md`](docs/SSE_DYNAMIC_UI_AND_CODRAW_ARCHITECTURE.md))**: Full end-to-end topology, RFC 8895 dual-channel SSE wire protocol, out-of-app dual-window touch-passthrough state machine, normalized `0..1` + `A11yNode` anchor coordinate model, and security boundaries.
-   - **Real-Time SSE Engine & Incremental Compiler ([`SseDynamicUiEngine.kt`](app/src/main/java/com/hanson/mobileuse/agent/SseDynamicUiEngine.kt))**:
-     - RFC 8895 `SseLineParser`, `DynamicUiEventBus` (`StateFlow` + `SharedFlow` + 256-event `Last-Event-ID` ring buffer), `IncrementalBoardStreamCompiler` (`SPEAK:`, `BOARD:`, interactive `QUIZ:`, `CHECK:`, `CODRAW:`), and HTTPS/loopback-only `ExternalSseStreamClient`.
-     - Wired real `streamGenerateContent?alt=sse` (`x-goog-api-key` header) with clean unary fallback in [`GeminiMultimodalClient.kt`](app/src/main/java/com/hanson/mobileuse/agent/GeminiMultimodalClient.kt).
-   - **Human + AI Normalized Co-Drawing Engine ([`CoDrawingCanvasEngine.kt`](app/src/main/java/com/hanson/mobileuse/agent/CoDrawingCanvasEngine.kt))**:
-     - `0..1` normalized coordinates (lossless `0..1000` Set-of-Marks & `A11yNode` bounds anchor mapping), Human (`FREEHAND_PEN`, `HIGHLIGHTER_BAND`, `ARROW`, `CIRCLE_LASSO`) + AI (`SPOTLIGHT_RING`, `ARROW`, `HIGHLIGHT_BOX`, `CALLOUT_BADGE`) separable layers, undo/redo stacks, `CODRAW:` DSL parser, and `buildSpatialPromptSummary()` wired into `MobileUseAgentEngine.submitCoDrawingQuery()`.
-   - **Shared Jetpack Compose UI & Out-of-App Cross-App Overlay ([`SseDynamicUiAndCoDrawComposables.kt`](app/src/main/java/com/hanson/mobileuse/ui/components/SseDynamicUiAndCoDrawComposables.kt) + [`DynamicCanvasOverlayService.kt`](app/src/main/java/com/hanson/mobileuse/service/DynamicCanvasOverlayService.kt))**:
-     - `SseLiveDynamicUiSurface` (live SSE badge, animated headline, stat pills, takeaways, interactive Quiz & Checklist widgets, karaoke captions), `CoDrawingInteractiveCanvas` (quadratic Bezier strokes, pulsing AI spotlight rings, clamped callout badges), `CoDrawingStudioModalSheet` in [`CommandCenterScreen.kt`](app/src/main/java/com/hanson/mobileuse/ui/screens/CommandCenterScreen.kt), and dual-window `ComposeView` `SYSTEM_ALERT_WINDOW` overlay (`OverlayComposeLifecycleOwner`, `PASSTHROUGH_WATCH` ↔ `CO_DRAW_ACTIVE`, draggable always-touchable control pill, automatic gesture-dispatch yield, `android:exported="false"`).
-   - **Authenticated Loopback SSE & Co-Draw Server ([`ArtemisCommandServer.kt`](app/src/main/java/com/hanson/mobileuse/accessibility/ArtemisCommandServer.kt))**:
-     - Added token-authenticated `GET /sse/board?from=<seq>` (`Last-Event-ID` replay + keepalive), `POST /board/events`, and `POST /codraw/command`, updating `/.well-known/agent-card.json` `capabilities.streaming = true`.
+1. **v6.5.0 `phone-harness` & `PhoneHarness` SOTA Absorption + Hardening**
+   - **Non-Fling Precision Scroll & Settle-Verified Wait Primitives ([`GestureController.kt`](app/src/main/java/com/hanson/mobileuse/accessibility/GestureController.kt) + [`ArtemisCommandServer.kt`](app/src/main/java/com/hanson/mobileuse/accessibility/ArtemisCommandServer.kt))**:
+     - Added 2-phase chained `scrollWithoutFling()` (smooth move with `willContinue=true` + stationary `200ms` brake-hold before finger-up so Android `VelocityTracker` drops to `0 px/s` with zero fling overshoot).
+     - Added token-authenticated `:18888` routes: `POST /scroll_no_fling`, `/wait_for_text`, `/wait_stable` (using `6%..92%` `ContentBandScreenFilter` excluding status clock & bottom nav), and `GET /preflight`.
+   - **Prompt-Injection Screen Isolation, Denylist Preflight & Auditable Run Journal ([`PhoneHarnessAbsorptionEngine.kt`](app/src/main/java/com/hanson/mobileuse/agent/PhoneHarnessAbsorptionEngine.kt) + [`GeminiMultimodalClient.kt`](app/src/main/java/com/hanson/mobileuse/agent/GeminiMultimodalClient.kt))**:
+     - Wrapped all VLM UI tree observations inside `<untrusted_screen_data>` trust boundaries with delimiter sanitization and EN/KO indirect prompt-injection detection (`UntrustedScreenDataGuard`).
+     - Added global + Korean banking/wallet/password-manager app denylist preflight and risky tap/field classification, plus `AgentRunJournal` (`schemaVersion: "hanson-journal-v1"`) with structured failure taxonomy.
+   - **Security-Hardened Background VirtualDisplay ([`HansonVirtualDisplayManager.kt`](app/src/main/java/com/hanson/mobileuse/service/HansonVirtualDisplayManager.kt))**:
+     - Independent `DisplayManager.createVirtualDisplay` + `ImageReader` exposed via token-authenticated `:18888` `/vdisplay/start`, `/vdisplay/status`, `/vdisplay/snapshot`, `/vdisplay/stop` — storing frames strictly in-memory / app-private `cacheDir` (zero world-readable `/sdcard/` leaks).
+   - **Composable Python Phone Harness CLI, AST Guard, Agent Skill & HTML Trace Viewer (`harness/`)**:
+     - [`harness/hanson_harness.py`](harness/hanson_harness.py): zero-dependency Python 3.9+ flat helper script runner (`screen`, `tap_text`, `tap_ui`, `type_text`, `scroll`, `scroll_until`, `scroll_collect`, `wait_for_text`, `wait_stable`, `preflight`, `push_board_event`, `codraw_ring`, `codraw_arrow`, `vdisplay_*`), `:18888` native Korean IME priority + zero-app ADB fallback (`adb mdns` wireless `pair`, Windows/macOS/Linux ADB auto-discovery, `isKeyguardShowing` lock refusal gate, rotation-aware `dumpsys window displays` bounds, zero-settings-mutation `awake` via `KEYCODE_UNKNOWN`, persistent `~/.hanson-mobile-use/agent-workspace/agent_helpers.py`).
+     - [`harness/hanson_script_guard.py`](harness/hanson_script_guard.py): fail-closed Python AST static safety classifier (`--safe` mode) + untrusted screen wrapper & preflight.
+     - [`harness/hanson_trace_viewer.py`](harness/hanson_trace_viewer.py): offline XSS-escaped 0%-saturation monochrome HTML replay viewer for `AgentRunJournal` JSON/JSONL traces.
+     - [`harness/SKILL.md`](harness/SKILL.md): ready-to-drop skill instructions for Claude Code, Codex, Gemini CLI, Cursor, and Antigravity.
+   - **Cold-Start SSE Bug Fixed ([`SseDynamicUiEngine.kt`](app/src/main/java/com/hanson/mobileuse/agent/SseDynamicUiEngine.kt))**:
+     - Fixed `DynamicUiEventBus.beginStream()` to publish `stream_start` BEFORE updating `_surfaceState.lastSequenceId` so cold-start `Last-Event-ID` tracking is strictly `>= 1`.
 
-2. **Empirical Verification Results (`v6.4.0`)**
-   - **Android Gradle Unit Tests (`gradlew testDebugUnitTest`)**: **30 suites, 538 tests, 0 failures, 0 errors, 0 skipped** (including new `SseDynamicUiAndCoDrawTest` 5 tests + `PureAchromaticDesignTest` + `BoardEventStreamEngineTest` + `ModernAiPipelineRegressionTest` + `SecurityHardeningVerificationTest`).
-   - **Signed Release APK (`gradlew assembleRelease`)**: `app/build/outputs/apk/release/app-release.apk` (`167,066,224` bytes, SHA-256 `d05314b07b8dbce8828e1bfe2cda39cf09afca2535e17624bf79ef128431384f`, `apksigner verify` Scheme v2 `PASS`, **`RELEASE_APK_SECRET_HITS=0`** across 4 DEX files / 361 entries).
-   - **Python & Web Security Verification**: `BRIDGE_SECURITY_TESTS=PASS` (`45` tools + `/web/research`), `MCP_SECURITY_TESTS=PASS` (`12` tools, `6.0.0`), `PREVIEW_JS_SYNTAX=PASS`, `WORKING_TREE_ZERO_LEAK_HITS=0`, `PYCACHE_DIRS=0`.
+2. **Empirical Verification Results (`v6.5.0`)**
+   - **Android Gradle Unit Tests (`gradlew testDebugUnitTest`)**: **31 suites, 542 tests, 0 failures, 0 errors, 0 skipped** (including new `PhoneHarnessAbsorptionTest` 4 tests + `SseDynamicUiAndCoDrawTest` 5 tests + `PureAchromaticDesignTest` + `SecurityHardeningVerificationTest`).
+   - **Python Harness Unit Tests (`python -B harness/test_hanson_harness.py`)**: **5/5 tests PASS** (`0.009s`), `doctor` (`[PASS] adb binary`), `--safe` AST block (`exit 3`).
+   - **Signed Release APK (`gradlew assembleRelease`)**: `app/build/outputs/apk/release/app-release.apk` (`167,098,992` bytes, SHA-256 `bffc33f5d914274fdef37052fea04502a4db5c59fa8491181e2e69a0d09d0f24`, `apksigner verify` Scheme v2 `PASS`, **`RELEASE_APK_SECRET_HITS=0`** across 4 DEX files / 361 entries).
+   - **Security & Hygiene Gates**: `ZERO_LEAK_HITS=0`, `PYCACHE_DIRS=0`, `PREVIEW_HTTP=200`.
 
 ## Next Steps
 
-1. Install signed `v6.4.0` Release APK on Galaxy S25 (`adb install -r --user 0` or direct download) to test live Gemini SSE streaming, in-app `✎ 함께 그리기 스튜디오`, and `타 앱 위 SSE·그리기 ↗` cross-app Compose overlay over KakaoTalk/Chrome/YouTube while preserving encrypted `BlindCredentialVault` keys.
-2. Optionally mirror live SSE Quiz/Checklist + Co-Drawing canvas preview inside `docs/studio-preview.html` for browser-only demos.
+1. Reconnect Galaxy S25 (or download signed `v6.5.0` Release APK directly) to exercise live `:18888` `hanson_harness.py` batch scripts, non-fling `scroll_collect`, background `vdisplay_start()`, and cross-app SSE Co-Drawing on physical Android 16 hardware.
+2. Optionally publish `harness/SKILL.md` as a standalone Codex/Claude skill pack referencing the public GitHub repo.

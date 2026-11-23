@@ -303,21 +303,21 @@ object DynamicUiEventBus {
         synchronized(historyLock) {
             appliedCoDrawIds.clear()
         }
-        _surfaceState.value = DynamicUiSurfaceState(
-            streamId = streamId,
-            spaceId = spaceId,
-            turnIndex = turnIndex,
-            phase = SseStreamPhase.STREAMING,
-            sourceLabel = sourceLabel,
-            lastSequenceId = seqGenerator.get()
-        )
-        publishEnvelope(
+        val startSeq = publishEnvelope(
             eventType = "stream_start",
             payload = JSONObject()
                 .put("streamId", streamId)
                 .put("spaceId", spaceId)
                 .put("turnIndex", turnIndex)
                 .put("sourceLabel", sourceLabel)
+        )
+        _surfaceState.value = DynamicUiSurfaceState(
+            streamId = streamId,
+            spaceId = spaceId,
+            turnIndex = turnIndex,
+            phase = SseStreamPhase.STREAMING,
+            sourceLabel = sourceLabel,
+            lastSequenceId = startSeq
         )
         return streamId
     }

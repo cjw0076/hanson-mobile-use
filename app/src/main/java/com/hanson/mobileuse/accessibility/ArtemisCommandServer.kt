@@ -254,6 +254,14 @@ class ArtemisCommandServer(
                             put("sseBoard", "/sse/board")
                             put("boardEvents", "/board/events")
                             put("codrawCommand", "/codraw/command")
+                            put("preflight", "/preflight")
+                            put("scrollNoFling", "/scroll_no_fling")
+                            put("waitForText", "/wait_for_text")
+                            put("waitStable", "/wait_stable")
+                            put("vdisplayStart", "/vdisplay/start")
+                            put("vdisplayStatus", "/vdisplay/status")
+                            put("vdisplaySnapshot", "/vdisplay/snapshot")
+                            put("vdisplayStop", "/vdisplay/stop")
                             put("portalPing", "/portal/ping")
                             put("portalState", "/portal/state")
                             put("portalBrief", "/portal/brief")
@@ -343,6 +351,203 @@ class ArtemisCommandServer(
                     .put("totalElements", CoDrawingCanvasEngine.state.value.elements.size)
                 onBridgeEvent?.invoke("POST /codraw/command", "200 OK (added=$addedCount)")
                 sendHttpResponse(out, 200, "application/json", resp.toString())
+            }
+            "/preflight" -> {
+                val snap = HierarchyDumper.captureAtomicSnapshot(service, includeScreenshot = false)
+                val visibleText = snap.indexedElements.joinToString("\n") {
+                    listOf(it.text, it.contentDesc).filter(String::isNotBlank).joinToString(" ")
+                }
+                val verdict = com.hanson.mobileuse.agent.UntrustedScreenDataGuard.evaluatePreflightSafety(
+                    packageName = snap.activePackage,
+                    visibleScreenText = visibleText
+                )
+                val resp = JSONObject().apply {
+                    put("status", if (verdict.isSafeForUnattendedSession) "ok" else "blocked")
+                    put("safe", verdict.isSafeForUnattendedSession)
+                    put("riskLevel", verdict.level.name)
+                    put("packageName", snap.activePackage)
+                    put("matchedTerms", JSONArray(verdict.matchedTerms))
+                    put("promptInjectionSignals", JSONArray(verdict.promptInjectionSignals))
+                    put("reasonKo", verdict.reasonKo)
+                    put("screenWidth", snap.screenWidth)
+                    put("screenHeight", snap.screenHeight)
+                    put("elementCount", snap.indexedElements.size)
+                }
+                onBridgeEvent?.invoke("GET /preflight", if (verdict.isSafeForUnattendedSession) "200 SAFE" else "200 BLOCKED")
+                sendHttpResponse(out, 200, "application/json", resp.toString())
+            }
+            "/scroll_no_fling" -> {
+                if (!"POST".equals(method, ignoreCase = true)) {
+                    sendHttpResponse(out, 405, "application/json", """{"status":"error","error":"Method Not Allowed"}""")
+                    return
+                }
+                val parsed = runCatching { JSONObject(body) }.getOrDefault(JSONObject())
+                val snap = HierarchyDumper.captureAtomicSnapshot(service, includeScreenshot = false)
+                val w = snap.screenWidth.coerceAtLeast(360).toFloat()
+                val h = snap.screenHeight.coerceAtLeast(640).toFloat()
+                // Direction matches phone-harness semantics: "down" reveals content further down (finger drags up)
+                val direction = parsed.optString("direction", "down").trim().lowercase()
+                val amount = parsed.optDouble("amount", 0.55).toFloat().coerceIn(0.10f, 0.85f)
+                val cx = parsed.optDouble("x", (w / 2.0)).toFloat().coerceIn(w * 0.08f, w * 0.92f)
+                val cy = parsed.optDouble("y", (h / 2.0)).toFloat().coerceIn(h * 0.12f, h * 0.88f)
+                val (dx, dy) = when (direction) {
+                    "up" -> 0f to (h * amount)
+                    "left" -> (w * amount) to 0f
+                    "right" -> -(w * amount) to 0f
+                    else -> 0f to -(h * amount) // "down": finger moves upward to reveal lower rows
+                }
+                val sx = (cx - dx / 2f).coerceIn(w * 0.06f, w * 0.94f)
+                val sy = (cy - dy / 2f).coerceIn(h * 0.08f, h * 0.92f)
+                val ex = (cx + dx / 2f).coerceIn(w * 0.06f, w * 0.94f)
+                val ey = (cy + dy / 2f).coerceIn(h * 0.08f, h * 0.92f)
+                val ok = withTemporaryHudPassThrough {
+                    GestureController.scrollWithoutFling(
+                        service = service,
+                        startX = sx,
+                        startY = sy,
+                        endX = ex,
+                        endY = ey,
+                        moveDurationMs = parsed.optLong("moveDurationMs", 420L),
+                        settleHoldMs = parsed.optLong("settleHoldMs", 200L)
+                    )
+                }
+                val resp = JSONObject()
+                    .put("status", if (ok) "ok" else "failed")
+                    .put("success", ok)
+                    .put("direction", direction)
+                    .put("from", JSONArray().put(sx.toInt()).put(sy.toInt()))
+                    .put("to", JSONArray().put(ex.toInt()).put(ey.toInt()))
+                onBridgeEvent?.invoke("POST /scroll_no_fling", if (ok) "200 OK ($direction)" else "200 FAILED")
+                sendHttpResponse(out, 200, "application/json", resp.toString())
+            }
+            "/wait_for_text" -> {
+                val parsed = if ("POST".equals(method, ignoreCase = true)) {
+                    runCatching { JSONObject(body) }.getOrDefault(JSONObject())
+                } else {
+                    JSONObject()
+                }
+                val query = parsed.optString("query", queryParams["query"].orEmpty()).trim()
+                val exact = parsed.optBoolean("exact", queryParams["exact"] == "true")
+                val timeoutMs = parsed.optLong("timeoutMs", queryParams["timeoutMs"]?.toLongOrNull() ?: 6000L).coerceIn(250L, 15_000L)
+                val intervalMs = parsed.optLong("intervalMs", 350L).coerceIn(150L, 1500L)
+                if (query.isEmpty()) {
+                    sendHttpResponse(out, 400, "application/json", """{"status":"error","error":"Missing query"}""")
+                    return
+                }
+                val deadline = System.currentTimeMillis() + timeoutMs
+                var matchedNode: IndexedUiElement? = null
+                while (System.currentTimeMillis() <= deadline) {
+                    val snap = HierarchyDumper.captureAtomicSnapshot(service, includeScreenshot = false)
+                    matchedNode = snap.indexedElements.firstOrNull { node ->
+                        val fields = listOf(node.text, node.contentDesc).filter(String::isNotBlank)
+                        fields.any { f -> if (exact) f.equals(query, ignoreCase = true) else f.contains(query, ignoreCase = true) }
+                    }
+                    if (matchedNode != null) break
+                    runCatching { Thread.sleep(intervalMs) }
+                }
+                val resp = JSONObject().apply {
+                    put("status", if (matchedNode != null) "ok" else "timeout")
+                    put("found", matchedNode != null)
+                    put("query", query)
+                    if (matchedNode != null) {
+                        put("index", matchedNode.index)
+                        put("text", matchedNode.text.ifBlank { matchedNode.contentDesc })
+                        put("x", matchedNode.centerX)
+                        put("y", matchedNode.centerY)
+                    }
+                }
+                onBridgeEvent?.invoke("/wait_for_text", if (matchedNode != null) "200 FOUND" else "200 TIMEOUT")
+                sendHttpResponse(out, 200, "application/json", resp.toString())
+            }
+            "/wait_stable" -> {
+                val parsed = if ("POST".equals(method, ignoreCase = true)) {
+                    runCatching { JSONObject(body) }.getOrDefault(JSONObject())
+                } else {
+                    JSONObject()
+                }
+                val timeoutMs = parsed.optLong("timeoutMs", queryParams["timeoutMs"]?.toLongOrNull() ?: 4500L).coerceIn(300L, 12_000L)
+                val intervalMs = parsed.optLong("intervalMs", 300L).coerceIn(150L, 1000L)
+                val settleReads = parsed.optInt("settle", 2).coerceIn(2, 5)
+                val deadline = System.currentTimeMillis() + timeoutMs
+                var prevSet: Set<String>? = null
+                var sameCount = 0
+                var settled = false
+                var lastContent: Set<String> = emptySet()
+                while (System.currentTimeMillis() <= deadline) {
+                    val snap = HierarchyDumper.captureAtomicSnapshot(service, includeScreenshot = false)
+                    val h = snap.screenHeight.coerceAtLeast(1).toFloat()
+                    val pairs = snap.indexedElements.mapNotNull { el ->
+                        val txt = el.text.ifBlank { el.contentDesc }.trim()
+                        if (txt.isEmpty()) null else txt to (el.centerY.toFloat() / h)
+                    }
+                    lastContent = com.hanson.mobileuse.agent.ContentBandScreenFilter.filterContentBandTexts(pairs)
+                    if (prevSet != null && lastContent == prevSet) {
+                        sameCount++
+                        if (sameCount >= settleReads - 1) {
+                            settled = true
+                            break
+                        }
+                    } else {
+                        sameCount = 0
+                    }
+                    prevSet = lastContent
+                    runCatching { Thread.sleep(intervalMs) }
+                }
+                val resp = JSONObject().apply {
+                    put("status", "ok")
+                    put("settled", settled)
+                    put("contentItemCount", lastContent.size)
+                    put("contentTexts", JSONArray(lastContent.take(40)))
+                }
+                onBridgeEvent?.invoke("/wait_stable", if (settled) "200 SETTLED" else "200 TIMEOUT")
+                sendHttpResponse(out, 200, "application/json", resp.toString())
+            }
+            "/vdisplay/start" -> {
+                val parsed = runCatching { JSONObject(body) }.getOrDefault(JSONObject())
+                val st = com.hanson.mobileuse.service.HansonVirtualDisplayManager.start(
+                    context = service.applicationContext,
+                    width = parsed.optInt("width", 1080),
+                    height = parsed.optInt("height", 1920),
+                    dpi = parsed.optInt("dpi", 320)
+                )
+                val resp = JSONObject()
+                    .put("status", if (st.active) "ok" else "failed")
+                    .put("active", st.active)
+                    .put("displayId", st.displayId)
+                    .put("width", st.width)
+                    .put("height", st.height)
+                    .put("dpi", st.dpi)
+                onBridgeEvent?.invoke("/vdisplay/start", if (st.active) "200 OK (id=${st.displayId})" else "200 FAILED")
+                sendHttpResponse(out, 200, "application/json", resp.toString())
+            }
+            "/vdisplay/status" -> {
+                val st = com.hanson.mobileuse.service.HansonVirtualDisplayManager.status.value
+                val resp = JSONObject()
+                    .put("status", "ok")
+                    .put("active", st.active)
+                    .put("displayId", st.displayId)
+                    .put("width", st.width)
+                    .put("height", st.height)
+                    .put("dpi", st.dpi)
+                    .put("lastCaptureTimestampMs", st.lastCaptureTimestampMs)
+                onBridgeEvent?.invoke("/vdisplay/status", "200 OK")
+                sendHttpResponse(out, 200, "application/json", resp.toString())
+            }
+            "/vdisplay/snapshot" -> {
+                val st = com.hanson.mobileuse.service.HansonVirtualDisplayManager.status.value
+                val b64 = com.hanson.mobileuse.service.HansonVirtualDisplayManager.captureBase64Png(service.applicationContext)
+                val resp = JSONObject()
+                    .put("status", if (b64 != null) "ok" else "no_frame")
+                    .put("active", st.active)
+                    .put("displayId", st.displayId)
+                    .put("imageBase64", b64 ?: "")
+                onBridgeEvent?.invoke("/vdisplay/snapshot", if (b64 != null) "200 PNG" else "200 NO_FRAME")
+                sendHttpResponse(out, 200, "application/json", resp.toString())
+            }
+            "/vdisplay/stop" -> {
+                com.hanson.mobileuse.service.HansonVirtualDisplayManager.stop()
+                onBridgeEvent?.invoke("/vdisplay/stop", "200 STOPPED")
+                sendHttpResponse(out, 200, "application/json", """{"status":"ok","active":false}""")
             }
             "/mcp/tools" -> {
                 val mcpTools: Any = com.hanson.mobileuse.agent.ToolSpecRegistry.toMcpToolsJson()
