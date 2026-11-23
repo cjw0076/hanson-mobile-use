@@ -1,0 +1,130 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="270" viewBox="0 0 920 270" role="img" aria-labelledby="title description">
+  <title id="title">Hanson Mobile-Use</title>
+  <desc id="description">Open-source Mobile Agent Studio v6.6 for Android and iOS, with A2UI native surfaces, Phone Harness CLI, and SSE Co-Draw.</desc>
+  <style>
+    svg { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    text { fill: #09090B; }
+    .secondary { fill: #52525B; }
+    .frame { fill: #FFFFFF; stroke: #D4D4D8; stroke-width: 1.2; }
+    .halo { transform-origin: 108px 135px; animation: pulseHalo 5s ease-in-out infinite; }
+    .halo-outer { animation-delay: -1.4s; }
+    .satellite { transform-origin: 108px 135px; animation: orbit 16s linear infinite; }
+    .bar { transform-box: fill-box; transform-origin: center; animation: barWave 1.7s ease-in-out infinite alternate; }
+    .bar:nth-child(1) { animation-delay: -.9s; }
+    .bar:nth-child(2) { animation-delay: -.4s; }
+    .bar:nth-child(3) { animation-delay: -1.4s; }
+    .bar:nth-child(4) { animation-delay: -.7s; }
+    .bar:nth-child(5) { animation-delay: -1.2s; }
+    .live { animation: liveDot 2.8s ease-in-out infinite; }
+    .hl-swipe { animation: highlightSweep 5s ease-in-out infinite; }
+    .spotlight { transform-origin: 834px 135px; animation: pulseHalo 3.5s ease-in-out infinite; }
+    .floating-tag { animation: tagFloat 5s ease-in-out infinite; }
+    @keyframes pulseHalo { 0%, 100% { opacity: .48; transform: scale(.96); } 50% { opacity: .9; transform: scale(1.05); } }
+    @keyframes orbit { to { transform: rotate(360deg); } }
+    @keyframes barWave { 0%, 100% { transform: scaleY(.48); } 46% { transform: scaleY(1); } 72% { transform: scaleY(.72); } }
+    @keyframes liveDot { 50% { opacity: .38; } }
+    @keyframes highlightSweep {
+      0%, 14% { opacity: 0; transform: translateX(-18px); }
+      26% { opacity: .24; }
+      65% { opacity: .24; }
+      78%, 100% { opacity: 0; transform: translateX(104px); }
+    }
+    @keyframes tagFloat { 50% { transform: translateY(-3px); } }
+    @media (prefers-reduced-motion: reduce) {
+      .halo, .satellite, .bar, .live, .hl-swipe, .spotlight, .floating-tag { animation: none; }
+      .hl-swipe { opacity: 0; }
+    }
+  </style>
+  <defs>
+    <pattern id="micro-grid" width="8" height="8" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r=".65" fill="#71717A" opacity=".2"/>
+    </pattern>
+    <clipPath id="preview-screen"><rect x="683" y="114" width="67" height="55" rx="5"/></clipPath>
+  </defs>
+
+  <rect x="1" y="4" width="918" height="265" rx="22" fill="#09090B"/>
+  <rect x="1" y="1" width="918" height="265" rx="22" fill="#FAFAFA" stroke="#D4D4D8" stroke-width="1.2"/>
+  <rect x="2" y="2" width="916" height="263" rx="21" fill="url(#micro-grid)"/>
+
+  <g aria-hidden="true">
+    <circle class="halo halo-outer" cx="108" cy="135" r="72" fill="none" stroke="#D4D4D8" stroke-width="1.2"/>
+    <circle class="halo" cx="108" cy="135" r="57" fill="none" stroke="#71717A" stroke-width="1.2" opacity=".6"/>
+    <circle cx="108" cy="135" r="64" fill="none" stroke="#71717A" stroke-width="1.2" stroke-dasharray="1 5"/>
+    <g class="satellite">
+      <circle cx="153.25" cy="89.75" r="7.5" fill="#FAFAFA"/>
+      <circle cx="153.25" cy="89.75" r="4" fill="#09090B"/>
+    </g>
+    <circle cx="108" cy="138" r="40" fill="#09090B"/>
+    <circle cx="108" cy="135" r="40" fill="#09090B" stroke="#D4D4D8" stroke-width="1.2"/>
+    <circle cx="108" cy="135" r="32" fill="none" stroke="#FAFAFA" stroke-opacity=".24" stroke-width="1.2"/>
+    <g fill="#FAFAFA">
+      <rect class="bar" x="88" y="129" width="5" height="12" rx="2.5"/>
+      <rect class="bar" x="97" y="125" width="5" height="20" rx="2.5"/>
+      <rect class="bar" x="106" y="120" width="5" height="30" rx="2.5"/>
+      <rect class="bar" x="115" y="124" width="5" height="22" rx="2.5"/>
+      <rect class="bar" x="124" y="128" width="5" height="14" rx="2.5"/>
+    </g>
+  </g>
+
+  <g>
+    <rect class="frame" x="195" y="64" width="376" height="27" rx="13.5"/>
+    <circle class="live" cx="211" cy="77.5" r="3.5" fill="#09090B"/>
+    <text class="mono" x="222" y="81" font-size="10.7" font-weight="650" letter-spacing=".28">OPEN-SOURCE MOBILE AGENT STUDIO &#183; v6.6 &#183; ANDROID &amp; iOS</text>
+    <text x="193" y="136" font-size="38" font-weight="800" letter-spacing="-1.45">HANSON MOBILE-USE</text>
+    <text class="secondary" x="195" y="161" font-size="12.4" font-weight="600">A2UI v0.9/v1.0 Native Surfaces &#183; Phone Harness CLI &#183; SSE Co-Draw</text>
+    <g fill="#F4F4F5" stroke="#D4D4D8" stroke-width="1.2">
+      <rect x="195" y="181" width="115" height="24" rx="6"/>
+      <rect x="317" y="181" width="91" height="24" rx="6"/>
+      <rect x="415" y="181" width="102" height="24" rx="6"/>
+      <rect x="524" y="181" width="107" height="24" rx="6"/>
+    </g>
+    <g class="mono" font-size="9.1" font-weight="650" letter-spacing=".32" text-anchor="middle">
+      <text x="252.5" y="196.4">JETPACK COMPOSE</text>
+      <text x="362.5" y="196.4">SWIFTUI iOS</text>
+      <text x="466" y="196.4">VIRTUALDISPLAY</text>
+      <text x="577.5" y="196.4">0% MONOCHROME</text>
+    </g>
+  </g>
+
+  <g>
+    <rect x="650" y="31" width="236" height="214" rx="16" fill="#09090B"/>
+    <rect class="frame" x="650" y="28" width="236" height="214" rx="16"/>
+    <path d="M668 67H868" fill="none" stroke="#E4E4E7" stroke-width="1.2"/>
+    <g class="mono secondary" font-size="9.5" font-weight="650" letter-spacing=".75">
+      <text x="677" y="55">ANDROID</text>
+      <text x="813" y="55">iOS</text>
+    </g>
+    <circle cx="763" cy="51.5" r="2.25" fill="#71717A"/>
+    <circle cx="773" cy="51.5" r="2.25" fill="#09090B"/>
+    <g fill="#FAFAFA" stroke="#09090B" stroke-width="1.2">
+      <rect x="674" y="79" width="86" height="116" rx="12"/>
+      <rect x="777" y="79" width="86" height="116" rx="12"/>
+    </g>
+    <circle cx="717" cy="88" r="2" fill="#09090B"/>
+    <rect x="811" y="85.5" width="18" height="4.5" rx="2.25" fill="#09090B"/>
+    <g fill="#F4F4F5" stroke="#E4E4E7" stroke-width="1.2">
+      <rect x="683" y="114" width="67" height="55" rx="5"/>
+      <rect x="786" y="114" width="68" height="55" rx="5"/>
+    </g>
+    <g fill="none" stroke-linecap="round" stroke-width="1.2">
+      <path d="M684 103h26m77 0h25" stroke="#09090B"/>
+      <path d="M691 151h29m-29 7h22m82-7h29m-29 7h18" stroke="#71717A"/>
+      <path d="M691 126h21m83 0h17m-17 6h12" stroke="#71717A"/>
+      <path d="M697 177h40m63 0h40" stroke="#D4D4D8"/>
+      <path d="M708 187h18m85 0h18" stroke="#09090B"/>
+    </g>
+    <path d="M691 140h9l4-5 5 8 5-5h7" fill="none" stroke="#09090B" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+    <g clip-path="url(#preview-screen)">
+      <path class="hl-swipe" d="M654 169l30-55h14l-30 55z" fill="#09090B" opacity="0"/>
+    </g>
+    <circle class="spotlight" cx="834" cy="135" r="12" fill="none" stroke="#09090B" stroke-width="1.2" stroke-dasharray="2 2"/>
+    <circle cx="834" cy="135" r="6" fill="none" stroke="#09090B" stroke-width="1.2"/>
+    <circle cx="834" cy="135" r="2" fill="#09090B"/>
+    <g class="floating-tag">
+      <rect x="679" y="208" width="178" height="23" rx="6" fill="#09090B"/>
+      <rect class="frame" x="679" y="205" width="178" height="23" rx="6"/>
+      <text class="mono" x="768" y="220" font-size="9.5" font-weight="650" letter-spacing=".45" text-anchor="middle">A2UI &#183; CO-DRAW &#183; VDISPLAY</text>
+    </g>
+  </g>
+</svg>

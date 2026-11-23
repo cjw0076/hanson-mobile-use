@@ -41,11 +41,13 @@ import androidx.savedstate.SavedStateRegistry
 import androidx.savedstate.SavedStateRegistryController
 import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
+import com.hanson.mobileuse.agent.A2uiSurfaceRegistry
 import com.hanson.mobileuse.agent.CoDrawingCanvasEngine
 import com.hanson.mobileuse.agent.CrossAppOverlayMode
 import com.hanson.mobileuse.agent.DynamicUiEventBus
 import com.hanson.mobileuse.agent.HansonRuntimeHolder
 import com.hanson.mobileuse.agent.LiveVoiceSessionManager
+import com.hanson.mobileuse.ui.components.A2uiSurfaceCard
 import com.hanson.mobileuse.ui.components.CoDrawingInteractiveCanvas
 import com.hanson.mobileuse.ui.components.CoDrawingToolbarPill
 import com.hanson.mobileuse.ui.components.CrossAppCoDrawControlPill
@@ -244,6 +246,7 @@ class DynamicCanvasOverlayService : Service() {
                     HansonObsidianTheme {
                         val drawState by CoDrawingCanvasEngine.state.collectAsState()
                         val sseState by DynamicUiEventBus.surfaceState.collectAsState()
+                        val a2uiSurfaces by A2uiSurfaceRegistry.surfaces.collectAsState()
                         val isDrawMode = drawState.overlayMode == CrossAppOverlayMode.CO_DRAW_ACTIVE
 
                         Box(modifier = Modifier.fillMaxSize()) {
@@ -272,8 +275,11 @@ class DynamicCanvasOverlayService : Service() {
                                 }
                             }
 
-                            // Floating SSE Dynamic UI Card (anchored near bottom above toolbar, collapsible)
+                            // Floating SSE Dynamic UI & A2UI Surfaces (anchored near bottom above toolbar, collapsible)
                             if (drawState.showFloatingDynamicCard) {
+                                val renderableA2ui = a2uiSurfaces.values
+                                    .filter { it.isReady && it.hasRootComponent }
+                                    .takeLast(2)
                                 Column(
                                     modifier = Modifier
                                         .align(Alignment.BottomCenter)
@@ -284,6 +290,34 @@ class DynamicCanvasOverlayService : Service() {
                                             bottom = if (isDrawMode) 68.dp else 20.dp
                                         )
                                 ) {
+                                    renderableA2ui.forEach { a2uiSurface ->
+                                        A2uiSurfaceCard(
+                                            surface = a2uiSurface,
+                                            compactOverlayMode = true,
+                                            onUserAction = { userAction ->
+                                                when (userAction.name) {
+                                                    "open_citation", "open_url" -> {
+                                                        val rawUrl = userAction.context["url"]?.toString().orEmpty()
+                                                        openExternalHttpsUrl(rawUrl)
+                                                    }
+                                                    "speak_board", "speak" -> {
+                                                        val spoken = userAction.context["text"]?.toString()?.trim().orEmpty()
+                                                        if (spoken.isNotBlank()) {
+                                                            LiveVoiceSessionManager.speakAgentResponse(spoken)
+                                                        }
+                                                    }
+                                                    else -> {
+                                                        val engine = HansonRuntimeHolder.getAgentEngine(applicationContext)
+                                                        engine.sendChatMessage(userAction.toHumanPromptSummary())
+                                                    }
+                                                }
+                                            },
+                                            onDismiss = {
+                                                A2uiSurfaceRegistry.deleteSurface(a2uiSurface.surfaceId)
+                                            }
+                                        )
+                                        Spacer(modifier = Modifier.height(6.dp))
+                                    }
                                     SseLiveDynamicUiSurface(
                                         surfaceState = sseState,
                                         compactOverlayMode = true,

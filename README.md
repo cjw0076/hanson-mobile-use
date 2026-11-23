@@ -1,230 +1,321 @@
-# Hanson Mobile-Use — Mobile Agent Studio v6.5
+<div align="center">
 
-> **The Open-Source Android Human-First Companion & Mobile Agent Studio ("Phone Harness CLI & VirtualDisplay + In-App & Cross-App SSE Dynamic UI + Mobile Co-Drawing Canvas + Prompt-Injection Guard + Full-Control Android Engine")**  
-> **안드로이드 기기 완전제어 오픈소스 엔진 · 모바일 에이전트 스튜디오 v6.5 — `phone-harness` & `PhoneHarness` 핵심 흡수(`harness/hanson_harness.py` 단일 스크립트 CLI · 비관성 정밀 스크롤 · mDNS 무선 ADB · 설정 비변경 `awake` · 백그라운드 `VirtualDisplay` · AST 가드 & 비신뢰 화면 프롬프트 인젝션 격리 · 오프라인 HTML 트레이스 뷰어) + 앱 내부·외부 SSE 실시간 Dynamic UI + 모바일/타 앱 공동 드로잉 + Blind Vault(AES-256-GCM) + $0 MCP / 멀티 VLM 브리지**
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/hero-dark.svg" />
+  <source media="(prefers-color-scheme: light)" srcset="assets/hero-light.svg" />
+  <img alt="Hanson Mobile-Use — Open-Source Mobile Agent Studio v6.6 (Android & iOS · A2UI v0.9/v1.0 · Phone Harness)" src="assets/hero-light.svg" width="920" />
+</picture>
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-18181B.svg)](LICENSE)
-[![Android API](https://img.shields.io/badge/Android-API%2031%E2%80%9336-27272A.svg)](#)
-[![Studio v6.5](https://img.shields.io/badge/Studio-v6.5%20Phone%20Harness%20%2B%20SSE%20Co--Draw-09090B.svg)](harness/SKILL.md)
-[![MCP Ready](https://img.shields.io/badge/MCP-12%20Tools%20%C2%B7%20Claude%20%C2%B7%20Codex%20%C2%B7%20Gemini-3F3F46.svg)](mcp/README.md)
+<br /><br />
 
-**Hanson Mobile-Use (Mobile Agent Studio v6.5)** turns any physical Android phone or emulator into a verifiable, security-hardened **Human-First Mobile Companion**, **Composable Python Phone Harness (`harness/hanson_harness.py`)**, and **Mobile Agent Studio**. Anyone can launch the signed Release APK in **3 effortless steps**, drive multi-step batch workflows from Claude Code / Codex / Gemini CLI via `harness/hanson_harness.py` (preferring `<50ms` native `:18888` Accessibility + Korean IME with zero-app mDNS ADB fallback), run background apps on an isolated `VirtualDisplay`, and render **real-time SSE Dynamic UI & Human+AI Co-Drawing overlays** both inside Hanson and floating over any Android app:
+<p align="center">
+  <a href="../../releases">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="assets/cta-download-dark.svg" />
+      <source media="(prefers-color-scheme: light)" srcset="assets/cta-download-light.svg" />
+      <img alt="Download v6.6 APK" src="assets/cta-download-light.svg" height="44" />
+    </picture>
+  </a>&nbsp;
+  <a href="docs/studio-preview.html">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="assets/cta-preview-dark.svg" />
+      <source media="(prefers-color-scheme: light)" srcset="assets/cta-preview-light.svg" />
+      <img alt="Live Studio Preview" src="assets/cta-preview-light.svg" height="44" />
+    </picture>
+  </a>&nbsp;
+  <a href="#phone-harness-cli">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="assets/cta-harness-dark.svg" />
+      <source media="(prefers-color-scheme: light)" srcset="assets/cta-harness-light.svg" />
+      <img alt="Phone Harness CLI" src="assets/cta-harness-light.svg" height="44" />
+    </picture>
+  </a>&nbsp;
+  <a href="#a2ui-architecture">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="assets/cta-arch-dark.svg" />
+      <source media="(prefers-color-scheme: light)" srcset="assets/cta-arch-light.svg" />
+      <img alt="A2UI + Co-Draw Arch" src="assets/cta-arch-light.svg" height="44" />
+    </picture>
+  </a>
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-18181B.svg" /></a>
+  <a href="docs/A2UI_SPEC_INTEGRATION.md"><img alt="A2UI v0.9/v1.0" src="https://img.shields.io/badge/A2UI-v0.9%2Fv1.0%20%2B%20v0.8%20Compat-09090B.svg" /></a>
+  <a href="ios/README.md"><img alt="Android & iOS" src="https://img.shields.io/badge/Platforms-Android%20API%2026--36%20%C2%B7%20iOS%2017%2B-27272A.svg" /></a>
+  <a href="harness/SKILL.md"><img alt="Phone Harness CLI" src="https://img.shields.io/badge/Harness-Android%20%2B%20iOS%20Mirror%20CLI-3F3F46.svg" /></a>
+  <a href="mcp/README.md"><img alt="MCP 6.0.0" src="https://img.shields.io/badge/MCP%206.0.0-12%20Tools%20%C2%B7%2045%20Bridge-52525B.svg" /></a>
+</p>
+
+**Open-Source Human-First Mobile Companion, A2UI v0.9/v1.0 Dual-Platform Native Renderer, & Composable Phone Harness**  
+*안드로이드·iOS 양대 플랫폼 A2UI v0.9/v1.0 네이티브 렌더링 · 단일 스크립트 Phone Harness CLI & 백그라운드 `VirtualDisplay` · 앱 내·외부 SSE 실시간 Dynamic UI & 공동 드로잉 · AES-256-GCM Blind Vault · $0 MCP / 멀티 VLM 브리지*
+
+</div>
+
+---
+
+## Live Motion Showcase
+
+<table>
+  <thead>
+    <tr>
+      <th align="center" width="33.3%">⚡ SSE + A2UI &amp; Co-Draw</th>
+      <th align="center" width="33.3%">🦾 Phone Harness CLI &amp; VirtualDisplay</th>
+      <th align="center" width="33.3%">✦ Morph Studio &amp; Paper/Carbon</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td align="center">
+        <img src="assets/demos/demo-01-sse-codraw.gif" alt="SSE + A2UI Dynamic UI & Cross-App Co-Drawing Demo" width="100%" />
+      </td>
+      <td align="center">
+        <img src="assets/demos/demo-02-phone-harness.gif" alt="Composable Phone Harness CLI, Non-Fling Scroll & VirtualDisplay Demo" width="100%" />
+      </td>
+      <td align="center">
+        <img src="assets/demos/demo-03-morph-studio.gif" alt="Interactive Morph UI & Paper/Carbon 0% Saturation Theme Switch Demo" width="100%" />
+      </td>
+    </tr>
+    <tr>
+      <td>Real-time <b>Gemini SSE + A2UI</b> streaming cards, interactive quizzes, synchronized voice captions, and floating cross-app <b>Human + AI Co-Drawing</b> overlays.</td>
+      <td>Single-heredoc <b><code>hanson_harness.py --safe</code></b> CLI with fail-closed AST guard, <b>200ms brake-hold non-fling scroll</b>, banking denylist preflight, and background <b><code>VirtualDisplay</code></b>.</td>
+      <td>Natural language morphed directly into interactive <b>Split-Bill / Storyboard / Curator</b> UI with <b>1-Tap Undo</b> and strictly <b>0%-saturation Paper &amp; Carbon</b> themes.</td>
+    </tr>
+  </tbody>
+</table>
+
+---
+
+<a id="a2ui-architecture"></a>
+## A2UI v0.9 / v1.0 Cross-Platform Native Surfaces
+
+Hanson Mobile-Use v6.6 implements Google's declarative **[A2UI (Agent-to-User Interface)](https://a2ui.org/)** wire protocol (`v0.9` / `v1.0` primary with `v0.8` backward compatibility) natively on **both Android Jetpack Compose and iOS SwiftUI** — zero WebView bloat, zero chromatic drift, strictly adhering to Hanson's 0%-saturation **Obsidian Paper (`#FAFAFA / #09090B`) & Carbon (`#09090B / #FAFAFA`)** tokens.
+
+<div align="center">
+  <img src="assets/hanson-a2ui-showcase.png" alt="A2UI v0.9/v1.0 JSONL Stream Splitting into Native Android Jetpack Compose and iOS SwiftUI Surfaces" width="100%" />
+</div>
+
+- **Canonical Streaming Engine ([`A2uiProtocolEngine.kt`](app/src/main/java/com/hanson/mobileuse/agent/A2uiProtocolEngine.kt))**: Parses streaming JSONL / SSE envelopes (`createSurface`, `updateComponents`, `updateDataModel`, `deleteSurface`, plus v0.8 `surfaceUpdate` / `dataModelUpdate` / `beginRendering`), resolves **RFC 6901 JSON Pointer** bindings (`@path`, `path`, `${/ptr}`, `@{/ptr}`) with two-way input state mutations, emits outbound `A2uiUserAction` events, and bridges Hanson's `BoardEventScript` via `BoardToA2uiBridge`.
+- **Native Android Compose Renderer ([`A2uiComposeRenderer.kt`](app/src/main/java/com/hanson/mobileuse/ui/components/A2uiComposeRenderer.kt))**: Maps the A2UI Basic Catalog (`Column`, `Row`, `List`, `Card`, `Box`, `Text`, `Button`, `TextField`, `CheckBox`, `MultipleChoice` / `ChoicePicker`, `Slider`, `Divider`, `Icon`, `Image`) directly onto Obsidian Compose primitives (`A2uiSurfaceCard` / `A2uiSurfaceDeck`) — rendered live **both inside Command Center AND floating over third-party Android apps** via `DynamicCanvasOverlayService`, served over token-authenticated `POST :18888/a2ui/messages` & `GET :18888/a2ui/surfaces` and advertised in `/.well-known/agent-card.json`.
+- **Native iOS SwiftUI Companion ([`ios/HansonMobileUseIOS/`](ios/HansonMobileUseIOS/))**: Compile-ready Swift 5.9+ Package (`iOS 17+` / `macOS 14+`) mirroring the exact A2UI JSONL core ([`A2uiSwiftCore.swift`](ios/HansonMobileUseIOS/Sources/HansonMobileUseIOS/A2uiSwiftCore.swift)), SwiftUI Basic Catalog renderer ([`A2uiSwiftUIRenderer.swift`](ios/HansonMobileUseIOS/Sources/HansonMobileUseIOS/A2uiSwiftUIRenderer.swift)), normalized `0..1` SwiftUI `Canvas` co-drawing ([`CoDrawingSwiftUICanvas.swift`](ios/HansonMobileUseIOS/Sources/HansonMobileUseIOS/CoDrawingSwiftUICanvas.swift)), RFC 8895 SSE + `AppIntents` Shortcuts bridge ([`HansonSseAndAppIntents.swift`](ios/HansonMobileUseIOS/Sources/HansonMobileUseIOS/HansonSseAndAppIntents.swift)), and unit tests ([`HansonMobileUseIOSTests.swift`](ios/HansonMobileUseIOS/Tests/HansonMobileUseIOSTests/HansonMobileUseIOSTests.swift)).
+- **Protocol Spec & Tests**: [`docs/A2UI_SPEC_INTEGRATION.md`](docs/A2UI_SPEC_INTEGRATION.md) · [`A2uiProtocolEngineTest.kt`](app/src/test/java/com/hanson/mobileuse/agent/A2uiProtocolEngineTest.kt).
+
+---
+
+## System Architecture
+
+<div align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/architecture-dark.svg" />
+    <source media="(prefers-color-scheme: light)" srcset="assets/architecture-light.svg" />
+    <img alt="Hanson Mobile-Use v6.6 Dual-Platform & A2UI System Architecture" src="assets/architecture-light.svg" width="920" />
+  </picture>
+</div>
+
+<details>
+<summary><b>Expand Detailed Pipeline &amp; Mermaid Topology</b></summary>
 
 ```text
-Natural Language + Memory Bubbles
-  → Interactive Morph UI & Motion Storyboard (Direct Manipulation: Steppers, Option Cards, Route Scrubbing)
-    → Observe (Set-of-Marks [0..N] + Contextor Outline + Notetaker Scratchpad + @vault/@notes/@watchers)
-      → Align & Decide (D-Artemis TAC+ACA · Auto | Plan | Build · On-Phone VLM OR $0-Cost Desktop CLI / MCP)
-        → Guard (Financial/Price-Drift Gate · Non-Bypass CAPTCHA/2FA AWAITING_TAKEOVER · Blind Vault)
-          → Act (Index Tap / Gesture / Blind Credential Injection / OS Fast-Lane / Workspace Edit)
-            → Verify Post-Action Delta + Deterministic Input Check + 1-Tap Reversible Receipt
+Natural Language + Memory Bubbles + A2UI / SSE Stream
+  → Interactive Morph UI & Native A2UI Surfaces (Android Compose + iOS SwiftUI)
+    → Observe (Set-of-Marks [0..N] / Apple Vision OCR + Contextor + <untrusted_screen_data> Isolation)
+      → Align & Decide (D-Artemis TAC+ACA · Auto | Plan | Build · On-Phone VLM OR $0 Desktop CLI / MCP)
+        → Guard (AST Script Guard · Banking Preflight · Financial Gate · Non-Bypass CAPTCHA/2FA · Blind Vault)
+          → Act (Index Tap · 200ms Non-Fling Scroll · Blind Vault Inject · VirtualDisplay · iOS Mirror CGEvent)
+            → Verify Post-Action Delta + 1-Tap Reversible Receipt + Offline HTML Trace Replay
 ```
-
-- Composable Python Phone Harness & Agent Skill: [`harness/SKILL.md`](harness/SKILL.md) ([`harness/hanson_harness.py`](harness/hanson_harness.py) · [`harness/hanson_script_guard.py`](harness/hanson_script_guard.py) · [`harness/hanson_trace_viewer.py`](harness/hanson_trace_viewer.py))
-- Interactive Flagship Motion Web Preview: [`docs/studio-preview.html`](docs/studio-preview.html) (390×844 mobile viewport · Paper Light / Carbon Dark toggle · Playable Motion Storyboard & Live Morph Engine)
-- SSE Dynamic UI & Cross-App Co-Drawing Architecture: [`docs/SSE_DYNAMIC_UI_AND_CODRAW_ARCHITECTURE.md`](docs/SSE_DYNAMIC_UI_AND_CODRAW_ARCHITECTURE.md)
-- Architecture Deep Dive: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
-- 2025–2026 SOTA Absorption Matrix: [`docs/MOBILE_AGENT_REVERSE_ENGINEERING_2026.md`](docs/MOBILE_AGENT_REVERSE_ENGINEERING_2026.md)
-- Security Policy & Threat Model: [`SECURITY.md`](SECURITY.md)
-
----
-
-## What's New in Mobile Agent Studio v6.5 & v6.4
-
-1. **v6.5 `phone-harness` & `PhoneHarness` SOTA Absorption (`harness/` + `GestureController.scrollWithoutFling` + `HansonVirtualDisplayManager` + `UntrustedScreenDataGuard`)**:
-   - **Composable Python Script Harness (`harness/hanson_harness.py` + `harness/SKILL.md`)**: Run multi-step phone scripts in a single heredoc with pre-imported flat helpers (`screen()`, `tap_text()`, `tap_ui()`, `type_text()`, `scroll()`, `scroll_until()`, `scroll_collect()`, `wait_for_text()`, `wait_stable()`, `preflight()`, `push_board_event()`, `codraw_ring()`, `vdisplay_start()`), persistent `~/.hanson-mobile-use/agent-workspace/agent_helpers.py`, `:18888` native Korean IME priority, automatic zero-app mDNS wireless ADB fallback (`pair`, `doctor`), lock-screen refusal gate, rotation-aware display bounds (`dumpsys window displays`), and zero-settings-mutation `awake` (`KEYCODE_UNKNOWN` pokes + optional `scrcpy`).
-   - **Non-Fling Precision Scrolling & Content-Band Settle (`GestureController.scrollWithoutFling` + `:18888`)**: 2-phase chained `StrokeDescription` holds stationary `200ms` before lifting so Android lists never fling past items; paired with `6%..92%` content-band filtering (excluding ticking status clocks & nav bars) on `/scroll_no_fling`, `/wait_for_text`, and `/wait_stable`.
-   - **Prompt-Injection Screen Isolation, AST Script Guard & Denylist Preflight (`PhoneHarnessAbsorptionEngine.kt` + `harness/hanson_script_guard.py`)**: Wraps all third-party VLM UI tree observations inside `<untrusted_screen_data>` boundaries with indirect prompt-injection signal detection, blocks Korean & global banking/wallet/password apps on `/preflight`, and provides fail-closed Python AST static classification (`--safe`) before auto-running scripts.
-   - **Security-Hardened Background `VirtualDisplay` & Offline HTML Trace Viewer (`HansonVirtualDisplayManager.kt` + `harness/hanson_trace_viewer.py`)**: Runs independent background displays (`DisplayManager.createVirtualDisplay` + `ImageReader`) over token-authenticated `/vdisplay/*` endpoints writing strictly to app-private `cacheDir` (zero `/sdcard/` leaks), plus an XSS-escaped monochrome HTML replay viewer for `AgentRunJournal` traces.
-2. **v6.4 In-App & Cross-App SSE Dynamic UI + Mobile Co-Drawing Architecture & Jetpack Compose (`SseDynamicUiEngine` + `CoDrawingCanvasEngine` + `DynamicCanvasOverlayService`)**:
-   - **Real-Time SSE Streaming & Dual-Channel Incremental Compiler ([`SseDynamicUiEngine.kt`](app/src/main/java/com/hanson/mobileuse/agent/SseDynamicUiEngine.kt))**: RFC 8895 incremental `SseLineParser`, `DynamicUiEventBus` (`StateFlow` + `SharedFlow` + 256-event `Last-Event-ID` ring buffer), native Gemini `streamGenerateContent?alt=sse` streaming (`x-goog-api-key` header) with automatic unary fallback, HTTPS/loopback-only `ExternalSseStreamClient`, and live incremental parsing of `SPEAK:`, `BOARD:`, interactive `QUIZ:`, `CHECK:` checklists, and `CODRAW:` directives.
-   - **Human + AI Mobile Co-Drawing ("함께 그리기") ([`CoDrawingCanvasEngine.kt`](app/src/main/java/com/hanson/mobileuse/agent/CoDrawingCanvasEngine.kt) + [`SseDynamicUiAndCoDrawComposables.kt`](app/src/main/java/com/hanson/mobileuse/ui/components/SseDynamicUiAndCoDrawComposables.kt))**: Resolution-independent `0..1` normalized vector engine (`0..1000` Set-of-Marks & `A11yNode` bounds anchor parity), smooth quadratic Bezier pen, highlighter wash, arrow, circle lasso, animated AI spotlight rings, callout badges, layer toggles, undo/redo, and VLM spatial region summary (`submitCoDrawingQuery()`).
-   - **Out-of-App Cross-App Jetpack Compose Overlay (`DynamicCanvasOverlayService.kt`) & `:18888` Authenticated SSE**: Dual-window `ComposeView` `SYSTEM_ALERT_WINDOW` overlay (`android:exported="false"`) with `OverlayComposeLifecycleOwner`, non-blocking `PASSTHROUGH_WATCH` ↔ `CO_DRAW_ACTIVE` toggle, always-touchable draggable control pill, gesture-dispatch auto-yield, and token-authenticated `GET /sse/board?from=<seq>`, `POST /board/events`, and `POST /codraw/command` routes on `ArtemisCommandServer :18888`.
-3. **v6.3 Event-Sourced Dual-Channel Board & Karaoke Voice Replay (`BoardEventStreamEngine` + Upgraded `AhaboardResponseCard`)**:
-   - **Ordered `tutor_command` Event Stream (`BoardEventStreamEngine.kt`)**: Compiles every grounded answer into strictly ordered `turnIndex` / `orderIndex` `BoardStreamEvent` envelopes (`BoardPosition(spaceId, columnId)` + `elementId`), cleanly separating typed visual commands (`WriteHeadline`, `AddStatPill`, `AddTakeaway`, `WriteNote`, `AddCitation`) from dedicated spoken `Speak(text, style, linkedElementId)` commands with Ahaboard-compatible `toJsonArray()` serialization.
-   - **LLM-Level Dual-Channel Separation (`SPEAK:` vs Visual Board)**: [`GeminiMultimodalClient.kt`](app/src/main/java/com/hanson/mobileuse/agent/GeminiMultimodalClient.kt) and [`MobileUseAgentEngine.kt`](app/src/main/java/com/hanson/mobileuse/agent/MobileUseAgentEngine.kt) instruct models to separate warm Korean spoken narration (`SPEAK:`) from clean visual board prose (`BOARD:`), guaranteeing zero `SPEAK:`/`BOARD:` markers on screen and zero raw asterisks (`**`/`*`) in TTS.
-   - **Interactive Board Playback, Karaoke Captions & Tap-to-Ask (`AhaboardResponseCard.kt`)**: Sequentially animates each board element with `↻ 다시 보기` replay, `🔊 듣기` natural TTS playback, live synchronized `AhaboardKaraokeCaptionStrip` subtitles, active spoken-element focus borders, and tap-to-ask follow-up (`onAskAboutItem`) — all while keeping strictly `0%`-saturation `ObsidianColors` Paper & Carbon design parity.
-4. **v6.2 AI-Native Architecture Modernization, Native 2026 Web Grounding & Signed Release (`RichAnswerBoardFormatter` + `ConsumerOnboardingWizard` + `LiveVoiceSessionManager`)**:
-   - **Native 2026 Web Grounding & Text-First Q&A (Zero HTML Scraping)**: Deleted the legacy `html.duckduckgo.com` OkHttp scraper & XSS board; general/web queries route directly to **Gemini `google_search` + `url_context` (`gemini-3.8-flash` / `gemini-3.5-flash-lite`)**, **OpenAI `/v1/responses` (`web_search_preview`)**, **Anthropic (`web_search_20250305`)**, or the **`$0` Laptop CLI Bridge (`POST :18889/web/research`)** with full support for both new **`AQ.`** and legacy **`AIza`** Google AI Studio keys.
-   - **Ahaboard-Style Visual Board UI & Markdown-Free Natural TTS**: [`RichAnswerBoardFormatter.kt`](app/src/main/java/com/hanson/mobileuse/agent/RichAnswerBoardFormatter.kt) + [`AhaboardResponseCard.kt`](app/src/main/java/com/hanson/mobileuse/ui/components/AhaboardResponseCard.kt) decompose LLM responses into animated highlight-swipe headlines, metric stat pills, numbered `Key takeaways` cards with bold-lead typography, and clean domain citation pills (zero raw `**` asterisks or raw redirect URLs), while normalizing spoken Korean TTS (`$83.16` → `"83.16달러"`, zero `"별표별표"`).
-   - **Real Gemini Live API v1beta WebSocket Voice & Full Tool Calling Parity**: Upgraded [`LiveVoiceSessionManager.kt`](app/src/main/java/com/hanson/mobileuse/agent/LiveVoiceSessionManager.kt) to `BidiGenerateContent` v1beta WebSocket + `AudioRecord`(AEC/NS)/`AudioTrack` with permission-guarded fallback; fixed `BlindCredentialVault` AndroidKeyStore IV persistence, `429` vs `402` rate-limit handling, lowercase JSON Schema emission for Anthropic/OpenAI/MCP, `element_index`→`0..1000` coordinate resolution, `TYPE_APPLICATION` + Region occlusion filtering in `HierarchyDumper`, and deleted `~5,000` lines of dead `paradigm/` engines, orphan UI composables, and brittle regex hijackers.
-   - **3-Step Zero-Jargon First-Run Wizard, Android 16 System Bars & Key-Safe Signed Release**: 10-second consumer onboarding (`ConsumerOnboardingWizard`), Paper Light / Carbon Dark `WindowInsetsController` contrast sync (`Theme.kt`), and `buildTypes.release` `BuildConfig.GEMINI_API_KEY = ""` isolation guard (`0` key hits verified across Release APK DEX).
-5. **v6.1 Flagship Figma Motion UI & Natural Language → Interactive UI Moat (`InteractiveMorphEngine` + `HumanFirstCompanionCards`)**:
-   - **Calm Ambient Living Home**: Replaces vertical multi-card walls with a Figma-designed `LivingPresenceHeroStage` (breathing halo, orbital satellite, 5-bar waveform), single-focus `ContextualFocusDeckCard`, floating `DynamicExecutionIslandBanner`, `FloatingOneTapUndoPill`, `FlagshipQuickPillDock`, and on-demand `CompanionDrawerBottomSheet` (`ModalBottomSheet`).
-   - **`InteractiveMorphEngine`**: Explicit opt-in interactive morph cards (`SPLIT_BILL` live stepper + 100-won rounding, `FOOD_CURATOR`, `TIMELINE_PLANNER`, `MEDIA_STORYBOARD` interactive route canvas, `CALL_CONCIERGE`) and XSS-hardened achromatic `grayscale(100%)` micro-apps.
-6. **v6.0 Human-First Convenience & Optional BYO Cloud Firestore Sync (`HumanFirstConvenienceEngine` + `HansonFirestoreCloudSyncEngine` + `firestore.rules`)**:
-   - **Dual-Mode UX (`SIMPLE_HUMAN` | `STUDIO_PRO`)**: Zero developer jargon on primary screens, with 1-tap switching into full Studio Pro coding workbench.
-   - **Transparent `HumanMemoryBubblesStore`, `PersonalRoutineStore` ("Show-Me-Once"), `ProactiveDailyBriefEngine`, `ReversibleReceiptPlanner` (1-Tap Undo), `CallConciergePlanner`, & Advisory `ArtemisDeliberativeAligner`**.
-   - **BYO Cloud Firestore Sync**: Runtime `FirebaseOptions` with zero bundled credentials; syncs sanitized bubbles/routines/watchers/receipts (LWW merge) under strict owner-only `firestore.rules` while unconditionally denying `/users/{userId}/vault/**`.
-7. **v5.0 Safety, Blind Vault & Pre-Release Security Hardening (`PickleSotaAbsorptionEngine` + `SECURITY.md`)**:
-   - **`BlindCredentialVault` (AES-256-GCM Zero-Plaintext Separation)**: Encrypts user credentials & Cloud VLM API keys via `AndroidKeyStore` (hardware-generated IV + PBKDF2-HMAC-SHA256 `210,000`-iteration JVM fallback), handle-bound AAD, zeroed buffers, and SHA-256 hash-chained audit logs.
-   - **Full-Stack Security Hardening**: `android:allowBackup="false"`, `usesCleartextTraffic="false"` + loopback-only `network_security_config.xml`, `x-goog-api-key` header transport, explicit user confirmation for external intents & fail-closed approvals, origin-locked `HansonWebViewClient` across all WebViews, CSRF/DNS-rebinding protection on `:18889`, and shell-quoted ADB fallbacks in MCP `6.0.0`.
-8. **45 On-Device Tool Specs, `:18889` Bridge (`45` Tools + `/web/research`, `6.0.0`) & MCP `6.0.0` (`12` Tools)**:
-   - [`ToolSpecRegistry.kt`](app/src/main/java/com/hanson/mobileuse/agent/ToolSpecRegistry.kt) maintains **45 tools** (with both Gemini ProtoJSON and standard lowercase JSON Schema emitters), [`AgentSessionStore.kt`](app/src/main/java/com/hanson/mobileuse/workspace/AgentSessionStore.kt) maintains **13 `/` slash commands**, [`laptop-cli-bridge.py`](laptop-cli-bridge.py) serves `6.0.0` with **45 `VALID_TOOLS`** + `POST /web/research`, and [`mcp/mobile_use_mcp_server.py`](mcp/mobile_use_mcp_server.py) serves `SERVER_VERSION = "6.0.0"` with its stable **12-tool** (`0`-based `element_index`) contract.
-
----
-
-## Core Architecture Pillars
-
-1. **Set-of-Marks (`[index]`) Visual + Structural Grounding (`SetOfMarksAnnotator`)**:
-   Every interactive UI node across multi-window Z-layers (`AccessibilityService.getWindows()`) is stamped directly onto the screenshot with high-contrast `[0]`, `[1]`, `[2]` badges alongside normalized `0..1000` coordinates and editability/scrollability flags. Small VLMs and frontier models alike click exact `[index]` targets without coordinate hallucination.
-2. **Empirical Post-Action Delta Verification (`MobileUseAgentEngine`)**:
-   Actions never assume success. After every `click`, `input_text`, `swipe`, or `manage_app`, the engine captures a post-action snapshot, measures structural UI change, detects popups/IME state, and blocks premature `complete_task` calls until the user's goal is actually reflected on screen.
-3. **Two-Track Brain Architecture (Standalone Phone OR $0-API-Cost CLI/MCP)**:
-   - **Track 1 — Standalone On-Phone Universal VLM**: Bring your own key (`Gemini`, `Anthropic Claude`, `OpenAI`, `OpenRouter`) or point `Custom OpenAI-Compatible Base URL` to local **Ollama / vLLM / LM Studio / Groq / Together** with a built-in **1-Tap Connection Health Check**.
-   - **Track 2 — $0-Extra-API-Cost MCP Server & CLI Subscription Bridge**:
-     - **[`mcp/mobile_use_mcp_server.py`](mcp/mobile_use_mcp_server.py)** (`6.0.0`): Zero-dependency Python 3.9+ stdlib MCP server keeping all **12 MCP tools** (`0`-based `element_index`) intact with shell-safe ADB fallbacks and Studio v6.0/v6.1 workflow instructions for **Claude Code (`claude`), OpenAI Codex (`codex`), Gemini CLI (`gemini`), Cursor, and Antigravity**.
-     - **[`laptop-cli-bridge.py`](laptop-cli-bridge.py)** (`6.0.0`): Local HTTP `:18889` bridge (`adb reverse tcp:18889 tcp:18889`) with CSRF/DNS-rebinding protection and optional `X-Bridge-Token` auth, delegating multi-step GUI reasoning to your desktop `claude` / `codex` / `gemini` CLI login and serving sandboxed `/workspace/*` routes (`--workspace-root`).
-4. **5-Tier Unrestricted Android OS Execution**:
-   - **Tier 1 (GUI & Accessibility)**: Multi-window Z-layer dump, hardware-buffer atomic screenshots, gesture bursts, IME-safe Unicode/Korean text injection (`ACTION_SET_TEXT` + clipboard fallback).
-   - **Tier 2 (Screen-Off Notification `RemoteInput` & Live HUD)**: Replies to KakaoTalk, SMS, Telegram, Slack, and Discord notifications in `<200ms` without turning on the screen or opening the app, plus a touch-pass-through floating HUD (`SYSTEM_ALERT_WINDOW`).
-   - **Tier 3 & 4 (OS Fast-Lane)**: `<30ms` direct intents and APIs for alarms, timers, hardware flashlight, brightness, media/ring/alarm volume, DND, calendar, contacts, calls, SMS, and `QUERY_ALL_PACKAGES` app launch.
-   - **Tier 5 (Hardened Loopback RPC & A2A `:18888` + UID-2000 Binder CLI `:18890`)**: Constant-time 256-bit token auth (`X-Artemis-Token`), MCP tool schema export, Agent2Agent (`/a2a`) JSON-RPC 2.0, and foreground/background (`FG`/`BG`) dual-lane execution.
-
----
-
-## Architecture Overview
 
 ```mermaid
 flowchart TB
-    subgraph TRACK2["Track 2 · $0-API-Cost Desktop Agents & Workspace Bridge"]
-        MCP["mcp/mobile_use_mcp_server.py (12 MCP Tools)\n(Claude Code · Codex · Gemini CLI · Cursor · Antigravity)"]
-        CLIBRIDGE["laptop-cli-bridge.py (:18889)\n(/decide · /health · /bridge · /workspace/* Sandbox)"]
+    subgraph TRACK2["Track 2 · $0 Desktop Harness, MCP & Bridge"]
+        HARNESS["harness/hanson_harness.py + harness/hanson_ios.py\n(Flat Script CLI · --safe AST Guard · mDNS ADB · iOS Mirror OCR)"]
+        TRACKER["harness/track_upstream_phone_harness.py\n(Continuous phone-harness Parity Tracker)"]
+        MCP["mcp/mobile_use_mcp_server.py (6.0.0 · 12 MCP Tools)\n(Claude Code · Codex · Gemini CLI · Cursor · Antigravity)"]
+        CLIBRIDGE["laptop-cli-bridge.py (:18889 · 45 Bridge Tools)\n(/decide · /health · /web/research · /workspace/* Sandbox)"]
     end
 
-    subgraph PHONE["Android Device · Hanson Mobile Agent Studio v6.5"]
-        STUDIO["Studio UI (Paper & Carbon · 0% Saturation)\n(Auto|Plan|Build · / & @ Palette · Work with Apps · FG/BG Inbox · 4-Tab Workbench)"]
-        LOOP["MobileUseAgentEngine + MobileWorkspaceEngine\n(Observe → Plan/Decide → 3-Tier Gate → Act → Post-Delta & LCS Diff Verify)"]
-        SESSIONS["AgentSessionStore\n(Multi-Thread FG/BG State · PLAN.md · WALKTHROUGH.md · Checkpoints)"]
-        SOM["HierarchyDumper + SetOfMarksAnnotator\n(Z-Layer UI Tree + [0..N] Annotated Screenshot)"]
-        VLM["Universal VLM Router (Track 1)\n(Gemini · Claude · OpenAI · OpenRouter · Custom Base URL)"]
-        RPC["ArtemisCommandServer (127.0.0.1:18888)\n(/snapshot · /action · /rpc · /mcp/tools · /a2a · /chat)"]
-        OS["5-Tier Android OS Hands\n(Accessibility · RemoteInput · OS Fast-Lane · UID-2000 CLI)"]
+    subgraph ANDROID["Android Core · Hanson Mobile Agent Studio v6.6 (:18888)"]
+        A2UI_A["A2uiProtocolEngine + A2uiComposeRenderer\n(v0.9/v1.0 JSONL · RFC 6901 · In-App & Overlay)"]
+        SSE_A["SseDynamicUiEngine + CoDrawingCanvasEngine\n(RFC 8895 SSE · Cross-App Overlay · Karaoke TTS)"]
+        LOOP["MobileUseAgentEngine + PhoneHarnessAbsorptionEngine\n(Set-of-Marks · Untrusted Screen Isolation · 1-Tap Undo)"]
+        VDISP["HansonVirtualDisplayManager + BlindCredentialVault\n(Isolated BG Display · AES-256-GCM Hardware Keystore)"]
+        OS_A["5-Tier Android OS Hands\n(Non-Fling Scroll · Korean IME · RemoteInput · UID-2000 CLI)"]
     end
 
-    MCP <-->|"adb forward :18888"| RPC
+    subgraph IOS["iOS Track · SwiftUI Companion & macOS Mirror Driver"]
+        SWIFT["ios/HansonMobileUseIOS/ (iOS 17+ / macOS 14+)\n(A2uiSwiftCore · A2uiSwiftUIRenderer · CoDrawingCanvas · AppIntents)"]
+        MIRROR["macOS iPhone Mirroring + Apple Vision OCR\n(Quartz CGEvent · Optional SkyLight BG Mode)"]
+    end
+
+    HARNESS <-->|"adb forward :18888 / mDNS"| LOOP
+    HARNESS <-->|"--platform ios"| MIRROR
+    MCP <-->|"adb forward :18888"| LOOP
     LOOP <-->|"adb reverse :18889"| CLIBRIDGE
-    STUDIO --> LOOP
-    STUDIO --> SESSIONS
-    LOOP --> SESSIONS
-    LOOP --> SOM
-    LOOP --> VLM
-    LOOP --> OS
-    RPC --> SOM
-    RPC --> OS
+    A2UI_A --> SSE_A
+    LOOP --> A2UI_A
+    LOOP --> VDISP
+    LOOP --> OS_A
+    A2UI_A -.->|"Shared A2UI JSONL Spec"| SWIFT
 ```
 
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for a deep dive into the empirical loop, Studio v5.0 & Pickle SOTA subsystems, `:18889` workspace sandbox routes, and security boundaries.
+Deep dives: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · [`docs/SSE_DYNAMIC_UI_AND_CODRAW_ARCHITECTURE.md`](docs/SSE_DYNAMIC_UI_AND_CODRAW_ARCHITECTURE.md) · [`docs/A2UI_SPEC_INTEGRATION.md`](docs/A2UI_SPEC_INTEGRATION.md) · [`docs/MOBILE_AGENT_REVERSE_ENGINEERING_2026.md`](docs/MOBILE_AGENT_REVERSE_ENGINEERING_2026.md) · [`docs/UPSTREAM_PHONE_HARNESS_TRACKER.md`](docs/UPSTREAM_PHONE_HARNESS_TRACKER.md).
+
+</details>
 
 ---
 
-## Quick Start (빠른 시작)
+## Real Hardware & Consumer Onboarding Gallery
 
-### Option A: Use with Claude Code / Codex / Gemini CLI via MCP (Zero Extra API Cost)
-
-Requires only **Python 3.9+** (standard library only — zero `pip install`) and `adb`.
-
-```bash
-# 1. Build & install the debug APK onto your connected Android device
-./gradlew installDebug
-
-# 2. Forward the on-device RPC server (or let the MCP server run adb forward automatically)
-adb forward tcp:18888 tcp:18888
-export ARTEMIS_TOKEN="<64-hex token shown in the app's Inspector/Bridge tab>"
-```
-
-Register the MCP server in one command:
-
-```bash
-# Claude Code
-claude mcp add android-mobile-use -e ARTEMIS_TOKEN="$ARTEMIS_TOKEN" -- python /path/to/hanson-mobile-use/mcp/mobile_use_mcp_server.py
-
-# OpenAI Codex CLI
-codex mcp add android-mobile-use -- python /path/to/hanson-mobile-use/mcp/mobile_use_mcp_server.py
-
-# Gemini CLI
-gemini mcp add android-mobile-use python /path/to/hanson-mobile-use/mcp/mobile_use_mcp_server.py
-```
-
-*(Even without the app installed, `mcp/mobile_use_mcp_server.py` automatically falls back to pure `adb shell uiautomator` + `screencap` + `input`! See [`mcp/README.md`](mcp/README.md) for all 12 MCP tools.)*
+<table>
+  <thead>
+    <tr>
+      <th align="center" width="50%">Real Hardware Capture · Galaxy S25 (Android 16)</th>
+      <th align="center" width="50%">10-Second Zero-Jargon 3-Step Onboarding</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td align="center">
+        <img src="assets/screenshots/galaxy-s25-paper-home.png" alt="Sanitized Real Galaxy S25 Android 16 Paper Light Home Screen" width="320" />
+      </td>
+      <td align="center">
+        <img src="assets/screenshots/onboarding-3step.png" alt="3-Step Zero-Jargon Consumer Onboarding Wizard" width="320" />
+      </td>
+    </tr>
+    <tr>
+      <td align="center">Live <b>Paper Light</b> home on physical Android 16 hardware with calm contextual focus deck, quick-pill dock, and zero developer clutter.</td>
+      <td align="center">Guided <b>3-step setup</b>: instant taste bubbles → 1-tap free key / $0 local CLI bridge / offline mode → optional accessibility &amp; overlay permissions.</td>
+    </tr>
+  </tbody>
+</table>
 
 ---
 
-### Option B: Standalone On-Phone Agent Studio (3-Step Guided Setup — Signed APK or Build)
+## Android & iOS Dual-Platform Capability Matrix
 
-1. **Install Signed Release APK & Launch**:
-   - Download `hanson-mobile-use-v6.5.0-release.apk` from [GitHub Releases](../../releases) (or build `./gradlew assembleDebug`) and install on Android 8.0+ (API 26–36).
-2. **Finish the Built-In 3-Step Consumer Onboarding Wizard (10 Seconds)**:
-   - **Step 1 (Instant Taste Setup)**: Pick starter preference bubbles — zero permissions required to immediately try interactive Split-Bill, Menu, and Storyboard cards.
-   - **Step 2 (Connect AI Brain)**: Tap **1-Tap Google AI Studio Free Key** + paste + **Test Connection (`연결 테스트`)**, **OR** pick **$0 Local CLI Bridge (`:18889`) / Ollama / vLLM URL**, **OR** skip to try offline first. Keys are encrypted inside on-device AES-256-GCM `BlindCredentialVault`.
-   - **Step 3 (Optional Phone-Control Permissions)**: Enable **Accessibility Service** (includes an expandable Android 13+ *"Allow restricted settings / 제한된 설정 허용"* tip), **Floating Mini Bar (Overlay)**, and **Screen-Off Notification Reply** only when you want cross-app automation.
-   - Power users can also inject keys from PC over USB:
-     ```powershell
-     $env:GEMINI_API_KEY="your-key"
-     .\inject-adb.ps1 -TestPrompt "/plan 오전 9시 알람 맞춰줘"
-     ```
+Hanson is strictly honest about OS sandbox boundaries rather than faking unsupported behavior. Full iOS engineering notes live in [`ios/README.md`](ios/README.md), and live upstream parity against [`phone-harness/phone-harness`](https://github.com/phone-harness/phone-harness) (`22/25` transport ops = `88.0%`, `38` flat script helpers) is continuously tracked in [`docs/UPSTREAM_PHONE_HARNESS_TRACKER.md`](docs/UPSTREAM_PHONE_HARNESS_TRACKER.md).
 
----
-
-### Option C: Phone Studio Powered by Your Laptop's CLI & Workspace Bridge (`:18889`)
-
-Want to drive the phone from your laptop's logged-in `claude`, `codex`, or `gemini` CLI **and** let the mobile agent read/edit/diff/search a sandboxed project folder on your laptop?
-
-```bash
-adb reverse tcp:18889 tcp:18889
-python laptop-cli-bridge.py --backend auto --workspace-root ./agent_workspace
-```
-
-- **Read-Only Safe Diagnostics by Default**: `--allow-workspace-exec` defaults to `False`, restricting `/workspace/exec` to read-only diagnostics (`ls`, `dir`, `pwd`, `cat`, `type`, `head`, `tail`, `wc`, `findstr`, `grep`, `python --version`, `pytest --version`, `git status`, `git diff`) with shell chaining (`&&`, `||`, `;`, `|`, `>`, `<`, `$`, `` ` ``) and path traversal rejected with `HTTP 403`.
-- **Full Sandbox Execution (Opt-In)**: Pass `--allow-workspace-exec` only when you explicitly want non-chained commands executed with `cwd=WORKSPACE_ROOT`.
-- **Bridge v6.0 Capabilities (`45` `VALID_TOOLS` + `/web/research`)**: `GET /health` reports `version: "6.0.0"` and `valid_tools_count: 45`, while `GET /pickle/capabilities` exposes bridged SOTA tool parity (`validToolsCount: 45`). Pass `--token <secret>` (or `HANSON_BRIDGE_TOKEN`) to enforce constant-time `X-Bridge-Token` auth; browser cross-origin and non-loopback `Host` requests are rejected with `HTTP 403`.
-
----
-
-## Core Tool Suite (`ToolSpecRegistry` — 45 On-Device Specs)
-
-| Category | Tools | Highlights |
+| Capability | Android (`app/` + `hanson_harness.py`) | iOS (`ios/HansonMobileUseIOS/` + `hanson_ios.py`) |
 |---|---|---|
-| **Grounded GUI Control** | `click`, `long_press`, `input_text`, `swipe`, `drag_and_drop`, `haptic_trajectory`, `click_sequence`, `press_key`, `manage_app`, `open_link`, `wait_for_delay` | `[element_index]` Set-of-Marks targeting, `0..1000` normalized coordinates, Korean/Unicode `ACTION_SET_TEXT` + clipboard paste + `IME_ACTION_SEARCH` |
-| **Screen-Off Messaging** | `list_notifications`, `reply_notification` | Sub-200ms background reply via Android `RemoteInput` tokens without waking the screen |
-| **OS Fast-Lane & UARP** | `control_device_setting`, `make_call`, `send_sms`, `search_contacts`, `manage_calendar`, `set_alarm`, `save_note`, `read_note`, `os_cli_exec`, `reverse_engineer_app`, `learn_app_skill` | Direct hardware brightness/volume/DND, telephony/PIM, `UID-2000` `hanson` OS CLI, and UARP manifest/deep-link skill distillation |
-| **Omni-Nexus & Media** | `render_generative_ui`, `browser_use`, `cross_device_control`, `draw_with_code`, `generate_visual_media` | Headless background DOM reader (`BG` lane), `:18889` PC sync, HTTP IoT/smart-home nodes, on-demand interactive HTML5/SVG/GLB mini-apps |
-| **Workspace Sandbox (v4.0+)** | `workspace_list`, `workspace_read`, `workspace_write`, `workspace_edit`, `workspace_search`, `workspace_exec` | Canonical path-sandboxed file I/O, LCS unified diff generation, `path:line: content` search, and read-only diagnostic/workspace execution |
-| **Pickle Blind Vault & SOTA (v5.0)** | `vault_blind_inject`, `vault_list_handles`, `watcher_manage`, `a2a_negotiate_schedule`, `scratchpad_note` | AES-256-GCM handle-based credential injection (raw secrets redacted & blocked from CLI fallback), proactive background UI watchers, Pickle A2A schedule negotiation, and persistent session scratchpad notes |
-| **Task Lifecycle** | `ask_user`, `complete_task` | Postcondition-guarded completion, financial/price-drift 1-shot approval, & non-bypassable `AWAITING_TAKEOVER` |
-
-*(The external stdio MCP server [`mcp/mobile_use_mcp_server.py`](mcp/mobile_use_mcp_server.py) preserves its **12 core MCP tools** contract for external coding agents at `SERVER_VERSION = "6.0.0"`.)*
-
----
-
-## Security & Privacy Highlights
-
-- **Loopback-Bound + 256-Bit Constant-Time Token Auth**: `ArtemisCommandServer` (`127.0.0.1:18888`) requires `X-Artemis-Token` (or `Authorization: Bearer`) compared via `MessageDigest.isEqual`, blocks wildcard CORS, and forces token verification whenever proxy/tunnel/browser headers (`Origin`, `Referer`, `X-Forwarded-For`, `CF-Connecting-IP`) are present.
-- **Canonical Workspace Sandbox (`MobileWorkspaceEngine` & `:18889`)**: Both on-device `resolveSafePath` and desktop `_resolve_workspace_path` enforce canonical containment inside `WORKSPACE_ROOT`, rejecting absolute paths, drive qualifiers, `..` traversal, symlink escapes, and prefix sibling collisions (`HTTP 403` / `SecurityException`). `/health` exposes only a safe non-PII `workspace_root` basename.
-- **AES-256-GCM Blind Vault & Non-Bypassable Safety Guardrails (`PickleSotaAbsorptionEngine`)**: `BlindCredentialVault` injects secrets by handle without exposing raw values to LLM prompts (`redactSensitiveText`) and blocks `execOsCliFallback("text ...")` during `"vault_blind_inject"` recovery. `FinancialAndTakeoverGuard` enforces non-bypassable `AWAITING_TAKEOVER` on CAPTCHA/Turnstile/2FA/secure keypads and requires mandatory 1-shot user approval on financial or price-drift actions even in autonomous mode.
-- **Zero Arbitrary Shell on `:18890` & Secure-by-Default `:18889`**: The `UID 2000` helper daemon verifies a `0600` shared secret token + `/proc/net/tcp` caller UID, while `laptop-cli-bridge.py` disables unrestricted `/workspace/exec` unless `--allow-workspace-exec` is explicitly passed.
-- **Self-Click & Credential Guardrails**: The router and harness filter out Hanson's own window elements during multi-step tasks and never store API keys or `.jks` keystores in source control.
-- Read [`SECURITY.md`](SECURITY.md) before exposing any port outside `127.0.0.1`.
+| **A2UI v0.9 / v1.0 Native Rendering** | **Full** — `A2uiComposeRenderer.kt` (in-app **and** cross-app floating overlay) | **Full (In-App)** — `A2uiSwiftUIRenderer.swift` (`iOS 17+` / `macOS 14+` SwiftUI) |
+| **SSE Dynamic UI & Co-Drawing** | **Full** — in-app + cross-app `SYSTEM_ALERT_WINDOW` passthrough canvas | **Full (In-App)** — `CoDrawingSwiftUICanvas.swift` + RFC 8895 SSE client |
+| **Zero-Jailbreak Cross-App Control** | **Full** — `:18888` Accessibility + Set-of-Marks + mDNS ADB fallback | **Full via macOS** — `hanson_ios.py` (`iPhone Mirroring` + Apple Vision OCR + Quartz/SkyLight CGEvents) |
+| **Non-Fling Precision Scrolling** | **Full** — 200ms brake-hold chained `StrokeDescription` (`/scroll_no_fling`) | **Full via macOS** — zero-fling pixel wheel scroll in `HansonIosMirrorClient` |
+| **Korean / Unicode Input** | **Full** — native `ACTION_SET_TEXT` + clipboard paste fallback | **Full via macOS** — clipboard paste & keystroke injection via Mirroring |
+| **Background Execution / VirtualDisplay** | **Full** — isolated `HansonVirtualDisplayManager` (`cacheDir` only) | **Full via macOS** — `HANSON_IOS_BACKGROUND=1` (`CGWindowListCreateImage` + SkyLight post) |
+| **On-Device Cross-App Overlay & A11y Tree** | **Full** — `AccessibilityService` + `RemoteInput` screen-off reply | **Honest iOS Sandbox Limit** — forbidden without jailbreak; use `AppIntents` Shortcuts on-device or `hanson_ios.py` on macOS |
+| **Safety & Preflight Gates** | **Full** — `--safe` AST guard, banking denylist, `<untrusted_screen_data>`, AES-256-GCM Blind Vault | **Full** — `--safe` AST guard, financial preflight, honest `UnsupportedIosOperationError` for `back`/`list_apps`/`tree` |
 
 ---
 
-## Interactive Studio Preview & Build from Source
+<a id="phone-harness-cli"></a>
+## Quick Start
 
-- Open [`docs/studio-preview.html`](docs/studio-preview.html) directly in any desktop/mobile browser to test all Studio v6.3 Flagship Motion, 3-Step Consumer Onboarding, & Companion flows interactively (`LivingPresenceHeroStage`, 3-step `시작 가이드` wizard, live `InteractiveMorphEngine` Split-Bill/Menu/Storyboard/Call synthesis, On-Demand Companion Sheet, 1-Tap Undo, `Auto | Plan | Build`, 13 `/` commands, 4-tab Pickle Hub modal, and Paper/Carbon theme switching).
+### Option A: Composable Phone Harness CLI (Android & iOS · Zero `pip install`)
+
+Requires only **Python 3.9+** (standard library only). Drive multi-step phone scripts in a single heredoc with pre-imported flat helpers (`screen()`, `tap_text()`, `tap_ui()`, `type_text()`, `scroll()`, `scroll_until()`, `scroll_collect()`, `wait_for_text()`, `wait_stable()`, `preflight()`, `push_board_event()`, `codraw_ring()`, `vdisplay_start()`). See [`harness/SKILL.md`](harness/SKILL.md).
 
 ```bash
-# Run the full unit & security hardening suite (31 suites / 542 Android tests + 5 Python harness tests) + build debug APK
-./gradlew testDebugUnitTest assembleDebug && python harness/test_hanson_harness.py
+# Android (prefers <50ms native :18888 Accessibility + Korean IME, falls back to mDNS wireless ADB)
+python -B harness/hanson_harness.py --safe --platform android <<'PY'
+assert preflight()["safe"]
+open_app("Settings")
+scroll("down", amount=0.55)          # 200ms brake-hold non-fling scroll
+tap_text("About phone")
+codraw_ring(0.50, 0.44, "CHECK")     # live floating spotlight ring
+PY
+
+# iOS on macOS (zero-jailbreak iPhone Mirroring + Apple Vision OCR)
+python -B harness/hanson_harness.py --safe --platform ios <<'PY'
+assert preflight()["safe"]
+print(screen())                      # Apple Vision OCR boxes (source="pixels")
+scroll("down", amount=0.45)
+PY
+
+# Continuous upstream parity tracker against phone-harness/phone-harness
+python -B harness/track_upstream_phone_harness.py --write-doc
+
+# Replay any AgentRunJournal trace as an XSS-escaped offline monochrome HTML report
+python -B harness/hanson_trace_viewer.py trace.json -o trace-report.html
 ```
 
-- Signed Release APK: available on [GitHub Releases (`v6.5.0`)](../../releases) (`BuildConfig.GEMINI_API_KEY=""` enforced in `release` builds)
-- Composable Phone Harness CLI & Agent Skill: [`harness/SKILL.md`](harness/SKILL.md)
-- SSE Dynamic UI & Cross-App Co-Drawing architecture: [`docs/SSE_DYNAMIC_UI_AND_CODRAW_ARCHITECTURE.md`](docs/SSE_DYNAMIC_UI_AND_CODRAW_ARCHITECTURE.md)
-- Interactive Studio v6.5 Flagship Motion & Onboarding preview: [`docs/studio-preview.html`](docs/studio-preview.html)
-- 2026 SOTA Reverse Engineering notes: [`docs/MOBILE_AGENT_REVERSE_ENGINEERING_2026.md`](docs/MOBILE_AGENT_REVERSE_ENGINEERING_2026.md)
-- MCP Server docs: [`mcp/README.md`](mcp/README.md)
-- Architecture guide: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
-- Contributing guide: [`CONTRIBUTING.md`](CONTRIBUTING.md)
+---
+
+### Option B: Zero-Extra-API-Cost MCP Server (`Claude Code` / `Codex` / `Gemini CLI`)
+
+Zero external Python dependencies (`SERVER_VERSION = "6.0.0"`, stable **12 MCP tools** with `0`-based `element_index` and shell-safe pure-ADB fallback). See [`mcp/README.md`](mcp/README.md).
+
+```bash
+./gradlew installDebug
+adb forward tcp:18888 tcp:18888
+export ARTEMIS_TOKEN="<64-hex token from the app's Inspector / Bridge tab>"
+
+# Register with your coding agent
+claude mcp add android-mobile-use -e ARTEMIS_TOKEN="$ARTEMIS_TOKEN" -- python /path/to/hanson-mobile-use/mcp/mobile_use_mcp_server.py
+codex  mcp add android-mobile-use -- python /path/to/hanson-mobile-use/mcp/mobile_use_mcp_server.py
+gemini mcp add android-mobile-use    python /path/to/hanson-mobile-use/mcp/mobile_use_mcp_server.py
+```
+
+---
+
+### Option C: Standalone Signed Release APK (3-Step Guided Setup) & Laptop Bridge (`:18889`)
+
+1. **Install Release APK**: Download `hanson-mobile-use-v6.6.0-release.apk` from [GitHub Releases](../../releases) (or run `./gradlew assembleDebug`) on Android 8.0–16 (API 26–36). Release builds enforce `BuildConfig.GEMINI_API_KEY = ""`.
+2. **Finish 3-Step Onboarding (10 Seconds)**: Pick starter preference bubbles → connect a free Google AI Studio key (`AQ.` or `AIza`, encrypted in on-device AES-256-GCM `BlindCredentialVault`), point to local **Ollama / vLLM**, or skip to offline Morph mode → enable Accessibility / Overlay / Notification Reply only when needed.
+3. **Optional Laptop CLI & Sandboxed Workspace Bridge (`:18889`, `6.0.0`, `45 VALID_TOOLS` + `/web/research`)**:
+   ```bash
+   adb reverse tcp:18889 tcp:18889
+   python -B laptop-cli-bridge.py --backend auto --workspace-root ./agent_workspace
+   ```
+   *(Read-only diagnostics by default; pass `--allow-workspace-exec` only to opt into sandboxed commands, and `--token <secret>` to require constant-time `X-Bridge-Token` auth.)*
+4. **Interactive Web Preview**: Open [`docs/studio-preview.html`](docs/studio-preview.html) directly in any browser to test the living-presence hero, 3-step onboarding wizard, Morph UI cards, and Paper/Carbon switching without installing an APK.
+
+---
+
+## Core Tool Suite (`45` On-Device · `45` Bridge · `12` MCP)
+
+| Category | Tools (`ToolSpecRegistry.kt` — 45 Specs) | Highlights |
+|---|---|---|
+| **Grounded GUI Control** | `click`, `long_press`, `input_text`, `swipe`, `drag_and_drop`, `haptic_trajectory`, `click_sequence`, `press_key`, `manage_app`, `open_link`, `wait_for_delay` | Set-of-Marks `[element_index]`, `0..1000` normalized coords, Korean/Unicode `ACTION_SET_TEXT` + clipboard paste, 200ms non-fling scrolling |
+| **Screen-Off Messaging** | `list_notifications`, `reply_notification` | Sub-200ms background reply via Android `RemoteInput` tokens without waking the screen |
+| **OS Fast-Lane & UARP** | `control_device_setting`, `make_call`, `send_sms`, `search_contacts`, `manage_calendar`, `set_alarm`, `save_note`, `read_note`, `os_cli_exec`, `reverse_engineer_app`, `learn_app_skill` | Direct brightness/volume/DND/telephony/PIM APIs, `UID-2000` helper daemon (`:18890`), and UARP deep-link skill distillation |
+| **A2UI, SSE, & Media** | `render_generative_ui`, `browser_use`, `cross_device_control`, `draw_with_code`, `generate_visual_media` | A2UI v0.9/v1.0 native Compose/SwiftUI streaming (`:18888/a2ui/*`), cross-app Co-Draw overlay (`:18888/sse/board`), headless `BG` DOM reader |
+| **Workspace Sandbox** | `workspace_list`, `workspace_read`, `workspace_write`, `workspace_edit`, `workspace_search`, `workspace_exec` | Canonical path-sandboxed file I/O, LCS unified diff, search, and read-only default diagnostics |
+| **Blind Vault & SOTA** | `vault_blind_inject`, `vault_list_handles`, `watcher_manage`, `a2a_negotiate_schedule`, `scratchpad_note` | AES-256-GCM handle-based credential injection (raw secrets redacted & blocked from CLI fallback), background UI watchers, A2A negotiation |
+| **Task Lifecycle** | `ask_user`, `complete_task` | Post-action delta verification, 1-tap reversible receipts, financial/price-drift approval, & non-bypassable `AWAITING_TAKEOVER` |
+
+---
+
+## Security & Verification
+
+- **Hardened Loopback RPC & Bridge (`:18888` / `:18889` / `:18890`)**: Constant-time 256-bit `X-Artemis-Token` auth (`MessageDigest.isEqual`), wildcard CORS & DNS-rebinding rejection, `android:allowBackup="false"`, `usesCleartextTraffic="false"` + loopback-only `network_security_config.xml`, and `0600` shared-secret + `/proc/net/tcp` UID verification on `:18890`.
+- **Prompt-Injection Isolation, AST Guard & Banking Preflight**: `UntrustedScreenDataGuard` wraps third-party UI trees in `<untrusted_screen_data>` with indirect prompt-injection signal detection; `hanson_script_guard.py` (`--safe`) fail-closes unsafe Python scripts via AST classification; `/preflight` blocks Korean & global banking/wallet/password apps.
+- **AES-256-GCM Blind Vault & Non-Bypassable Takeover**: `BlindCredentialVault` isolates secrets in `AndroidKeyStore` (hardware IV + PBKDF2-HMAC-SHA256 `210,000`-iteration JVM fallback) and blocks raw secret reflection; `FinancialAndTakeoverGuard` halts cleanly into `AWAITING_TAKEOVER` on CAPTCHA / Turnstile / 2FA / secure keypads.
+- **Zero-Key Release & Full Verification Suite (`32 suites / 549 Android tests + 16 Python harness tests`, 0 failures)**: Read [`SECURITY.md`](SECURITY.md) before exposing any port beyond `127.0.0.1`.
+
+```bash
+# Run Android unit & security hardening suites (32 suites / 549 Android tests, including A2uiProtocolEngineTest & PureAchromaticDesignTest)
+./gradlew testDebugUnitTest assembleDebug
+
+# Run Python harness, iOS driver, AST guard, & upstream tracker unit tests (16 Python harness tests, zero __pycache__)
+python -B harness/test_hanson_harness.py
+python -B harness/test_ios_and_tracker.py
+```
+
+---
+
+## Key Documentation & Resources
+
+| Resource | Path |
+|---|---|
+| **A2UI v0.9/v1.0 Spec Integration** | [`docs/A2UI_SPEC_INTEGRATION.md`](docs/A2UI_SPEC_INTEGRATION.md) |
+| **iOS Companion & Mirror Architecture** | [`ios/README.md`](ios/README.md) · [`ios/HansonMobileUseIOS/Package.swift`](ios/HansonMobileUseIOS/Package.swift) |
+| **Composable Phone Harness Skill** | [`harness/SKILL.md`](harness/SKILL.md) · [`harness/hanson_harness.py`](harness/hanson_harness.py) · [`harness/hanson_ios.py`](harness/hanson_ios.py) |
+| **Upstream `phone-harness` Parity Tracker** | [`docs/UPSTREAM_PHONE_HARNESS_TRACKER.md`](docs/UPSTREAM_PHONE_HARNESS_TRACKER.md) · [`harness/track_upstream_phone_harness.py`](harness/track_upstream_phone_harness.py) |
+| **SSE Dynamic UI & Co-Draw Architecture** | [`docs/SSE_DYNAMIC_UI_AND_CODRAW_ARCHITECTURE.md`](docs/SSE_DYNAMIC_UI_AND_CODRAW_ARCHITECTURE.md) |
+| **Interactive Web Studio Preview** | [`docs/studio-preview.html`](docs/studio-preview.html) |
+| **Core Architecture & 2026 SOTA Notes** | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · [`docs/MOBILE_AGENT_REVERSE_ENGINEERING_2026.md`](docs/MOBILE_AGENT_REVERSE_ENGINEERING_2026.md) |
+| **MCP Server · Security · Contributing** | [`mcp/README.md`](mcp/README.md) · [`SECURITY.md`](SECURITY.md) · [`CONTRIBUTING.md`](CONTRIBUTING.md) |
 
 ---
 

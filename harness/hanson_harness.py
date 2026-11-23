@@ -47,6 +47,7 @@ _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
+import hanson_ios  # noqa: E402
 import hanson_script_guard as safety_guard  # noqa: E402
 
 CONFIG_DIR = Path(os.environ.get("HANSON_HARNESS_HOME") or (Path.home() / ".hanson-mobile-use"))
@@ -54,6 +55,7 @@ DEVICES_FILE = CONFIG_DIR / "devices.json"
 AGENT_WORKSPACE = Path(os.environ.get("HANSON_AGENT_WORKSPACE") or (CONFIG_DIR / "agent-workspace"))
 DEFAULT_ARTEMIS_URL = os.environ.get("ARTEMIS_URL", "http://127.0.0.1:18888").rstrip("/")
 DEFAULT_ARTEMIS_TOKEN = os.environ.get("ARTEMIS_TOKEN", "").strip()
+VALID_PLATFORMS = ("android", "ios", "auto")
 
 
 def _resolve_adb_bin() -> str:
@@ -213,6 +215,8 @@ def _remember_device(serial: str, model: str, host: Optional[str] = None, name: 
 # =============================================================================
 
 class HansonPhoneClient:
+    platform = "android"
+
     def __init__(
         self,
         artemis_url: str = DEFAULT_ARTEMIS_URL,
@@ -488,6 +492,28 @@ class HansonPhoneClient:
         self._lock_gate()
         self._sh(f"input keyevent KEYCODE_{code}")
 
+    def home(self) -> None:
+        self.press("home")
+
+    def back(self) -> None:
+        self.press("back")
+
+    def app_switcher(self) -> None:
+        self.press("recents")
+
+    def capabilities(self) -> Dict[str, Any]:
+        return {
+            "platform": "android",
+            "host_platform": sys.platform,
+            "supported": True,
+            "mode": "hanson_artemis" if self.is_artemis_ready() else "adb_fallback",
+            "checks": {
+                "adb_binary": shutil.which(ADB_BIN) is not None,
+                "artemis_ready": self.is_artemis_ready(),
+                "scrcpy": shutil.which("scrcpy") is not None,
+            },
+        }
+
     def current_app(self) -> Optional[str]:
         if self.is_artemis_ready():
             try:
@@ -601,9 +627,55 @@ class HansonPhoneClient:
         return self._artemis_request("POST", "/vdisplay/stop", {})
 
 
-def _content_band_boxes(client: HansonPhoneClient, top_frac: float = 0.06, bot_frac: float = 0.92) -> List[Dict[str, Any]]:
+def resolve_platform(
+    platform_arg: Optional[str] = None,
+    env: Optional[Dict[str, str]] = None,
+    host_platform: Optional[str] = None,
+    android_ready: Optional[bool] = None,
+    ios_ready: Optional[bool] = None,
+) -> str:
+    """Resolve target mobile platform (`'android'` or `'ios'`) from CLI/env/host."""
+    env_map = os.environ if env is None else env
+    raw = (platform_arg or env_map.get("HANSON_PLATFORM") or "auto").strip().lower()
+    if raw not in VALID_PLATFORMS:
+        raise ValueError(f"platform must be one of {VALID_PLATFORMS}, got {raw!r}")
+    if raw in ("android", "ios"):
+        return raw
+
+    host = host_platform or sys.platform
+    if android_ready is True:
+        return "android"
+    if host == "darwin":
+        if ios_ready is None:
+            ios_ready = bool(hanson_ios.check_ios_capabilities(platform_name=host)["supported"])
+        if android_ready is None:
+            try:
+                android_ready = bool(HansonPhoneClient().is_artemis_ready() or any(r[1] == "device" for r in _attached_devices()))
+            except Exception:
+                android_ready = False
+        if ios_ready and not android_ready:
+            return "ios"
+    return "android"
+
+
+def create_client(
+    platform: Optional[str] = None,
+    artemis_url: str = DEFAULT_ARTEMIS_URL,
+    artemis_token: str = DEFAULT_ARTEMIS_TOKEN,
+    serial: Optional[str] = None,
+    ios_driver: Optional[Any] = None,
+) -> Any:
+    """Instantiate the platform-appropriate Hanson client (`HansonPhoneClient` or `HansonIosMirrorClient`)."""
+    resolved = resolve_platform(platform_arg=platform)
+    if resolved == "ios":
+        return hanson_ios.HansonIosMirrorClient(driver=ios_driver)
+    return HansonPhoneClient(artemis_url=artemis_url, artemis_token=artemis_token, serial=serial)
+
+
+def _content_band_boxes(client: Any, top_frac: float = 0.06, bot_frac: float = 0.92) -> List[Dict[str, Any]]:
     b = client.bounds()
-    top, bot = b["h"] * top_frac, b["h"] * bot_frac
+    origin_y = float(b.get("y", 0))
+    top, bot = origin_y + b["h"] * top_frac, origin_y + b["h"] * bot_frac
     return [o for o in client.screen() if top < o["y"] < bot]
 
 
@@ -611,7 +683,7 @@ def _content_band_boxes(client: HansonPhoneClient, top_frac: float = 0.06, bot_f
 # Flat Pre-Imported Script Namespace Builder
 # =============================================================================
 
-def build_script_namespace(client: HansonPhoneClient) -> Dict[str, Any]:
+def build_script_namespace(client: Any) -> Dict[str, Any]:
     def screen(): return client.screen()
     def ui(): return client.ui()
     def screenshot(path=None): return client.screenshot(path)
@@ -620,9 +692,9 @@ def build_script_namespace(client: HansonPhoneClient) -> Dict[str, Any]:
     def drag(x1, y1, x2, y2, duration=0.35): return client.drag(x1, y1, x2, y2, duration)
     def type_text(text): return client.type_text(text)
     def press(key): return client.press(key)
-    def home(): return client.press("home")
-    def back(): return client.press("back")
-    def app_switcher(): return client.press("recents")
+    def home(): return client.home() if hasattr(client, "home") else client.press("home")
+    def back(): return client.back() if hasattr(client, "back") else client.press("back")
+    def app_switcher(): return client.app_switcher() if hasattr(client, "app_switcher") else client.press("recents")
     def open_app(name):
         pkg = client.open_app(name)
         client.wait_stable(timeout=4.0)
@@ -677,7 +749,8 @@ def build_script_namespace(client: HansonPhoneClient) -> Dict[str, Any]:
 
     def swipe(direction="up", distance=0.4, at=None):
         b = client.bounds()
-        cx, cy = (b["w"] / 2.0, b["h"] / 2.0) if at is None else ((at["x"], at["y"]) if isinstance(at, dict) else at)
+        ox, oy = float(b.get("x", 0)), float(b.get("y", 0))
+        cx, cy = (ox + b["w"] / 2.0, oy + b["h"] / 2.0) if at is None else ((at["x"], at["y"]) if isinstance(at, dict) else at)
         dx = {"left": -1, "right": 1}.get(direction, 0) * b["w"] * distance
         dy = {"up": -1, "down": 1}.get(direction, 0) * b["h"] * distance
         if not dx and not dy:
@@ -754,6 +827,8 @@ def build_script_namespace(client: HansonPhoneClient) -> Dict[str, Any]:
         "scroll_until": scroll_until, "scroll_collect": scroll_collect,
         "wait": wait, "wait_for_text": wait_for_text, "wait_for_app": wait_for_app, "wait_stable": wait_stable,
         "preflight": preflight,
+        "platform": getattr(client, "platform", "android"),
+        "capabilities": client.capabilities if hasattr(client, "capabilities") else (lambda: {"platform": getattr(client, "platform", "android")}),
         "wrap_untrusted_screen_data": safety_guard.wrap_untrusted_screen_data,
         "push_board_event": client.push_board_event,
         "codraw_ring": client.codraw_ring,
@@ -781,8 +856,18 @@ def build_script_namespace(client: HansonPhoneClient) -> Dict[str, Any]:
 # CLI Subcommands: doctor, pair, connect, awake, exec (stdin heredoc)
 # =============================================================================
 
-def cmd_doctor(client: HansonPhoneClient) -> int:
-    print("Hanson Phone Harness Doctor")
+def cmd_doctor(client: Any) -> int:
+    plat = getattr(client, "platform", "android")
+    print(f"Hanson Phone Harness Doctor (platform={plat})")
+    ios_caps = hanson_ios.check_ios_capabilities()
+    if plat == "ios":
+        print(f"  [{'PASS' if ios_caps['supported'] else 'FAIL'}] macOS iPhone Mirroring: {ios_caps['mode']}")
+        for key, ok in ios_caps["checks"].items():
+            print(f"    - {key}: {'OK' if ok else 'MISSING'}")
+        print(f"  [INFO] guidance: {ios_caps['guidance']}")
+        print(f"  [INFO] agent workspace: {AGENT_WORKSPACE}")
+        return 0 if ios_caps["supported"] else 1
+
     adb_ok = shutil.which(ADB_BIN) is not None
     print(f"  [{'PASS' if adb_ok else 'FAIL'}] adb binary: {ADB_BIN}")
     if adb_ok:
@@ -795,6 +880,7 @@ def cmd_doctor(client: HansonPhoneClient) -> int:
     print(f"  [{'PASS' if artemis_ok else 'INFO'}] Hanson native :18888 Artemis: {'READY' if artemis_ok else 'offline (ADB fallback available)'}")
     scrcpy_ok = shutil.which("scrcpy") is not None
     print(f"  [{'PASS' if scrcpy_ok else 'INFO'}] scrcpy mirror: {'installed' if scrcpy_ok else 'not installed (optional)'}")
+    print(f"  [{'PASS' if ios_caps['supported'] else 'INFO'}] iOS Mirroring host: {ios_caps['mode']} ({ios_caps['host_platform']})")
     print(f"  [INFO] agent workspace: {AGENT_WORKSPACE}")
     return 0 if (adb_ok or artemis_ok) else 1
 
@@ -874,22 +960,58 @@ def cmd_awake(client: HansonPhoneClient, mirror: bool = True, poke_every: int = 
     return 0
 
 
+def _parse_cli_flags(argv: List[str]) -> Tuple[bool, Optional[str], List[str]]:
+    safe_mode = False
+    platform_arg: Optional[str] = None
+    rest: List[str] = []
+    i = 1
+    while i < len(argv):
+        tok = argv[i]
+        if tok == "--safe":
+            safe_mode = True
+            i += 1
+        elif tok == "--platform":
+            if i + 1 >= len(argv):
+                raise ValueError("--platform requires a value: android, ios, or auto")
+            platform_arg = argv[i + 1]
+            i += 2
+        elif tok.startswith("--platform="):
+            platform_arg = tok.split("=", 1)[1]
+            i += 1
+        else:
+            rest.append(tok)
+            i += 1
+    return safe_mode, platform_arg, rest
+
+
 def main(argv: List[str]) -> int:
-    safe_mode = "--safe" in argv
-    args = [a for a in argv[1:] if a != "--safe"]
-    client = HansonPhoneClient()
+    try:
+        safe_mode, platform_arg, args = _parse_cli_flags(argv)
+        resolved_platform = resolve_platform(platform_arg=platform_arg)
+    except ValueError as exc:
+        print(f"Argument error: {exc}", file=sys.stderr)
+        return 2
+
+    if args and args[0] in ("-h", "--help"):
+        print("Usage: python harness/hanson_harness.py [--safe] [--platform android|ios|auto] [doctor|pair|awake|preflight] | <<'PY'")
+        return 0
+
+    client = create_client(platform=resolved_platform)
 
     if args and args[0] == "doctor":
         return cmd_doctor(client)
     if args and args[0] == "pair":
+        if resolved_platform == "ios":
+            print("iOS pairing uses macOS System Settings -> iPhone Mirroring (no ADB mDNS pairing).", file=sys.stderr)
+            return 2
         return cmd_pair(args[1:])
     if args and args[0] == "awake":
+        if resolved_platform == "ios":
+            print("iOS awake mode is managed by macOS iPhone Mirroring.", file=sys.stderr)
+            return 2
         return cmd_awake(client, mirror="--no-mirror" not in args)
     if args and args[0] == "preflight":
         print(json.dumps(client.preflight(), ensure_ascii=False, indent=2))
-        return 0
-    if args and args[0] in ("-h", "--help"):
-        print("Usage: python harness/hanson_harness.py [--safe] [doctor|pair|awake|preflight] | <<'PY'")
         return 0
 
     code = Path(args[0]).read_text(encoding="utf-8") if args else sys.stdin.read()

@@ -2,6 +2,9 @@ package com.hanson.mobileuse.accessibility
 
 import android.accessibilityservice.AccessibilityService
 import android.util.Log
+import com.hanson.mobileuse.agent.A2uiIngestResult
+import com.hanson.mobileuse.agent.A2uiProtocolConstants
+import com.hanson.mobileuse.agent.A2uiSurfaceRegistry
 import com.hanson.mobileuse.agent.ChatSender
 import com.hanson.mobileuse.agent.CoDrawElement
 import com.hanson.mobileuse.agent.CoDrawingCanvasEngine
@@ -236,6 +239,9 @@ class ArtemisCommandServer(
                         JSONObject().apply {
                             put("streaming", true)
                             put("sseDynamicUi", true)
+                            put("a2ui", true)
+                            put("a2uiVersions", JSONArray().put("1.0").put("v0.9").put("v0.8"))
+                            put("a2uiCatalog", A2uiProtocolConstants.BASIC_CATALOG_V1_0)
                             put("crossAppCoDrawing", true)
                             put("pushNotifications", true)
                             put("stateTransitionHistory", true)
@@ -247,6 +253,8 @@ class ArtemisCommandServer(
                         "endpoints",
                         JSONObject().apply {
                             put("a2a", "/a2a")
+                            put("a2uiMessages", "/a2ui/messages")
+                            put("a2uiSurfaces", "/a2ui/surfaces")
                             put("chat", "/chat")
                             put("mcpTools", "/mcp/tools")
                             put("snapshot", "/snapshot")
@@ -271,6 +279,78 @@ class ArtemisCommandServer(
                 }
                 onBridgeEvent?.invoke(path, "200 OK (A2A Card)")
                 sendHttpResponse(out, 200, "application/json", card.toString())
+            }
+            "/a2ui/messages" -> {
+                if (!"POST".equals(method, ignoreCase = true)) {
+                    sendHttpResponse(out, 405, "application/json", """{"status":"error","error":"Method Not Allowed"}""")
+                    return
+                }
+                if (body.isBlank()) {
+                    sendHttpResponse(out, 400, "application/json", """{"status":"error","error":"Empty A2UI payload"}""")
+                    return
+                }
+                val results = A2uiSurfaceRegistry.ingestJsonl(body)
+                var appliedCount = 0
+                var rejectedCount = 0
+                var firstError = ""
+                val touchedSurfaceIds = LinkedHashSet<String>()
+                for (res in results) {
+                    when (res) {
+                        is A2uiIngestResult.Applied -> {
+                            appliedCount++
+                            touchedSurfaceIds.add(res.surfaceId)
+                        }
+                        is A2uiIngestResult.Rejected -> {
+                            rejectedCount++
+                            if (firstError.isEmpty()) firstError = res.reason
+                        }
+                        is A2uiIngestResult.Ignored -> Unit
+                    }
+                }
+                if (appliedCount == 0 && rejectedCount > 0) {
+                    val errResp = JSONObject()
+                        .put("status", "error")
+                        .put("applied", 0)
+                        .put("rejected", rejectedCount)
+                        .put("error", firstError.ifBlank { "Invalid A2UI payload" })
+                    onBridgeEvent?.invoke("POST /a2ui/messages", "400 Invalid A2UI")
+                    sendHttpResponse(out, 400, "application/json", errResp.toString())
+                    return
+                }
+                val resp = JSONObject().apply {
+                    put("status", "ok")
+                    put("protocol", "A2UI")
+                    put("applied", appliedCount)
+                    put("rejected", rejectedCount)
+                    put("surfaceIds", JSONArray(touchedSurfaceIds.toList()))
+                    put("activeSurfaceCount", A2uiSurfaceRegistry.surfaces.value.size)
+                }
+                onBridgeEvent?.invoke("POST /a2ui/messages", "200 OK (applied=$appliedCount)")
+                sendHttpResponse(out, 200, "application/json", resp.toString())
+            }
+            "/a2ui/surfaces" -> {
+                if (!"GET".equals(method, ignoreCase = true)) {
+                    sendHttpResponse(out, 405, "application/json", """{"status":"error","error":"Method Not Allowed"}""")
+                    return
+                }
+                val includeComponents = queryParams["components"] == "true"
+                val requestedId = queryParams["surfaceId"]?.trim().orEmpty()
+                if (requestedId.isNotEmpty()) {
+                    val surface = A2uiSurfaceRegistry.getSurface(requestedId)
+                    if (surface == null) {
+                        sendHttpResponse(out, 404, "application/json", """{"status":"error","error":"Surface not found"}""")
+                        return
+                    }
+                    val resp = JSONObject()
+                        .put("status", "ok")
+                        .put("surface", surface.toSummaryJson(includeDataModel = true, includeComponents = includeComponents))
+                    onBridgeEvent?.invoke("GET /a2ui/surfaces", "200 OK ($requestedId)")
+                    sendHttpResponse(out, 200, "application/json", resp.toString())
+                } else {
+                    val summary = A2uiSurfaceRegistry.surfacesSummaryJson(includeComponents = includeComponents)
+                    onBridgeEvent?.invoke("GET /a2ui/surfaces", "200 OK (${summary.optInt("surfaceCount")} surfaces)")
+                    sendHttpResponse(out, 200, "application/json", summary.toString())
+                }
             }
             "/sse/board" -> {
                 if (!"GET".equals(method, ignoreCase = true)) {

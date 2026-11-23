@@ -1,0 +1,140 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="356" viewBox="0 0 920 356" role="img" aria-labelledby="architecture-title architecture-desc">
+  <title id="architecture-title">Hanson Mobile-Use system architecture</title>
+  <desc id="architecture-desc">The desktop Phone Harness and MCP bridge connect to Hanson Mobile Agent Studio v6.6, which connects in turn to cloud and local models and native Android and iOS controls.</desc>
+  <defs>
+    <pattern id="micro-grid" width="12" height="12" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r=".55" fill="#71717A" opacity=".24"/>
+    </pattern>
+  </defs>
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; fill: #FAFAFA; }
+    .frame { fill: #09090B; stroke: #27272A; stroke-width: 1.2; }
+    .card, .pill { fill: #121214; stroke: #3F3F46; stroke-width: 1.2; }
+    .pill { fill: #18181B; stroke: #27272A; }
+    .ink { fill: #FAFAFA; }
+    .column-heading {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: .58px;
+      fill: #A1A1AA;
+    }
+    .node-title { font-size: 13.1px; font-weight: 700; letter-spacing: -.16px; }
+    .detail { font-size: 10.5px; fill: #A1A1AA; }
+    .hub-title { font-size: 15px; font-weight: 700; letter-spacing: -.29px; }
+    .feature { font-size: 11.1px; font-weight: 600; }
+    .section-rule, .section-notch, .node-glyph, .wire-bed, .wire {
+      fill: none;
+      stroke: #3F3F46;
+      stroke-width: 1.2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    .section-notch, .node-glyph { stroke: #71717A; }
+    .wire { stroke: #A1A1AA; stroke-dasharray: 3 5; animation: flowDash 1.25s linear infinite; }
+    .signal { fill: #09090B; stroke: #A1A1AA; stroke-width: 1.2; opacity: .35; animation: signalPulse 2s ease-in-out infinite; }
+    .port { fill: #121214; stroke: #A1A1AA; stroke-width: 1.2; }
+    @keyframes flowDash { to { stroke-dashoffset: -8; } }
+    @keyframes signalPulse { 0%, 100% { opacity: .28; } 50% { opacity: .85; } }
+    @media (prefers-reduced-motion: reduce) {
+      .wire, .signal { animation: none; }
+    }
+  </style>
+
+  <rect class="frame" x="1" y="1" width="918" height="354" rx="21"/>
+  <rect x="2" y="2" width="916" height="352" rx="20" fill="url(#micro-grid)"/>
+  <g transform="translate(24 0)">
+    <text class="column-heading" x="0" y="52">TRACK 2 &#183; $0 DESKTOP HARNESS</text>
+    <path class="section-rule" d="M0 66H250"/>
+    <path class="section-notch" d="M0 66h14m232 0h4"/>
+  </g>
+  <g transform="translate(316 0)">
+    <text class="column-heading" x="0" y="52">NATIVE ENGINE &#183; A2UI v0.9/v1.0</text>
+    <path class="section-rule" d="M0 66H288"/>
+    <path class="section-notch" d="M0 66h14m270 0h4"/>
+  </g>
+  <g transform="translate(646 0)">
+    <text class="column-heading" x="0" y="52">MULTI-VLM &amp; DUAL-OS HANDS</text>
+    <path class="section-rule" d="M0 66H250"/>
+    <path class="section-notch" d="M0 66h14m232 0h4"/>
+  </g>
+
+  <g aria-hidden="true">
+    <path class="wire-bed" d="M274 149H316"/>
+    <path class="wire" d="M274 149H316" style="animation-delay:0s"/>
+    <circle class="signal" cx="295" cy="149" r="6" style="animation-delay:0s"/>
+    <circle class="ink" cx="295" cy="149" r="2"/>
+    <path class="wire-bed" d="M274 260H316"/>
+    <path class="wire" d="M274 260H316" style="animation-delay:-0.35s"/>
+    <circle class="signal" cx="295" cy="260" r="6" style="animation-delay:-0.45s"/>
+    <circle class="ink" cx="295" cy="260" r="2"/>
+    <path class="wire-bed" d="M604 149H646"/>
+    <path class="wire" d="M604 149H646" style="animation-delay:-0.7s"/>
+    <circle class="signal" cx="625" cy="149" r="6" style="animation-delay:-0.9s"/>
+    <circle class="ink" cx="625" cy="149" r="2"/>
+    <path class="wire-bed" d="M604 260H646"/>
+    <path class="wire" d="M604 260H646" style="animation-delay:-1.05s"/>
+    <circle class="signal" cx="625" cy="260" r="6" style="animation-delay:-1.35s"/>
+    <circle class="ink" cx="625" cy="260" r="2"/>
+  </g>
+  <g transform="translate(24 110)">
+    <rect class="ink" y="3" width="250" height="78" rx="12"/>
+    <rect class="card" width="250" height="78" rx="12"/>
+    <path class="node-glyph" transform="translate(224 14)" d="m0 0 3 3-3 3m6 0h4"/>
+    <text class="node-title" x="16" y="35">hanson_harness.py &amp; hanson_ios.py</text>
+    <text class="detail" x="16" y="56">Flat CLI &#183; --safe AST Guard &#183; mDNS / WDA</text>
+  </g>
+  <g transform="translate(24 221)">
+    <rect class="ink" y="3" width="250" height="78" rx="12"/>
+    <rect class="card" width="250" height="78" rx="12"/>
+    <path class="node-glyph" transform="translate(224 14)" d="M0 2h10M0 6h10m-7-6v6m4-6v6"/>
+    <text class="node-title" x="16" y="35">MCP 6.0.0 &amp; Bridge :18889</text>
+    <text class="detail" x="16" y="56">12 MCP Tools &#183; 45 Bridge &#183; Upstream Tracker</text>
+  </g>
+  <g transform="translate(646 110)">
+    <rect class="ink" y="3" width="250" height="78" rx="12"/>
+    <rect class="card" width="250" height="78" rx="12"/>
+    <path class="node-glyph" transform="translate(224 14)" d="M0 3h3l2-3 2 6 2-3h2"/>
+    <text class="node-title" x="16" y="35">Cloud &amp; Local VLMs</text>
+    <text class="detail" x="16" y="56">Gemini SSE &#183; Claude &#183; OpenAI &#183; Ollama</text>
+  </g>
+  <g transform="translate(646 221)">
+    <rect class="ink" y="3" width="250" height="78" rx="12"/>
+    <rect class="card" width="250" height="78" rx="12"/>
+    <path class="node-glyph" transform="translate(224 14)" d="M0 0h4v6H0zm7 0h4v6H7z"/>
+    <text class="node-title" x="16" y="35">Android 5-Tier &amp; iOS Hands</text>
+    <text class="detail" x="16" y="56">Non-Fling Scroll &#183; RemoteInput &#183; XCUITest</text>
+  </g>
+  <g transform="translate(316 90)">
+    <rect class="ink" y="3" width="288" height="221" rx="14"/>
+    <rect class="card" width="288" height="221" rx="14"/>
+    <text class="hub-title" x="16" y="30">Hanson Mobile Agent Studio v6.6</text>
+    <path class="node-glyph" d="M264 21h7m-7 4h7m-7 4h7"/>
+    <g transform="translate(16 47)">
+      <rect class="pill" width="256" height="34" rx="8"/>
+      <text class="feature" x="16" y="21">A2UI v0.9/v1.0 JSONL &#8594; Compose &amp; SwiftUI</text>
+    </g>
+    <g transform="translate(16 89)">
+      <rect class="pill" width="256" height="34" rx="8"/>
+      <text class="feature" x="16" y="21">Set-of-Marks + Korean IME (:18888)</text>
+    </g>
+    <g transform="translate(16 131)">
+      <rect class="pill" width="256" height="34" rx="8"/>
+      <text class="feature" x="16" y="21">SSE Dynamic UI + Cross-App Co-Draw</text>
+    </g>
+    <g transform="translate(16 173)">
+      <rect class="pill" width="256" height="34" rx="8"/>
+      <text class="feature" x="16" y="21">VirtualDisplay + AES-256-GCM Blind Vault</text>
+    </g>
+  </g>
+  <g aria-hidden="true">
+    <circle class="port" cx="274" cy="149" r="2.6"/>
+    <circle class="port" cx="316" cy="149" r="2.6"/>
+    <circle class="port" cx="274" cy="260" r="2.6"/>
+    <circle class="port" cx="316" cy="260" r="2.6"/>
+    <circle class="port" cx="604" cy="149" r="2.6"/>
+    <circle class="port" cx="646" cy="149" r="2.6"/>
+    <circle class="port" cx="604" cy="260" r="2.6"/>
+    <circle class="port" cx="646" cy="260" r="2.6"/>
+  </g>
+</svg>

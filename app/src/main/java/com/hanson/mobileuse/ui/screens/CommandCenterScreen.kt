@@ -86,6 +86,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.hanson.mobileuse.accessibility.AccessibilityEngineState
 import com.hanson.mobileuse.accessibility.HansonAccessibilityService
+import com.hanson.mobileuse.agent.A2uiSurfaceRegistry
 import com.hanson.mobileuse.agent.ActionReceipt
 import com.hanson.mobileuse.agent.AgentRunSession
 import com.hanson.mobileuse.agent.AgentRunStatus
@@ -117,6 +118,7 @@ import com.hanson.mobileuse.agent.WatcherActionMode
 import com.hanson.mobileuse.agent.WatcherRule
 import com.hanson.mobileuse.notification.InterceptedNotification
 import com.hanson.mobileuse.service.DynamicCanvasOverlayService
+import com.hanson.mobileuse.ui.components.A2uiSurfaceCard
 import com.hanson.mobileuse.ui.components.AhaboardDotGridBox
 import com.hanson.mobileuse.ui.components.AhaboardMultimodalMediaView
 import com.hanson.mobileuse.ui.components.AhaboardResponseCard
@@ -345,6 +347,7 @@ fun CommandCenterScreen(
     val hudShowing by com.hanson.mobileuse.service.FloatingHudService.isShowing.collectAsState()
     val coDrawOverlayActive by DynamicCanvasOverlayService.isOverlayActive.collectAsState()
     val sseSurfaceState by DynamicUiEventBus.surfaceState.collectAsState()
+    val a2uiSurfaces by A2uiSurfaceRegistry.surfaces.collectAsState()
     val hudReady = hudShowing || runCatching { Settings.canDrawOverlays(context) }.getOrDefault(false)
     val toggleCrossAppCoDrawOverlay: () -> Unit = {
         if (coDrawOverlayActive) {
@@ -1214,6 +1217,42 @@ fun CommandCenterScreen(
                             onSpeakText = { spoken -> LiveVoiceSessionManager.speakAgentResponse(spoken) },
                             onAskAboutItem = { followUp -> onSendChatMessage(followUp) },
                             onOpenCoDraw = { showCoDrawStudioSheet = true }
+                        )
+                    }
+                }
+
+                // Google A2UI (v1.0 / v0.9 / v0.8) Live Interactive Surfaces (0%-saturation ObsidianColors)
+                val renderableA2uiSurfaces = a2uiSurfaces.values.filter { it.isReady && it.hasRootComponent }
+                if (renderableA2uiSurfaces.isNotEmpty()) {
+                    items(renderableA2uiSurfaces, key = { "a2ui_surface_${it.surfaceId}" }) { a2uiSurface ->
+                        A2uiSurfaceCard(
+                            surface = a2uiSurface,
+                            compactOverlayMode = false,
+                            onUserAction = { userAction ->
+                                when (userAction.name) {
+                                    "open_citation", "open_url" -> {
+                                        val rawUrl = userAction.context["url"]?.toString()?.trim().orEmpty()
+                                        if (rawUrl.startsWith("https://", ignoreCase = true)) {
+                                            runCatching {
+                                                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(rawUrl)).apply {
+                                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                                }
+                                                context.startActivity(intent)
+                                            }
+                                        }
+                                    }
+                                    "speak_board", "speak" -> {
+                                        val spoken = userAction.context["text"]?.toString()?.trim().orEmpty()
+                                        if (spoken.isNotBlank()) {
+                                            LiveVoiceSessionManager.speakAgentResponse(spoken)
+                                        }
+                                    }
+                                    else -> {
+                                        onSendChatMessage(userAction.toHumanPromptSummary())
+                                    }
+                                }
+                            },
+                            onDismiss = { A2uiSurfaceRegistry.deleteSurface(a2uiSurface.surfaceId) }
                         )
                     }
                 }

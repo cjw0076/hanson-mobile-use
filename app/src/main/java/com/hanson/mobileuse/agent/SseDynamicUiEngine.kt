@@ -445,12 +445,29 @@ object DynamicUiEventBus {
     }
 
     /**
-     * Ingests an external `tutor_command`, `ui_widget`, or `codraw_command` JSON payload
-     * (from `POST :18888/board/events`, `POST :18888/codraw/command`, or [ExternalSseStreamClient]).
+     * Ingests an external `a2ui`, `application/a2ui+json`, `tutor_command`, `ui_widget`, or
+     * `codraw_command` JSON payload (from `POST :18888/a2ui/messages`, `POST :18888/board/events`,
+     * `POST :18888/codraw/command`, or [ExternalSseStreamClient]).
      */
     fun ingestExternalJsonEvent(eventType: String, payload: JSONObject): Boolean {
         val normalizedType = eventType.trim().lowercase()
         val nameField = payload.optString("name", "").trim().lowercase()
+
+        if (normalizedType == "a2ui" ||
+            normalizedType == A2uiProtocolConstants.MIME_TYPE ||
+            normalizedType == A2uiProtocolConstants.MIME_TYPE_JSONL ||
+            normalizedType == "a2ui_message" ||
+            nameField == "a2ui" ||
+            A2uiSurfaceRegistry.looksLikeA2uiMessage(payload)
+        ) {
+            val result = A2uiSurfaceRegistry.ingestJsonLine(payload.toString())
+            if (result is A2uiIngestResult.Applied) {
+                val seq = publishEnvelope("a2ui", payload)
+                _surfaceState.update { it.copy(lastSequenceId = seq, errorReason = null) }
+                return true
+            }
+            return false
+        }
 
         if (normalizedType == "codraw_command" || nameField == "codraw_command") {
             val elem = CoDrawElement.fromJson(payload) ?: return false
@@ -600,6 +617,13 @@ object DynamicUiEventBus {
         }
     }
 
+    /** Publishes an outbound A2UI userAction envelope onto the SSE event stream. */
+    fun publishA2uiUserAction(action: A2uiUserAction): Long {
+        val seq = publishEnvelope("a2ui_user_action", action.toWireJson())
+        _surfaceState.update { it.copy(lastSequenceId = seq) }
+        return seq
+    }
+
     /** Returns all buffered SSE envelopes strictly newer than [fromSequenceId] for `Last-Event-ID` replay. */
     fun replayEnvelopesSince(fromSequenceId: Long): List<DynamicSseEnvelope> {
         synchronized(historyLock) {
@@ -745,9 +769,15 @@ object ExternalSseStreamClient {
     internal fun dispatchParsedFrame(frame: ParsedSseFrame) {
         val rawData = frame.data.trim()
         if (rawData.isEmpty() || rawData == "[DONE]") return
+        val normalizedEvent = frame.event.trim().lowercase()
         val json = runCatching { JSONObject(rawData) }.getOrNull()
         if (json != null) {
             DynamicUiEventBus.ingestExternalJsonEvent(frame.event, json)
+        } else if (normalizedEvent == "a2ui" ||
+            normalizedEvent == A2uiProtocolConstants.MIME_TYPE ||
+            normalizedEvent == A2uiProtocolConstants.MIME_TYPE_JSONL
+        ) {
+            A2uiSurfaceRegistry.ingestJsonl(rawData)
         } else {
             DynamicUiEventBus.appendStreamingDelta(rawData)
         }
