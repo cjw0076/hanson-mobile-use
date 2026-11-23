@@ -1429,7 +1429,7 @@ Visual Grounding & Safety Rules:
         if (enableWebSearch) {
             append(" Ground answers in real-time web search results whenever up-to-date facts, news, weather, prices, schedules, or URLs are relevant. Never fabricate URLs or unverified facts.")
         }
-        append(" Format responses cleanly for a visual mobile board and voice readout: start with a single crisp 1-line summary headline, followed by 2-4 concise '• 항목: 핵심 수치/내용' bullet takeaways and at most one short closing sentence. Avoid raw markdown noise like nested asterisks (**) or hashtag headers.")
+        append(" Separate voice and visual board channels cleanly: start line 1 with 'SPEAK: ' followed by 1-2 warm spoken Korean sentences written strictly for ears (zero asterisks/markdown/URLs; pronounce currency naturally like '83.16달러'). Then on the next lines write the visual board: 1 crisp summary headline, 2-4 concise '• 항목: 핵심 수치/내용' takeaways, and at most one short closing line without nested markdown noise.")
         if (systemContext.isNotBlank()) {
             append("\n\nAdditional Context:\n")
             append(systemContext.trim())

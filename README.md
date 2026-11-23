@@ -1,14 +1,14 @@
-# Hanson Mobile-Use — Mobile Agent Studio v6.2
+# Hanson Mobile-Use — Mobile Agent Studio v6.3
 
-> **The Open-Source Android Human-First Companion & Mobile Agent Studio ("Natural Language → Interactive UI + Motion Moat + 3-Step 10-Second Consumer Onboarding + Full-Control Android Engine")**  
-> **안드로이드 기기 완전제어 오픈소스 엔진 · 모바일 에이전트 스튜디오 v6.2 — 3단계 10초 일반 사용자 온보딩(`ConsumerOnboardingWizard`) + Flagship Figma 모션 UI + 자연어→인터랙티브 UI 변형 엔진(`InteractiveMorphEngine`) + 일상 컴패니언(`HumanFirstConvenienceEngine`: 기억 방울 · 1탭 되돌리기 · 시연 루틴 · D-Artemis TAC+ACA 정렬) + 선택형 BYO Cloud Firestore 동기화 + Blind Vault(AES-256-GCM) + 보안 하드닝 + $0 MCP / 멀티 VLM 브리지**
+> **The Open-Source Android Human-First Companion & Mobile Agent Studio ("Event-Sourced Dual-Channel Board & Karaoke Voice Replay + Natural Language → Interactive UI + 3-Step Consumer Onboarding + Full-Control Android Engine")**  
+> **안드로이드 기기 완전제어 오픈소스 엔진 · 모바일 에이전트 스튜디오 v6.3 — Ahaboard형 이벤트 스트림 듀얼 채널 보드(`BoardEventStreamEngine` · `↻ 다시 보기` 리플레이 · 카라오케 음성 자막 · `SPEAK:`/시각 보드 분리) + 3단계 10초 일반 사용자 온보딩(`ConsumerOnboardingWizard`) + Flagship Figma 모션 UI + 자연어→인터랙티브 UI 변형 엔진(`InteractiveMorphEngine`) + 일상 컴패니언(`HumanFirstConvenienceEngine`) + 선택형 BYO Cloud Firestore 동기화 + Blind Vault(AES-256-GCM) + 보안 하드닝 + $0 MCP / 멀티 VLM 브리지**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-18181B.svg)](LICENSE)
 [![Android API](https://img.shields.io/badge/Android-API%2031%E2%80%9336-27272A.svg)](#)
-[![Studio v6.2](https://img.shields.io/badge/Studio-v6.2%203--Step%20Onboarding%20%26%20Motion%20UI-09090B.svg)](docs/studio-preview.html)
+[![Studio v6.3](https://img.shields.io/badge/Studio-v6.3%20Event--Sourced%20Board%20%26%20Voice%20Replay-09090B.svg)](docs/studio-preview.html)
 [![MCP Ready](https://img.shields.io/badge/MCP-12%20Tools%20%C2%B7%20Claude%20%C2%B7%20Codex%20%C2%B7%20Gemini-3F3F46.svg)](mcp/README.md)
 
-**Hanson Mobile-Use (Mobile Agent Studio v6.2)** turns any physical Android phone or emulator into a verifiable, security-hardened **Human-First Mobile Companion** and **Mobile Agent Studio**. Anyone can launch the signed Release APK and finish setup in **3 effortless, jargon-free steps** (zero permissions required for instant interactive cards), turning natural-language goals into **direct-manipulation interactive UI surfaces & playable motion storyboards (`InteractiveMorphEngine`)**, backed by empirical Set-of-Marks closed-loop execution, D-Artemis (`TAC+ACA`) pre-execution alignment, `BlindCredentialVault` (AES-256-GCM), non-bypassable human takeover guards, and optional BYO Cloud Firestore cross-device sync:
+**Hanson Mobile-Use (Mobile Agent Studio v6.3)** turns any physical Android phone or emulator into a verifiable, security-hardened **Human-First Mobile Companion** and **Mobile Agent Studio**. Anyone can launch the signed Release APK and finish setup in **3 effortless, jargon-free steps** (zero permissions required for instant interactive cards), turning natural-language goals into **Ahaboard-inspired Event-Sourced Dual-Channel Visual+Voice Boards (`BoardEventStreamEngine`)** and **direct-manipulation interactive UI surfaces (`InteractiveMorphEngine`)**, backed by empirical Set-of-Marks closed-loop execution, D-Artemis (`TAC+ACA`) pre-execution alignment, `BlindCredentialVault` (AES-256-GCM), non-bypassable human takeover guards, and optional BYO Cloud Firestore cross-device sync:
 
 ```text
 Natural Language + Memory Bubbles
@@ -27,24 +27,28 @@ Natural Language + Memory Bubbles
 
 ---
 
-## What's New in Mobile Agent Studio v6.2 & v6.1
+## What's New in Mobile Agent Studio v6.3 & v6.2
 
-1. **v6.2 AI-Native Architecture Modernization, Ahaboard-Style Structured Board UI, Natural TTS & Signed Release (`RichAnswerBoardFormatter` + `AhaboardResponseCard` + `ConsumerOnboardingWizard` + `LiveVoiceSessionManager`)**:
+1. **v6.3 Event-Sourced Dual-Channel Board & Karaoke Voice Replay (`BoardEventStreamEngine` + Upgraded `AhaboardResponseCard`)**:
+   - **Ordered `tutor_command` Event Stream (`BoardEventStreamEngine.kt`)**: Compiles every grounded answer into strictly ordered `turnIndex` / `orderIndex` `BoardStreamEvent` envelopes (`BoardPosition(spaceId, columnId)` + `elementId`), cleanly separating typed visual commands (`WriteHeadline`, `AddStatPill`, `AddTakeaway`, `WriteNote`, `AddCitation`) from dedicated spoken `Speak(text, style, linkedElementId)` commands with Ahaboard-compatible `toJsonArray()` serialization.
+   - **LLM-Level Dual-Channel Separation (`SPEAK:` vs Visual Board)**: [`GeminiMultimodalClient.kt`](app/src/main/java/com/hanson/mobileuse/agent/GeminiMultimodalClient.kt) and [`MobileUseAgentEngine.kt`](app/src/main/java/com/hanson/mobileuse/agent/MobileUseAgentEngine.kt) instruct models to separate warm Korean spoken narration (`SPEAK:`) from clean visual board prose (`BOARD:`), guaranteeing zero `SPEAK:`/`BOARD:` markers on screen and zero raw asterisks (`**`/`*`) in TTS.
+   - **Interactive Board Playback, Karaoke Captions & Tap-to-Ask (`AhaboardResponseCard.kt`)**: Sequentially animates each board element with `↻ 다시 보기` replay, `🔊 듣기` natural TTS playback, live synchronized `AhaboardKaraokeCaptionStrip` subtitles, active spoken-element focus borders, and tap-to-ask follow-up (`onAskAboutItem`) — all while keeping strictly `0%`-saturation `ObsidianColors` Paper & Carbon design parity.
+2. **v6.2 AI-Native Architecture Modernization, Native 2026 Web Grounding & Signed Release (`RichAnswerBoardFormatter` + `ConsumerOnboardingWizard` + `LiveVoiceSessionManager`)**:
    - **Native 2026 Web Grounding & Text-First Q&A (Zero HTML Scraping)**: Deleted the legacy `html.duckduckgo.com` OkHttp scraper & XSS board; general/web queries route directly to **Gemini `google_search` + `url_context` (`gemini-3.8-flash` / `gemini-3.5-flash-lite`)**, **OpenAI `/v1/responses` (`web_search_preview`)**, **Anthropic (`web_search_20250305`)**, or the **`$0` Laptop CLI Bridge (`POST :18889/web/research`)** with full support for both new **`AQ.`** and legacy **`AIza`** Google AI Studio keys.
    - **Ahaboard-Style Visual Board UI & Markdown-Free Natural TTS**: [`RichAnswerBoardFormatter.kt`](app/src/main/java/com/hanson/mobileuse/agent/RichAnswerBoardFormatter.kt) + [`AhaboardResponseCard.kt`](app/src/main/java/com/hanson/mobileuse/ui/components/AhaboardResponseCard.kt) decompose LLM responses into animated highlight-swipe headlines, metric stat pills, numbered `Key takeaways` cards with bold-lead typography, and clean domain citation pills (zero raw `**` asterisks or raw redirect URLs), while normalizing spoken Korean TTS (`$83.16` → `"83.16달러"`, zero `"별표별표"`).
    - **Real Gemini Live API v1beta WebSocket Voice & Full Tool Calling Parity**: Upgraded [`LiveVoiceSessionManager.kt`](app/src/main/java/com/hanson/mobileuse/agent/LiveVoiceSessionManager.kt) to `BidiGenerateContent` v1beta WebSocket + `AudioRecord`(AEC/NS)/`AudioTrack` with permission-guarded fallback; fixed `BlindCredentialVault` AndroidKeyStore IV persistence, `429` vs `402` rate-limit handling, lowercase JSON Schema emission for Anthropic/OpenAI/MCP, `element_index`→`0..1000` coordinate resolution, `TYPE_APPLICATION` + Region occlusion filtering in `HierarchyDumper`, and deleted `~5,000` lines of dead `paradigm/` engines, orphan UI composables, and brittle regex hijackers.
    - **3-Step Zero-Jargon First-Run Wizard, Android 16 System Bars & Key-Safe Signed Release**: 10-second consumer onboarding (`ConsumerOnboardingWizard`), Paper Light / Carbon Dark `WindowInsetsController` contrast sync (`Theme.kt`), and `buildTypes.release` `BuildConfig.GEMINI_API_KEY = ""` isolation guard (`0` key hits verified across Release APK DEX).
-2. **v6.1 Flagship Figma Motion UI & Natural Language → Interactive UI Moat (`InteractiveMorphEngine` + `HumanFirstCompanionCards`)**:
+3. **v6.1 Flagship Figma Motion UI & Natural Language → Interactive UI Moat (`InteractiveMorphEngine` + `HumanFirstCompanionCards`)**:
    - **Calm Ambient Living Home**: Replaces vertical multi-card walls with a Figma-designed `LivingPresenceHeroStage` (breathing halo, orbital satellite, 5-bar waveform), single-focus `ContextualFocusDeckCard`, floating `DynamicExecutionIslandBanner`, `FloatingOneTapUndoPill`, `FlagshipQuickPillDock`, and on-demand `CompanionDrawerBottomSheet` (`ModalBottomSheet`).
    - **`InteractiveMorphEngine`**: Explicit opt-in interactive morph cards (`SPLIT_BILL` live stepper + 100-won rounding, `FOOD_CURATOR`, `TIMELINE_PLANNER`, `MEDIA_STORYBOARD` interactive route canvas, `CALL_CONCIERGE`) and XSS-hardened achromatic `grayscale(100%)` micro-apps.
-3. **v6.0 Human-First Convenience & Optional BYO Cloud Firestore Sync (`HumanFirstConvenienceEngine` + `HansonFirestoreCloudSyncEngine` + `firestore.rules`)**:
+4. **v6.0 Human-First Convenience & Optional BYO Cloud Firestore Sync (`HumanFirstConvenienceEngine` + `HansonFirestoreCloudSyncEngine` + `firestore.rules`)**:
    - **Dual-Mode UX (`SIMPLE_HUMAN` | `STUDIO_PRO`)**: Zero developer jargon on primary screens, with 1-tap switching into full Studio Pro coding workbench.
    - **Transparent `HumanMemoryBubblesStore`, `PersonalRoutineStore` ("Show-Me-Once"), `ProactiveDailyBriefEngine`, `ReversibleReceiptPlanner` (1-Tap Undo), `CallConciergePlanner`, & Advisory `ArtemisDeliberativeAligner`**.
    - **BYO Cloud Firestore Sync**: Runtime `FirebaseOptions` with zero bundled credentials; syncs sanitized bubbles/routines/watchers/receipts (LWW merge) under strict owner-only `firestore.rules` while unconditionally denying `/users/{userId}/vault/**`.
-4. **v5.0 Safety, Blind Vault & Pre-Release Security Hardening (`PickleSotaAbsorptionEngine` + `SECURITY.md`)**:
+5. **v5.0 Safety, Blind Vault & Pre-Release Security Hardening (`PickleSotaAbsorptionEngine` + `SECURITY.md`)**:
    - **`BlindCredentialVault` (AES-256-GCM Zero-Plaintext Separation)**: Encrypts user credentials & Cloud VLM API keys via `AndroidKeyStore` (hardware-generated IV + PBKDF2-HMAC-SHA256 `210,000`-iteration JVM fallback), handle-bound AAD, zeroed buffers, and SHA-256 hash-chained audit logs.
    - **Full-Stack Security Hardening**: `android:allowBackup="false"`, `usesCleartextTraffic="false"` + loopback-only `network_security_config.xml`, `x-goog-api-key` header transport, explicit user confirmation for external intents & fail-closed approvals, origin-locked `HansonWebViewClient` across all WebViews, CSRF/DNS-rebinding protection on `:18889`, and shell-quoted ADB fallbacks in MCP `6.0.0`.
-5. **45 On-Device Tool Specs, `:18889` Bridge (`45` Tools + `/web/research`, `6.0.0`) & MCP `6.0.0` (`12` Tools)**:
+6. **45 On-Device Tool Specs, `:18889` Bridge (`45` Tools + `/web/research`, `6.0.0`) & MCP `6.0.0` (`12` Tools)**:
    - [`ToolSpecRegistry.kt`](app/src/main/java/com/hanson/mobileuse/agent/ToolSpecRegistry.kt) maintains **45 tools** (with both Gemini ProtoJSON and standard lowercase JSON Schema emitters), [`AgentSessionStore.kt`](app/src/main/java/com/hanson/mobileuse/workspace/AgentSessionStore.kt) maintains **13 `/` slash commands**, [`laptop-cli-bridge.py`](laptop-cli-bridge.py) serves `6.0.0` with **45 `VALID_TOOLS`** + `POST /web/research`, and [`mcp/mobile_use_mcp_server.py`](mcp/mobile_use_mcp_server.py) serves `SERVER_VERSION = "6.0.0"` with its stable **12-tool** (`0`-based `element_index`) contract.
 
 ---
@@ -77,7 +81,7 @@ flowchart TB
         CLIBRIDGE["laptop-cli-bridge.py (:18889)\n(/decide · /health · /bridge · /workspace/* Sandbox)"]
     end
 
-    subgraph PHONE["Android Device · Hanson Mobile Agent Studio v4.0"]
+    subgraph PHONE["Android Device · Hanson Mobile Agent Studio v6.3"]
         STUDIO["Studio UI (Paper & Carbon · 0% Saturation)\n(Auto|Plan|Build · / & @ Palette · Work with Apps · FG/BG Inbox · 4-Tab Workbench)"]
         LOOP["MobileUseAgentEngine + MobileWorkspaceEngine\n(Observe → Plan/Decide → 3-Tier Gate → Act → Post-Delta & LCS Diff Verify)"]
         SESSIONS["AgentSessionStore\n(Multi-Thread FG/BG State · PLAN.md · WALKTHROUGH.md · Checkpoints)"]
@@ -138,7 +142,7 @@ gemini mcp add android-mobile-use python /path/to/hanson-mobile-use/mcp/mobile_u
 ### Option B: Standalone On-Phone Agent Studio (3-Step Guided Setup — Signed APK or Build)
 
 1. **Install Signed Release APK & Launch**:
-   - Download `hanson-mobile-use-v6.2.0-release.apk` from [GitHub Releases](../../releases) (or build `./gradlew assembleDebug`) and install on Android 8.0+ (API 26–36).
+   - Download `hanson-mobile-use-v6.3.0-release.apk` from [GitHub Releases](../../releases) (or build `./gradlew assembleDebug`) and install on Android 8.0+ (API 26–36).
 2. **Finish the Built-In 3-Step Consumer Onboarding Wizard (10 Seconds)**:
    - **Step 1 (Instant Taste Setup)**: Pick starter preference bubbles — zero permissions required to immediately try interactive Split-Bill, Menu, and Storyboard cards.
    - **Step 2 (Connect AI Brain)**: Tap **1-Tap Google AI Studio Free Key** + paste + **Test Connection (`연결 테스트`)**, **OR** pick **$0 Local CLI Bridge (`:18889`) / Ollama / vLLM URL**, **OR** skip to try offline first. Keys are encrypted inside on-device AES-256-GCM `BlindCredentialVault`.
@@ -162,11 +166,11 @@ python laptop-cli-bridge.py --backend auto --workspace-root ./agent_workspace
 
 - **Read-Only Safe Diagnostics by Default**: `--allow-workspace-exec` defaults to `False`, restricting `/workspace/exec` to read-only diagnostics (`ls`, `dir`, `pwd`, `cat`, `type`, `head`, `tail`, `wc`, `findstr`, `grep`, `python --version`, `pytest --version`, `git status`, `git diff`) with shell chaining (`&&`, `||`, `;`, `|`, `>`, `<`, `$`, `` ` ``) and path traversal rejected with `HTTP 403`.
 - **Full Sandbox Execution (Opt-In)**: Pass `--allow-workspace-exec` only when you explicitly want non-chained commands executed with `cwd=WORKSPACE_ROOT`.
-- **Bridge v6.0 Capabilities (`28` `VALID_TOOLS`)**: `GET /health` reports `version: "6.0.0"` and `valid_tools_count: 28`, while `GET /pickle/capabilities` exposes bridged SOTA tool parity (`validToolsCount: 28`). Pass `--token <secret>` (or `HANSON_BRIDGE_TOKEN`) to enforce constant-time `X-Bridge-Token` auth; browser cross-origin and non-loopback `Host` requests are rejected with `HTTP 403`.
+- **Bridge v6.0 Capabilities (`45` `VALID_TOOLS` + `/web/research`)**: `GET /health` reports `version: "6.0.0"` and `valid_tools_count: 45`, while `GET /pickle/capabilities` exposes bridged SOTA tool parity (`validToolsCount: 45`). Pass `--token <secret>` (or `HANSON_BRIDGE_TOKEN`) to enforce constant-time `X-Bridge-Token` auth; browser cross-origin and non-loopback `Host` requests are rejected with `HTTP 403`.
 
 ---
 
-## Core Tool Suite (`ToolSpecRegistry` — 42 On-Device Specs)
+## Core Tool Suite (`ToolSpecRegistry` — 45 On-Device Specs)
 
 | Category | Tools | Highlights |
 |---|---|---|
@@ -195,15 +199,15 @@ python laptop-cli-bridge.py --backend auto --workspace-root ./agent_workspace
 
 ## Interactive Studio Preview & Build from Source
 
-- Open [`docs/studio-preview.html`](docs/studio-preview.html) directly in any desktop/mobile browser to test all Studio v6.2 Flagship Motion, 3-Step Consumer Onboarding, & Companion flows interactively (`LivingPresenceHeroStage`, 3-step `시작 가이드` wizard, live `InteractiveMorphEngine` Split-Bill/Menu/Storyboard/Call synthesis, On-Demand Companion Sheet, 1-Tap Undo, `Auto | Plan | Build`, 13 `/` commands, 4-tab Pickle Hub modal, and Paper/Carbon theme switching).
+- Open [`docs/studio-preview.html`](docs/studio-preview.html) directly in any desktop/mobile browser to test all Studio v6.3 Flagship Motion, 3-Step Consumer Onboarding, & Companion flows interactively (`LivingPresenceHeroStage`, 3-step `시작 가이드` wizard, live `InteractiveMorphEngine` Split-Bill/Menu/Storyboard/Call synthesis, On-Demand Companion Sheet, 1-Tap Undo, `Auto | Plan | Build`, 13 `/` commands, 4-tab Pickle Hub modal, and Paper/Carbon theme switching).
 
 ```bash
-# Run the full unit & security hardening suite (28 suites / 531 tests) + build the debug APK
+# Run the full unit & security hardening suite (29 suites / 533 tests) + build the debug APK
 ./gradlew testDebugUnitTest assembleDebug
 ```
 
-- Signed Release APK: available on [GitHub Releases (`v6.2.0`)](../../releases) (`BuildConfig.GEMINI_API_KEY=""` enforced in `release` builds)
-- Interactive Studio v6.2 Flagship Motion & Onboarding preview: [`docs/studio-preview.html`](docs/studio-preview.html)
+- Signed Release APK: available on [GitHub Releases (`v6.3.0`)](../../releases) (`BuildConfig.GEMINI_API_KEY=""` enforced in `release` builds)
+- Interactive Studio v6.3 Flagship Motion & Onboarding preview: [`docs/studio-preview.html`](docs/studio-preview.html)
 - 2026 SOTA Reverse Engineering notes: [`docs/MOBILE_AGENT_REVERSE_ENGINEERING_2026.md`](docs/MOBILE_AGENT_REVERSE_ENGINEERING_2026.md)
 - MCP Server docs: [`mcp/README.md`](mcp/README.md)
 - Architecture guide: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)

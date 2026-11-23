@@ -1312,11 +1312,12 @@ class MobileUseAgentEngine @JvmOverloads constructor(
                     }.trim()
 
                     val badge = answer.providerBadge.ifBlank { "GEMINI-WEB" }
-                    val extractedInlineCitations = HumanSummaryAndCardBuilder.extractVerifiedHttpsCitations(combinedWithCitations)
+                    val (explicitSpeak, cleanVisualAnswer) = BoardEventStreamCompiler.splitSpeakAndVisual(combinedWithCitations)
+                    val extractedInlineCitations = HumanSummaryAndCardBuilder.extractVerifiedHttpsCitations(cleanVisualAnswer)
                     val totalCitations = maxOf(verifiedCitations.size, extractedInlineCitations.size)
                     val rawAgentMsg = LiveChatMessage(
                         sender = ChatSender.AGENT,
-                        text = combinedWithCitations,
+                        text = cleanVisualAnswer,
                         subtitle = if (totalCitations > 0) "실시간 웹 검색 · 출처 ${totalCitations}건" else "텍스트 AI 응답",
                         toolBadge = badge,
                         succeeded = true
@@ -1324,12 +1325,18 @@ class MobileUseAgentEngine @JvmOverloads constructor(
                     val formattedMsg = if (totalCitations > 0) {
                         HumanSummaryAndCardBuilder.transformGroundedWebResponse(
                             msg = rawAgentMsg,
-                            cleanedRaw = combinedWithCitations,
+                            cleanedRaw = cleanVisualAnswer,
                             specialistRoleKo = "실시간 네이티브 웹 그라운딩 Q&A"
                         )
                     } else {
                         rawAgentMsg
                     }
+                    val compiledBoardScript = BoardEventStreamCompiler.compile(
+                        rawText = combinedWithCitations,
+                        citations = formattedMsg.structuredCard?.items.orEmpty()
+                    )
+                    val spokenToPlay = explicitSpeak
+                        ?: compiledBoardScript.combinedSpokenText.ifBlank { formattedMsg.text }
 
                     if (!isGuiBusy) {
                         _currentSession.update { prev ->
@@ -1345,7 +1352,7 @@ class MobileUseAgentEngine @JvmOverloads constructor(
                         syncSessionStoreStatus("DONE", formattedMsg.text.take(80), hasPendingApproval = false)
                     }
                     appendChatMessage(formattedMsg)
-                    speakIfEnabled(formattedMsg.text)
+                    speakIfEnabled(spokenToPlay)
                 } else {
                     val errReason = answer.errorReason?.takeIf { it.isNotBlank() }
                         ?: GeminiMultimodalClient.lastCloudApiErrorReason?.takeIf { it.isNotBlank() }

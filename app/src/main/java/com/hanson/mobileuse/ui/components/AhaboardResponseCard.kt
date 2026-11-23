@@ -1,8 +1,11 @@
 package com.hanson.mobileuse.ui.components
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -17,13 +20,16 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -41,8 +47,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.hanson.mobileuse.agent.BoardStatPill
-import com.hanson.mobileuse.agent.BoardTakeawayItem
+import com.hanson.mobileuse.agent.BoardEventCommand
+import com.hanson.mobileuse.agent.BoardEventStreamCompiler
 import com.hanson.mobileuse.agent.RichAnswerBoardFormatter
 import com.hanson.mobileuse.agent.StructuredUiItem
 import com.hanson.mobileuse.ui.theme.ObsidianColors
@@ -86,13 +92,14 @@ fun rememberFormattedMarkdownText(rawText: String): AnnotatedString {
 }
 
 /**
- * Ahaboard-inspired visual response renderer (`AhaboardResponseCard`):
- * - Tracked uppercase eyebrow (`LIVE WEB BOARD` / `KEY TAKEAWAYS`)
+ * Ahaboard-inspired Event-Sourced Dual-Channel Response Board (`AhaboardResponseCard`):
+ * - Driven by ordered [BoardEventStreamCompiler] events (`turnIndex`, `orderIndex`, `elementId`)
+ * - Top floating pill header (`LIVE WEB BOARD` eyebrow + `↻ 다시 보기` replay + `🔊 듣기` natural TTS)
  * - Animated `.hl-swipe` highlight sweep headline (0%-saturation Paper & Carbon monochrome harmony)
  * - Compact metric stat pills (`현재 주가 $83.16`, `변동 범위 $67.05 ~ $84.86`, `웹 출처 2건`)
- * - Progressive staggered numbered `Key takeaways` cards (`1`, `2`, `3` circular badges + bold key-lead)
- * - Clean rich-formatted closing prose (zero raw `**` or `*`)
- * - Clean Ahaboard-style domain citation pills (`01 investing.com ↗`, never raw redirect URLs)
+ * - Sequential numbered `Key takeaways` cards with active spoken-element ink focus border + tap-to-ask
+ * - Live karaoke caption bar synced to `Speak` events during playback/replay (ZERO raw `**` or `*`)
+ * - Clean Ahaboard-style domain citation pills (`01 investing.com ↗`, hiding raw redirect hostnames)
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -101,19 +108,21 @@ fun AhaboardResponseCard(
     citations: List<StructuredUiItem> = emptyList(),
     eyebrowOverride: String = "",
     onCitationClick: (StructuredUiItem) -> Unit = {},
+    onSpeakText: ((String) -> Unit)? = null,
+    onAskAboutItem: ((String) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
-    val board = remember(rawText, citations.size, eyebrowOverride) {
-        RichAnswerBoardFormatter.buildStructuredBoard(
+    val script = remember(rawText, citations, eyebrowOverride) {
+        BoardEventStreamCompiler.compile(
             rawText = rawText,
-            citationCount = citations.size,
+            citations = citations,
             eyebrowOverride = eyebrowOverride
         )
     }
 
-    if (!board.isRichBoard) {
+    if (!script.isRichBoard) {
         Text(
-            text = rememberFormattedMarkdownText(rawText),
+            text = rememberFormattedMarkdownText(script.visualBodyText),
             color = ObsidianColors.TextPrimary,
             fontSize = 14.sp,
             lineHeight = 21.sp,
@@ -122,14 +131,75 @@ fun AhaboardResponseCard(
         return
     }
 
-    val swipeProgress = remember(board.headline) { Animatable(0f) }
-    LaunchedEffect(board.headline) {
+    var replayNonce by remember(rawText) { mutableIntStateOf(0) }
+    var visibleOrderLimit by remember(rawText) { mutableIntStateOf(script.events.size) }
+    var activeElementId by remember(rawText) { mutableStateOf<String?>(null) }
+    var activeCaptionText by remember(rawText) { mutableStateOf("") }
+    var activeCaptionWordIndex by remember(rawText) { mutableIntStateOf(0) }
+    var isReplaying by remember(rawText) { mutableStateOf(false) }
+
+    val swipeProgress = remember(rawText, replayNonce) { Animatable(0f) }
+
+    // Ordered progressive event playback (mirrors Ahaboard's orderIndex event stream + karaoke sync)
+    LaunchedEffect(rawText, replayNonce) {
+        val explicitReplay = replayNonce > 0
+        isReplaying = explicitReplay
+        visibleOrderLimit = 0
+        activeElementId = null
+        activeCaptionText = ""
+        activeCaptionWordIndex = 0
         swipeProgress.snapTo(0f)
-        swipeProgress.animateTo(
-            targetValue = 1f,
-            animationSpec = tween(durationMillis = 440, easing = FastOutSlowInEasing)
-        )
+
+        val stepDelayMs = if (explicitReplay) 190L else 55L
+        for (ev in script.events) {
+            visibleOrderLimit = ev.orderIndex + 1
+            when (val cmd = ev.command) {
+                is BoardEventCommand.WriteHeadline -> {
+                    activeElementId = ev.elementId
+                    swipeProgress.animateTo(
+                        targetValue = 1f,
+                        animationSpec = tween(durationMillis = if (explicitReplay) 480 else 360, easing = FastOutSlowInEasing)
+                    )
+                }
+                is BoardEventCommand.Speak -> {
+                    activeElementId = cmd.linkedElementId ?: ev.elementId
+                    if (explicitReplay) {
+                        activeCaptionText = cmd.text
+                        val words = cmd.text.split(Regex("\\s+")).filter { it.isNotBlank() }
+                        for (wIdx in 1..words.size) {
+                            activeCaptionWordIndex = wIdx
+                            delay(95L)
+                        }
+                    } else {
+                        delay(45L)
+                    }
+                }
+                else -> {
+                    if (explicitReplay && cmd is BoardEventCommand.AddTakeaway) {
+                        activeElementId = ev.elementId
+                    }
+                    delay(stepDelayMs)
+                }
+            }
+        }
+        visibleOrderLimit = script.events.size
+        if (explicitReplay) {
+            delay(450L)
+        }
+        activeElementId = null
+        activeCaptionText = ""
+        isReplaying = false
     }
+
+    val visibleEvents = remember(script.events, visibleOrderLimit) {
+        script.events.filter { it.orderIndex < visibleOrderLimit }
+    }
+    val headlineEvent = visibleEvents.firstOrNull { it.command is BoardEventCommand.WriteHeadline }
+    val headlineCmd = headlineEvent?.command as? BoardEventCommand.WriteHeadline
+    val statPills = visibleEvents.mapNotNull { it.command as? BoardEventCommand.AddStatPill }
+    val takeawayEvents = visibleEvents.filter { it.command is BoardEventCommand.AddTakeaway }
+    val noteCommands = visibleEvents.mapNotNull { it.command as? BoardEventCommand.WriteNote }
+    val citationCommands = visibleEvents.mapNotNull { it.command as? BoardEventCommand.AddCitation }
 
     val highlightBarColor = ObsidianColors.AccentDim
 
@@ -137,21 +207,69 @@ fun AhaboardResponseCard(
         modifier = modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        // 1. Tracked uppercase eyebrow (Ahaboard 11sp-13sp Bold tracking)
-        if (board.eyebrow.isNotBlank()) {
+        // 1. Ahaboard-style top bar: tracked eyebrow + ↻ Replay + 🔊 Listen pills
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             Text(
-                text = board.eyebrow,
+                text = headlineCmd?.eyebrow?.ifBlank { "SUMMARY BOARD" } ?: "SUMMARY BOARD",
                 color = ObsidianColors.TextMuted,
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
                 letterSpacing = 1.2.sp
             )
+
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(ObsidianColors.SurfaceHigh)
+                        .border(1.dp, ObsidianColors.GlassBorder, RoundedCornerShape(999.dp))
+                        .clickable {
+                            replayNonce += 1
+                            if (script.combinedSpokenText.isNotBlank()) {
+                                onSpeakText?.invoke(script.combinedSpokenText)
+                            }
+                        }
+                        .padding(horizontal = 9.dp, vertical = 4.dp)
+                ) {
+                    Text(
+                        text = if (isReplaying) "● 재생 중" else "↻ 다시 보기",
+                        color = ObsidianColors.TextPrimary,
+                        fontSize = 10.5.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                if (onSpeakText != null && script.combinedSpokenText.isNotBlank()) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(999.dp))
+                            .background(ObsidianColors.Surface)
+                            .border(1.dp, ObsidianColors.GlassBorder, RoundedCornerShape(999.dp))
+                            .clickable { onSpeakText(script.combinedSpokenText) }
+                            .padding(horizontal = 9.dp, vertical = 4.dp)
+                    ) {
+                        Text(
+                            text = "🔊 듣기",
+                            color = ObsidianColors.TextSecondary,
+                            fontSize = 10.5.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
         }
 
         // 2. Animated `.hl-swipe` highlight headline
-        if (board.headline.isNotBlank()) {
+        if (headlineCmd != null && headlineCmd.headline.isNotBlank()) {
             Text(
-                text = board.headline,
+                text = headlineCmd.headline,
                 color = ObsidianColors.TextPrimary,
                 fontSize = 16.5.sp,
                 fontWeight = FontWeight.ExtraBold,
@@ -173,36 +291,46 @@ fun AhaboardResponseCard(
             )
         }
 
-        // 3. Compact Ahaboard Stat Pills (`RoundedCornerShape(50)`, hairline border)
-        if (board.statPills.isNotEmpty()) {
+        // 3. Compact Ahaboard Stat Pills (`RoundedCornerShape(999.dp)`, hairline border)
+        if (statPills.isNotEmpty()) {
             FlowRow(
                 horizontalArrangement = Arrangement.spacedBy(7.dp),
                 verticalArrangement = Arrangement.spacedBy(7.dp)
             ) {
-                board.statPills.forEach { pill ->
-                    AhaboardStatPillChip(pill = pill)
+                statPills.forEach { pill ->
+                    AhaboardStatPillChip(label = pill.label, value = pill.value)
                 }
             }
         }
 
-        // 4. Numbered `Key takeaways` cards with staggered progressive reveal
-        if (board.takeaways.isNotEmpty()) {
+        // 4. Numbered `Key takeaways` cards with active spoken-element focus & tap-to-ask
+        if (takeawayEvents.isNotEmpty()) {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                board.takeaways.forEachIndexed { idx, item ->
+                takeawayEvents.forEach { ev ->
+                    val item = ev.command as BoardEventCommand.AddTakeaway
+                    val isFocused = activeElementId == ev.elementId
                     AhaboardTakeawayRowCard(
-                        item = item,
-                        staggerIndex = idx
+                        index = item.index,
+                        keyPrefix = item.keyPrefix,
+                        body = item.body,
+                        isFocused = isFocused,
+                        onClick = onAskAboutItem?.let { ask ->
+                            {
+                                val topic = item.keyPrefix.ifBlank { item.body.take(28) }
+                                ask("'$topic'에 대해 더 자세히 알려줘")
+                            }
+                        }
                     )
                 }
             }
         }
 
-        // 5. Clean closing / additional prose paragraphs (real bold, zero raw `**`)
-        if (board.bodyParagraphs.isNotEmpty()) {
+        // 5. Clean closing / additional prose notes (real bold, zero raw `**`)
+        if (noteCommands.isNotEmpty()) {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                board.bodyParagraphs.forEach { para ->
+                noteCommands.forEach { note ->
                     Text(
-                        text = rememberFormattedMarkdownText(para),
+                        text = rememberFormattedMarkdownText(note.text),
                         color = ObsidianColors.TextSecondary,
                         fontSize = 13.5.sp,
                         lineHeight = 20.5.sp
@@ -211,17 +339,37 @@ fun AhaboardResponseCard(
             }
         }
 
-        // 6. Clean Ahaboard-style domain citation pills (zero raw vertexaisearch redirect URLs)
-        if (citations.isNotEmpty()) {
+        // 6. Live Karaoke Caption Bar (mirrors Ahaboard's spoken ink vs upcoming muted caption strip)
+        AnimatedVisibility(
+            visible = activeCaptionText.isNotBlank(),
+            enter = fadeIn(tween(180)),
+            exit = fadeOut(tween(220))
+        ) {
+            AhaboardKaraokeCaptionStrip(
+                text = activeCaptionText,
+                spokenWordCount = activeCaptionWordIndex
+            )
+        }
+
+        // 7. Clean Ahaboard-style domain citation pills (zero raw vertexaisearch redirect URLs)
+        if (citationCommands.isNotEmpty()) {
             Spacer(modifier = Modifier.height(2.dp))
             FlowRow(
                 horizontalArrangement = Arrangement.spacedBy(7.dp),
                 verticalArrangement = Arrangement.spacedBy(7.dp)
             ) {
-                citations.forEach { item ->
+                citationCommands.forEach { cit ->
+                    val matchingItem = citations.firstOrNull { it.actionUrlOrCmd == cit.verifiedUrl }
+                        ?: StructuredUiItem(
+                            badge = cit.badge,
+                            title = cit.title,
+                            subtitle = cit.subtitle,
+                            meta = "출처 ↗",
+                            actionUrlOrCmd = cit.verifiedUrl
+                        )
                     AhaboardSourcePill(
-                        item = item,
-                        onClick = { onCitationClick(item) }
+                        item = matchingItem,
+                        onClick = { onCitationClick(matchingItem) }
                     )
                 }
             }
@@ -230,7 +378,7 @@ fun AhaboardResponseCard(
 }
 
 @Composable
-private fun AhaboardStatPillChip(pill: BoardStatPill) {
+private fun AhaboardStatPillChip(label: String, value: String) {
     Row(
         modifier = Modifier
             .clip(RoundedCornerShape(999.dp))
@@ -241,7 +389,7 @@ private fun AhaboardStatPillChip(pill: BoardStatPill) {
         horizontalArrangement = Arrangement.spacedBy(5.dp)
     ) {
         Text(
-            text = pill.label,
+            text = label,
             color = ObsidianColors.TextMuted,
             fontSize = 11.5.sp,
             fontWeight = FontWeight.SemiBold,
@@ -249,7 +397,7 @@ private fun AhaboardStatPillChip(pill: BoardStatPill) {
             overflow = TextOverflow.Ellipsis
         )
         Text(
-            text = pill.value,
+            text = value,
             color = ObsidianColors.TextPrimary,
             fontSize = 12.5.sp,
             fontWeight = FontWeight.ExtraBold,
@@ -261,34 +409,39 @@ private fun AhaboardStatPillChip(pill: BoardStatPill) {
 
 @Composable
 private fun AhaboardTakeawayRowCard(
-    item: BoardTakeawayItem,
-    staggerIndex: Int
+    index: Int,
+    keyPrefix: String,
+    body: String,
+    isFocused: Boolean,
+    onClick: (() -> Unit)?
 ) {
-    val reveal = remember(item.index, item.body) { Animatable(0f) }
-    LaunchedEffect(item.index, item.body) {
+    val reveal = remember(index, body) { Animatable(0f) }
+    LaunchedEffect(index, body) {
         reveal.snapTo(0f)
-        delay((staggerIndex * 65L).coerceAtMost(260L))
         reveal.animateTo(
             targetValue = 1f,
-            animationSpec = tween(durationMillis = 320, easing = FastOutSlowInEasing)
+            animationSpec = tween(durationMillis = 280, easing = FastOutSlowInEasing)
         )
     }
+
+    val borderColor = if (isFocused) ObsidianColors.Accent else ObsidianColors.GlassBorder
+    val borderWidth = if (isFocused) 1.6.dp else 1.dp
 
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .graphicsLayer {
                 alpha = reveal.value
-                translationY = (1f - reveal.value) * 14f
+                translationY = (1f - reveal.value) * 12f
             }
             .clip(RoundedCornerShape(14.dp))
-            .background(ObsidianColors.SurfaceHigh)
-            .border(1.dp, ObsidianColors.GlassBorder, RoundedCornerShape(14.dp))
+            .background(if (isFocused) ObsidianColors.Surface else ObsidianColors.SurfaceHigh)
+            .border(borderWidth, borderColor, RoundedCornerShape(14.dp))
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
             .padding(horizontal = 13.dp, vertical = 12.dp),
         verticalAlignment = Alignment.Top,
         horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // Circular numbered badge (Ahaboard 28dp circle badge)
         Box(
             modifier = Modifier
                 .size(26.dp)
@@ -297,7 +450,7 @@ private fun AhaboardTakeawayRowCard(
             contentAlignment = Alignment.Center
         ) {
             Text(
-                text = item.index.toString(),
+                text = index.toString(),
                 color = ObsidianColors.OnAccent,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.ExtraBold
@@ -305,9 +458,9 @@ private fun AhaboardTakeawayRowCard(
         }
 
         Column(modifier = Modifier.weight(1f)) {
-            if (item.keyPrefix.isNotBlank()) {
+            if (keyPrefix.isNotBlank()) {
                 Text(
-                    text = item.keyPrefix,
+                    text = keyPrefix,
                     color = ObsidianColors.TextMuted,
                     fontSize = 11.5.sp,
                     fontWeight = FontWeight.Bold,
@@ -317,13 +470,65 @@ private fun AhaboardTakeawayRowCard(
                 Spacer(modifier = Modifier.height(2.dp))
             }
             Text(
-                text = rememberFormattedMarkdownText(item.body),
+                text = rememberFormattedMarkdownText(body),
                 color = ObsidianColors.TextPrimary,
                 fontSize = 14.sp,
-                fontWeight = if (item.keyPrefix.isNotBlank()) FontWeight.SemiBold else FontWeight.Normal,
+                fontWeight = if (keyPrefix.isNotBlank()) FontWeight.SemiBold else FontWeight.Normal,
                 lineHeight = 20.5.sp
             )
         }
+    }
+}
+
+@Composable
+private fun AhaboardKaraokeCaptionStrip(
+    text: String,
+    spokenWordCount: Int
+) {
+    val words = remember(text) { text.split(Regex("\\s+")).filter { it.isNotBlank() } }
+    val primaryColor = ObsidianColors.TextPrimary
+    val mutedColor = ObsidianColors.TextMuted
+    val annotated = remember(words, spokenWordCount, primaryColor, mutedColor) {
+        buildAnnotatedString {
+            words.forEachIndexed { idx, w ->
+                if (idx > 0) append(" ")
+                val active = idx < spokenWordCount
+                withStyle(
+                    SpanStyle(
+                        color = if (active) primaryColor else mutedColor,
+                        fontWeight = if (active) FontWeight.Bold else FontWeight.Normal
+                    )
+                ) { append(w) }
+            }
+        }
+    }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(ObsidianColors.SurfaceHigh)
+            .border(1.dp, ObsidianColors.GlassBorder, RoundedCornerShape(12.dp))
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text(
+            text = "CAPTION",
+            color = ObsidianColors.TextMuted,
+            fontSize = 9.5.sp,
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.ExtraBold,
+            letterSpacing = 0.8.sp
+        )
+        Text(
+            text = annotated,
+            fontSize = 12.5.sp,
+            lineHeight = 18.sp,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
     }
 }
 

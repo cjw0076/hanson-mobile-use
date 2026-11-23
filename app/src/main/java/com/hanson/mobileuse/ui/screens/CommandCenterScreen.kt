@@ -1102,11 +1102,13 @@ fun CommandCenterScreen(
                                     Spacer(modifier = Modifier.height(6.dp))
                                 }
 
-                                // Ahaboard-Style Structured Board & Rich Markdown Renderer (ZERO literal `**` or `*`)
+                                // Ahaboard-Style Event-Sourced Dual-Channel Board & Rich Markdown Renderer
                                 AhaboardResponseCard(
                                     rawText = msg.text,
                                     citations = if (isWebCitationCard) msg.structuredCard?.items.orEmpty() else emptyList(),
-                                    onCitationClick = openCitationUrl
+                                    onCitationClick = openCitationUrl,
+                                    onSpeakText = { spoken -> LiveVoiceSessionManager.speakAgentResponse(spoken) },
+                                    onAskAboutItem = { followUpPrompt -> onSendChatMessage(followUpPrompt) }
                                 )
 
                                 // Ahaboard Inline Multimodal Media Block (GLB 3D / MP4 Video / GIF Loop / Image / Code Widget)
