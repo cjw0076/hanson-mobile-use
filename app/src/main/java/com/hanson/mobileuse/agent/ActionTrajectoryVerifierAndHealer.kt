@@ -6,8 +6,8 @@ import com.hanson.mobileuse.accessibility.CoordinateNormalizer
 import com.hanson.mobileuse.accessibility.GestureController
 import com.hanson.mobileuse.accessibility.HansonAccessibilityService
 import com.hanson.mobileuse.accessibility.IndexedUiElement
+import com.hanson.mobileuse.service.FloatingHudService
 import org.json.JSONObject
-import kotlin.math.abs
 
 enum class FailureCategory(val code: String, val descriptionKo: String) {
     NONE("OK", "정상 전이 확인"),
@@ -51,14 +51,14 @@ data class TransitionVerificationReport(
  * Solves the core problem of naive mobile agents that assume `dispatchGesture == true` means success:
  * 1. Compares `preSnapshot` (S_t) vs `postSnapshot` (S_{t+1}) to measure actual UI state transition.
  * 2. Knows what SUCCESS vs. FAILURE means for each tool (`click`, `input_text`, `swipe`, `drag_and_drop`, `manage_app`).
- * 3. When a step fails or leaves the screen stale, automatically diagnoses the cause (인지),
- *    executes an escalating recovery action (복구: 팝업 해체 / 오프셋 지터 탭 / 포커스 강제 획득 후 붙여넣기 / UID-2000 커널 입력 주입),
- *    and re-verifies the screen state (재실행 검증).
+ * 3. Safely diagnoses blocking modal/permission popups WITHOUT blindly auto-clicking arbitrary
+ *    confirm/consent/allow dialogs, and avoids A11y+CLI double-taps during single-channel recovery.
  */
 class ActionTrajectoryVerifierAndHealer(private val context: Context) {
 
     companion object {
-        private val MODAL_DISMISS_KEYWORDS = listOf(
+        // Used strictly for READ-ONLY modal diagnosis in evaluateTransitionOnly (never blind auto-click).
+        private val MODAL_DETECTION_KEYWORDS = listOf(
             "앱 사용 중에만 허용", "이번만 허용", "허용", "확인", "닫기", "나중에", "건너뛰기", "취소", "동의"
         )
 
@@ -108,9 +108,18 @@ class ActionTrajectoryVerifierAndHealer(private val context: Context) {
         }
     }
 
+    private inline fun <T> withTemporaryHudPassThrough(block: () -> T): T {
+        FloatingHudService.setPassThroughTemporarily(true)
+        return try {
+            block()
+        } finally {
+            FloatingHudService.setPassThroughTemporarily(false)
+        }
+    }
+
     /**
      * Evaluates whether `toolName(args)` actually achieved its intended state transition between `preSnapshot` and `postSnapshot`.
-     * If not, performs automatic 3-stage Self-Healing (`인지 -> 복구 -> 재실행`) and returns the final report.
+     * If not, performs safe, single-channel Self-Healing (`인지 -> 복구 -> 재실행`) and returns the final report.
      */
     fun verifyAndSelfHeal(
         toolName: String,
@@ -120,7 +129,11 @@ class ActionTrajectoryVerifierAndHealer(private val context: Context) {
         postSnapshot: AtomicSnapshot
     ): TransitionVerificationReport {
         // Non-GUI / metadata tools do not require screen delta verification
-        if (toolName !in setOf("click", "long_press", "click_sequence", "input_text", "vault_blind_inject", "swipe", "drag_and_drop", "haptic_trajectory", "manage_app")) {
+        if (toolName !in setOf(
+                "click", "long_press", "click_sequence", "input_text",
+                "vault_blind_inject", "swipe", "drag_and_drop", "haptic_trajectory", "manage_app"
+            )
+        ) {
             return TransitionVerificationReport(
                 verifiedSuccess = initialOutcomeSucceeded,
                 treeDeltaRatio = computeUiTreeDeltaRatio(preSnapshot, postSnapshot),
@@ -138,10 +151,19 @@ class ActionTrajectoryVerifierAndHealer(private val context: Context) {
             return initialCheck
         }
 
+        // Never blindly auto-click permission / confirmation / consent popups; surface them to VLM/user.
+        if (initialCheck.failureCategory == FailureCategory.MODAL_POPUP_BLOCKING) {
+            return initialCheck.copy(
+                recoveryAttempted = false,
+                recoveryActionKo = "권한/확인/동의 모달 감지됨 — 무단 클릭 방지를 위해 자동 클릭을 수행하지 않고 VLM/사용자 확인으로 위임합니다.",
+                healedSuccess = false
+            )
+        }
+
         // =====================================================================
         // STAGE 2 & 3: SELF-HEALING (인지 -> 복구 -> 재실행 검증)
         // =====================================================================
-        val recoveryDescription = executeRecoveryAndRetry(
+        val (recoveryDispatchedOk, recoveryDescription) = executeRecoveryAndRetry(
             failureCategory = initialCheck.failureCategory,
             toolName = toolName,
             args = args,
@@ -159,7 +181,13 @@ class ActionTrajectoryVerifierAndHealer(private val context: Context) {
         val healedSnapshot = HansonAccessibilityService.instance?.captureSnapshotNow(includeScreenshot = false)
             ?: postSnapshot
 
-        val recheck = evaluateTransitionOnly(toolName, args, true, preSnapshot, healedSnapshot)
+        val recheck = evaluateTransitionOnly(
+            toolName = toolName,
+            args = args,
+            initialOutcomeSucceeded = recoveryDispatchedOk,
+            pre = preSnapshot,
+            post = healedSnapshot
+        )
 
         return initialCheck.copy(
             verifiedSuccess = recheck.verifiedSuccess,
@@ -256,7 +284,7 @@ class ActionTrajectoryVerifierAndHealer(private val context: Context) {
                 }
 
                 val hasExplicitModal = post.indexedElements.any { el ->
-                    MODAL_DISMISS_KEYWORDS.any { kw ->
+                    MODAL_DETECTION_KEYWORDS.any { kw ->
                         (el.text.isNotBlank() && el.text.contains(kw, ignoreCase = true)) ||
                             (el.contentDesc.isNotBlank() && el.contentDesc.contains(kw, ignoreCase = true))
                     }
@@ -280,7 +308,7 @@ class ActionTrajectoryVerifierAndHealer(private val context: Context) {
                 } else {
                     verifyInputTextDeterministic(targetText, post)
                 }
-                // Note: When submit_enter=true, submitting immediately clears the EditText or triggers search loading,
+                // When press_enter/submit_enter=true, submitting immediately clears the EditText or triggers loading,
                 // so if initialOutcomeSucceeded is true (ACTION_SET_TEXT succeeded), do not double-type in recovery!
                 val ok = initialOutcomeSucceeded || textAppeared || focusOrTextChanged || delta >= 0.04f
                 val displayLabel = if (toolName == "vault_blind_inject") {
@@ -330,8 +358,9 @@ class ActionTrajectoryVerifierAndHealer(private val context: Context) {
     }
 
     /**
-     * Executes concrete recovery actions based on the diagnosed FailureCategory,
-     * then re-executes the intended gesture/input.
+     * Executes concrete single-channel recovery actions based on the diagnosed FailureCategory
+     * (never firing A11y + CLI double-taps, and never blindly auto-clicking arbitrary modal popups).
+     * Returns `Pair(dispatchedOk, descriptionKo)`.
      */
     private fun executeRecoveryAndRetry(
         failureCategory: FailureCategory,
@@ -339,119 +368,254 @@ class ActionTrajectoryVerifierAndHealer(private val context: Context) {
         args: JSONObject,
         preSnapshot: AtomicSnapshot,
         failedPostSnapshot: AtomicSnapshot
-    ): String {
+    ): Pair<Boolean, String> {
         val svc = HansonAccessibilityService.instance
 
         return when (failureCategory) {
             FailureCategory.MODAL_POPUP_BLOCKING -> {
-                val dismissBtn = failedPostSnapshot.indexedElements.firstOrNull { el ->
-                    MODAL_DISMISS_KEYWORDS.any { kw -> el.text.contains(kw) || el.contentDesc.contains(kw) }
-                }
-                if (dismissBtn != null && svc != null) {
-                    GestureController.tap(svc, dismissBtn.centerX.toFloat(), dismissBtn.centerY.toFloat(), 80L)
-                    "가로막은 팝업 버튼('${dismissBtn.text.ifBlank { dismissBtn.contentDesc }}') 자동 해체 탭"
-                } else if (svc != null) {
-                    GestureController.performGlobalKey(svc, "BACK")
-                    "가로막은 모달 해체를 위해 전역 BACK 키 주입"
-                } else {
-                    "모달 감지"
-                }
+                false to "권한/확인/동의 모달 감지됨 — 자동 클릭 미수행 (VLM/사용자 확인 필요)"
             }
 
             FailureCategory.NO_UI_TRANSITION_ON_CLICK -> {
                 val coords = resolveCoordinates(args, failedPostSnapshot)
+                    ?: resolveCoordinates(args, preSnapshot)
                 if (coords != null) {
                     val px = coords.first
                     val py = coords.second
-                    // 1. Try spatial jitter (+12, -8) with longer 125ms press duration and symmetric coordinate clamping
-                    val jitterX = (px + 12).coerceIn(10, failedPostSnapshot.screenWidth - 10)
-                    val jitterY = (py - 8).coerceIn(10, failedPostSnapshot.screenHeight - 10)
+                    val jitterX = (px + 12).coerceIn(10, (failedPostSnapshot.screenWidth - 10).coerceAtLeast(10))
+                    val jitterY = (py - 8).coerceIn(10, (failedPostSnapshot.screenHeight - 10).coerceAtLeast(10))
                     if (svc != null) {
-                        GestureController.tap(svc, jitterX.toFloat(), jitterY.toFloat(), 125L)
+                        val a11yOk = withTemporaryHudPassThrough {
+                            GestureController.tap(svc, jitterX.toFloat(), jitterY.toFloat(), 125L)
+                        }
+                        if (a11yOk) {
+                            true to "오프셋 지터 탭($jitterX,$jitterY, 125ms) 단일 재실행"
+                        } else {
+                            val cliOk = withTemporaryHudPassThrough { execOsCliFallback("tap $px $py") }
+                            cliOk to if (cliOk) {
+                                "A11y 탭 실패로 OS CLI 커널 tap($px,$py) 폴백 재실행"
+                            } else {
+                                "오프셋 지터 탭 및 OS CLI 폴백 실패"
+                            }
+                        }
+                    } else {
+                        val cliOk = withTemporaryHudPassThrough { execOsCliFallback("tap $px $py") }
+                        cliOk to if (cliOk) {
+                            "OS CLI 커널 tap($px,$py) 폴백 재실행"
+                        } else {
+                            "OS CLI 커널 tap($px,$py) 폴백 실패"
+                        }
                     }
-                    // 2. Also escalate to UID-2000 Native OS CLI kernel tap in case WebView/Flutter ignored A11y gesture
-                    execOsCliFallback("tap $px $py")
-                    "오프셋 지터 탭($jitterX,$jitterY, 125ms) + UID-2000 커널 input tap($px,$py) 이중 재실행"
                 } else {
-                    "좌표 재산출 시도"
+                    false to "좌표 재산출 불가"
                 }
             }
 
             FailureCategory.INPUT_TEXT_NOT_REFLECTED -> {
-                // Locate editable field or search bar candidate
                 val editableCandidate = failedPostSnapshot.indexedElements.firstOrNull { it.editable }
                     ?: failedPostSnapshot.indexedElements.firstOrNull {
                         it.text.contains("검색") || it.contentDesc.contains("검색") ||
                             it.shortClass.contains("EditText", ignoreCase = true)
                     }
                 if (toolName == "vault_blind_inject") {
-                    if (svc != null && editableCandidate != null) {
-                        GestureController.tap(
-                            svc,
-                            editableCandidate.centerX.toFloat(),
-                            editableCandidate.centerY.toFloat(),
-                            90L
-                        )
-                    }
-                    "블라인드 볼트 입력창 포커스 복구 (평문 CLI 노출 차단)"
+                    val tapped = if (svc != null && editableCandidate != null) {
+                        withTemporaryHudPassThrough {
+                            GestureController.tap(
+                                svc,
+                                editableCandidate.centerX.toFloat(),
+                                editableCandidate.centerY.toFloat(),
+                                90L
+                            )
+                        }
+                    } else false
+                    tapped to "블라인드 볼트 입력창 포커스 복구 (평문 CLI 노출 차단)"
                 } else {
                     val textToType = args.optString("text", "")
-                    val submitEnter = args.optBoolean("submit_enter", true)
+                    val pressEnter = if (args.has("press_enter")) {
+                        args.optBoolean("press_enter", true)
+                    } else {
+                        args.optBoolean("submit_enter", true)
+                    }
                     if (svc != null && editableCandidate != null) {
-                        GestureController.tap(
-                            svc,
-                            editableCandidate.centerX.toFloat(),
-                            editableCandidate.centerY.toFloat(),
-                            90L
-                        )
+                        withTemporaryHudPassThrough {
+                            GestureController.tap(
+                                svc,
+                                editableCandidate.centerX.toFloat(),
+                                editableCandidate.centerY.toFloat(),
+                                90L
+                            )
+                        }
                         try {
                             Thread.sleep(280L)
                         } catch (_: InterruptedException) {
                             Thread.currentThread().interrupt()
                         }
-                        GestureController.inputText(
-                            svc,
-                            text = textToType,
-                            targetX = editableCandidate.centerX.toFloat(),
-                            targetY = editableCandidate.centerY.toFloat(),
-                            clearExisting = false
-                        )
-                        if (submitEnter) {
-                            GestureController.performGlobalKey(svc, "ENTER")
-                            execOsCliFallback("key 66")
+                        val typedOk = withTemporaryHudPassThrough {
+                            GestureController.inputText(
+                                svc,
+                                text = textToType,
+                                targetX = editableCandidate.centerX.toFloat(),
+                                targetY = editableCandidate.centerY.toFloat(),
+                                clearExisting = false
+                            )
                         }
-                        "입력창(${editableCandidate.centerX},${editableCandidate.centerY}) 강제 포커스 탭 → 클립보드 붙여넣기 → ENTER 재전송"
+                        if (typedOk && pressEnter) {
+                            val enterOk = GestureController.performGlobalKey(svc, "ENTER")
+                            if (!enterOk) {
+                                execOsCliFallback("key 66")
+                            }
+                        }
+                        typedOk to "입력창(${editableCandidate.centerX},${editableCandidate.centerY}) 강제 포커스 탭 → 텍스트 입력 재시도"
                     } else {
-                        execOsCliFallback("text $textToType")
-                        if (submitEnter) execOsCliFallback("key 66")
-                        "UID-2000 OS CLI 커널 텍스트 스트림 직주입"
+                        val cliOk = execOsCliFallback("text $textToType")
+                        val finalOk = if (cliOk && pressEnter) execOsCliFallback("key 66") else cliOk
+                        finalOk to if (finalOk) {
+                            "UID-2000 OS CLI 커널 텍스트 스트림 주입 완료"
+                        } else {
+                            "UID-2000 OS CLI 커널 텍스트 스트림 주입 실패"
+                        }
                     }
                 }
             }
 
             FailureCategory.TRAJECTORY_NO_DISPLACEMENT -> {
-                val toolName = args.optString("toolName", "")
-                if (toolName == "drag_and_drop" || args.has("start_x")) {
-                    val sx = args.optInt("start_x", 0)
-                    val sy = args.optInt("start_y", 0)
-                    val ex = args.optInt("end_x", 0)
-                    val ey = args.optInt("end_y", 0)
-                    if (svc != null) {
-                        GestureController.dragAndDrop(svc, sx.toFloat(), sy.toFloat(), ex.toFloat(), ey.toFloat(), 700L, 800L)
+                val isDragTool = toolName == "drag_and_drop" ||
+                    args.has("from_element_index") ||
+                    args.has("to_element_index")
+                if (isDragTool) {
+                    val screenW = failedPostSnapshot.screenWidth
+                    val screenH = failedPostSnapshot.screenHeight
+                    val fromEl = if (args.has("from_element_index")) {
+                        val idx = args.optInt("from_element_index", -1)
+                        if (idx >= 0) {
+                            failedPostSnapshot.indexedElements.firstOrNull { it.index == idx }
+                                ?: preSnapshot.indexedElements.firstOrNull { it.index == idx }
+                        } else null
+                    } else null
+                    val toEl = if (args.has("to_element_index")) {
+                        val idx = args.optInt("to_element_index", -1)
+                        if (idx >= 0) {
+                            failedPostSnapshot.indexedElements.firstOrNull { it.index == idx }
+                                ?: preSnapshot.indexedElements.firstOrNull { it.index == idx }
+                        } else null
+                    } else null
+
+                    val (sx, sy) = if (fromEl != null) {
+                        fromEl.centerX to fromEl.centerY
+                    } else {
+                        CoordinateNormalizer.normalizedToPixel(
+                            args.optInt("start_norm_x", 300),
+                            args.optInt("start_norm_y", 600),
+                            screenW,
+                            screenH
+                        )
                     }
-                    execOsCliFallback("swipe $sx $sy $ex $ey 800")
-                    "드래그앤드롭 홀드 시간(700ms) 연장 및 슬라이드 재시도"
+                    val (ex, ey) = if (toEl != null) {
+                        toEl.centerX to toEl.centerY
+                    } else {
+                        CoordinateNormalizer.normalizedToPixel(
+                            args.optInt("end_norm_x", 700),
+                            args.optInt("end_norm_y", 400),
+                            screenW,
+                            screenH
+                        )
+                    }
+
+                    if (svc != null) {
+                        val a11yOk = withTemporaryHudPassThrough {
+                            GestureController.dragAndDrop(
+                                svc,
+                                sx.toFloat(),
+                                sy.toFloat(),
+                                ex.toFloat(),
+                                ey.toFloat(),
+                                700L,
+                                800L
+                            )
+                        }
+                        if (a11yOk) {
+                            true to "드래그앤드롭 홀드 시간(700ms) 연장 재시도 ($sx,$sy -> $ex,$ey)"
+                        } else {
+                            val cliOk = withTemporaryHudPassThrough {
+                                execOsCliFallback("swipe $sx $sy $ex $ey 800")
+                            }
+                            cliOk to if (cliOk) {
+                                "A11y 드래그 실패로 OS CLI 슬라이드 폴백 재시도 ($sx,$sy -> $ex,$ey)"
+                            } else {
+                                "드래그앤드롭 재시도 실패 ($sx,$sy -> $ex,$ey)"
+                            }
+                        }
+                    } else {
+                        val cliOk = withTemporaryHudPassThrough {
+                            execOsCliFallback("swipe $sx $sy $ex $ey 800")
+                        }
+                        cliOk to if (cliOk) {
+                            "OS CLI 드래그 슬라이드 폴백 재시도 ($sx,$sy -> $ex,$ey)"
+                        } else {
+                            "OS CLI 드래그 슬라이드 폴백 실패 ($sx,$sy -> $ex,$ey)"
+                        }
+                    }
                 } else {
                     val dir = args.optString("direction", "up")
-                    val swipeCoords = CoordinateNormalizer.computeDirectionalSwipe(
-                        dir,
-                        failedPostSnapshot.screenWidth,
-                        failedPostSnapshot.screenHeight
-                    )
-                    execOsCliFallback(
-                        "swipe ${swipeCoords.startX} ${swipeCoords.startY} ${swipeCoords.endX} ${swipeCoords.endY} 480"
-                    )
-                    "UID-2000 커널 레벨 광폭 스와이프(${swipeCoords.startX},${swipeCoords.startY} -> ${swipeCoords.endX},${swipeCoords.endY}) 재실행"
+                    val swipeCoords = if (args.has("start_norm_x") && args.has("end_norm_x")) {
+                        val (sx, sy) = CoordinateNormalizer.normalizedToPixel(
+                            args.optInt("start_norm_x", 500),
+                            args.optInt("start_norm_y", 700),
+                            failedPostSnapshot.screenWidth,
+                            failedPostSnapshot.screenHeight
+                        )
+                        val (ex, ey) = CoordinateNormalizer.normalizedToPixel(
+                            args.optInt("end_norm_x", 500),
+                            args.optInt("end_norm_y", 300),
+                            failedPostSnapshot.screenWidth,
+                            failedPostSnapshot.screenHeight
+                        )
+                        CoordinateNormalizer.SwipeVector(sx, sy, ex, ey)
+                    } else {
+                        CoordinateNormalizer.computeDirectionalSwipe(
+                            dir,
+                            failedPostSnapshot.screenWidth,
+                            failedPostSnapshot.screenHeight
+                        )
+                    }
+
+                    if (svc != null) {
+                        val a11yOk = withTemporaryHudPassThrough {
+                            GestureController.swipe(
+                                svc,
+                                swipeCoords.startX.toFloat(),
+                                swipeCoords.startY.toFloat(),
+                                swipeCoords.endX.toFloat(),
+                                swipeCoords.endY.toFloat(),
+                                480L
+                            )
+                        }
+                        if (a11yOk) {
+                            true to "광폭 스와이프(${swipeCoords.startX},${swipeCoords.startY} -> ${swipeCoords.endX},${swipeCoords.endY}) 단일 재실행"
+                        } else {
+                            val cliOk = withTemporaryHudPassThrough {
+                                execOsCliFallback(
+                                    "swipe ${swipeCoords.startX} ${swipeCoords.startY} ${swipeCoords.endX} ${swipeCoords.endY} 480"
+                                )
+                            }
+                            cliOk to if (cliOk) {
+                                "A11y 스와이프 실패로 OS CLI 광폭 스와이프 폴백 재실행"
+                            } else {
+                                "광폭 스와이프 재실행 실패"
+                            }
+                        }
+                    } else {
+                        val cliOk = withTemporaryHudPassThrough {
+                            execOsCliFallback(
+                                "swipe ${swipeCoords.startX} ${swipeCoords.startY} ${swipeCoords.endX} ${swipeCoords.endY} 480"
+                            )
+                        }
+                        cliOk to if (cliOk) {
+                            "OS CLI 광폭 스와이프(${swipeCoords.startX},${swipeCoords.startY} -> ${swipeCoords.endX},${swipeCoords.endY}) 재실행"
+                        } else {
+                            "OS CLI 광폭 스와이프 실패"
+                        }
+                    }
                 }
             }
 
@@ -461,38 +625,58 @@ class ActionTrajectoryVerifierAndHealer(private val context: Context) {
                 } catch (_: InterruptedException) {
                     Thread.currentThread().interrupt()
                 }
-                "앱 콜드 스타트 대기(500ms) 후 포그라운드 재검증"
+                true to "앱 콜드 스타트 대기(500ms) 후 포그라운드 재검증"
             }
 
-            FailureCategory.NONE -> "정상"
+            FailureCategory.NONE -> true to "정상"
         }
     }
 
     private fun resolveCoordinates(args: JSONObject, snapshot: AtomicSnapshot): Pair<Int, Int>? {
         if (args.has("element_index")) {
             val idx = args.optInt("element_index", -1)
-            val el = snapshot.indexedElements.firstOrNull { it.index == idx }
-            if (el != null) return el.centerX to el.centerY
+            if (idx >= 0) {
+                val el = snapshot.indexedElements.firstOrNull { it.index == idx }
+                if (el != null) return el.centerX to el.centerY
+            }
         }
         if (args.has("norm_x") && args.has("norm_y")) {
-            return CoordinateNormalizer.normalizedToPixel(
-                args.optInt("norm_x", 500),
-                args.optInt("norm_y", 500),
-                snapshot.screenWidth,
-                snapshot.screenHeight
-            )
+            val nx = args.optInt("norm_x", -1)
+            val ny = args.optInt("norm_y", -1)
+            if (nx >= 0 && ny >= 0) {
+                return CoordinateNormalizer.normalizedToPixel(
+                    nx,
+                    ny,
+                    snapshot.screenWidth,
+                    snapshot.screenHeight
+                )
+            }
+        }
+        if (args.has("x") && args.has("y")) {
+            val rx = args.optInt("x", -1)
+            val ry = args.optInt("y", -1)
+            if (rx >= 0 && ry >= 0) {
+                return if (rx <= 1000 && ry <= 1000) {
+                    CoordinateNormalizer.normalizedToPixel(rx, ry, snapshot.screenWidth, snapshot.screenHeight)
+                } else {
+                    rx.coerceIn(0, (snapshot.screenWidth - 1).coerceAtLeast(0)) to
+                        ry.coerceIn(0, (snapshot.screenHeight - 1).coerceAtLeast(0))
+                }
+            }
         }
         return null
     }
 
-    private fun execOsCliFallback(cmd: String) {
-        try {
-            AgentToolExecutionHarness(context).execute(
+    private fun execOsCliFallback(cmd: String): Boolean {
+        return try {
+            val outcome = AgentToolExecutionHarness(context).execute(
                 "os_cli_exec",
                 JSONObject().put("command", cmd),
                 null
             )
+            outcome.succeeded
         } catch (_: Exception) {
+            false
         }
     }
 }

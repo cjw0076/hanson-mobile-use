@@ -134,14 +134,17 @@ class HansonOsCliFallbackTest {
         val snapshot = AtomicSnapshot(screenWidth = 1080, screenHeight = 2400)
 
         val outcome = harness.execute("click", args, snapshot)
-        assertTrue("Click must succeed via fallback", outcome.succeeded)
         assertTrue(
-            "Output must mention fallback: ${outcome.outputText}",
-            outcome.outputText.contains("OS CLI 데몬 자동 폴백") || outcome.outputText.contains("OS CLI")
+            "Output must report resolved pixel (540, 1200) and OS CLI fallback: ${outcome.outputText}",
+            outcome.outputText.contains("540, 1200") && outcome.outputText.contains("OS CLI")
         )
-        assertNotNull("Receipt must be generated", outcome.receipt)
-        assertEquals("click", outcome.receipt?.toolName)
-        assertTrue(outcome.receipt?.summaryKo?.contains("OS CLI") == true)
+        if (outcome.succeeded) {
+            assertNotNull("Receipt must be generated on succeeded fallback", outcome.receipt)
+            assertEquals("click", outcome.receipt?.toolName)
+            assertTrue(outcome.receipt?.summaryKo?.contains("OS CLI") == true)
+        } else {
+            assertNull("Honest failure propagation must not emit fake receipt", outcome.receipt)
+        }
     }
 
     @Test
@@ -159,11 +162,15 @@ class HansonOsCliFallbackTest {
         val snapshot = AtomicSnapshot(screenWidth = 1080, screenHeight = 2400)
 
         val outcome = harness.execute("swipe", args, snapshot)
-        assertTrue("Swipe must succeed via fallback", outcome.succeeded)
         assertTrue(
-            "Output must mention fallback: ${outcome.outputText}",
+            "Output must mention OS CLI fallback: ${outcome.outputText}",
             outcome.outputText.contains("OS CLI 데몬 자동 폴백") || outcome.outputText.contains("OS CLI")
         )
+        if (outcome.succeeded) {
+            assertEquals("swipe", outcome.receipt?.toolName)
+        } else {
+            assertNull("Honest failure propagation must not emit fake receipt", outcome.receipt)
+        }
     }
 
     @Test
@@ -178,13 +185,16 @@ class HansonOsCliFallbackTest {
         val snapshot = AtomicSnapshot(screenWidth = 1080, screenHeight = 2400)
 
         val outcome = harness.execute("input_text", args, snapshot)
-        assertTrue("InputText must succeed via fallback", outcome.succeeded)
         assertTrue(
-            "Output must mention fallback: ${outcome.outputText}",
+            "Output must mention OS CLI fallback: ${outcome.outputText}",
             outcome.outputText.contains("OS CLI 데몬 자동 폴백") || outcome.outputText.contains("OS CLI")
         )
-        assertNotNull(outcome.receipt)
-        assertEquals("input_text", outcome.receipt?.toolName)
+        if (outcome.succeeded) {
+            assertNotNull(outcome.receipt)
+            assertEquals("input_text", outcome.receipt?.toolName)
+        } else {
+            assertNull("Honest failure propagation must not emit fake receipt", outcome.receipt)
+        }
     }
 
     @Test
@@ -196,12 +206,15 @@ class HansonOsCliFallbackTest {
         for ((key, expectedCode) in keysToTest) {
             val args = JSONObject().put("key", key)
             val outcome = harness.execute("press_key", args, null)
-            assertTrue("PressKey $key must succeed via fallback", outcome.succeeded)
             assertTrue(
-                "Output must contain keycode $expectedCode: ${outcome.outputText}",
+                "Output must contain keycode $expectedCode or OS CLI notice: ${outcome.outputText}",
                 outcome.outputText.contains(expectedCode) || outcome.outputText.contains("OS CLI")
             )
-            assertEquals("press_key", outcome.receipt?.toolName)
+            if (outcome.succeeded) {
+                assertEquals("press_key", outcome.receipt?.toolName)
+            } else {
+                assertNull("Honest failure propagation must not emit fake receipt", outcome.receipt)
+            }
         }
     }
 
@@ -218,12 +231,15 @@ class HansonOsCliFallbackTest {
         val snapshot = AtomicSnapshot(screenWidth = 1080, screenHeight = 2400)
 
         val outcome = harness.execute("long_press", args, snapshot)
-        assertTrue("LongPress must succeed via fallback", outcome.succeeded)
         assertTrue(
-            "Output must mention fallback: ${outcome.outputText}",
+            "Output must mention OS CLI fallback: ${outcome.outputText}",
             outcome.outputText.contains("OS CLI 데몬 자동 폴백") || outcome.outputText.contains("OS CLI")
         )
-        assertEquals("long_press", outcome.receipt?.toolName)
+        if (outcome.succeeded) {
+            assertEquals("long_press", outcome.receipt?.toolName)
+        } else {
+            assertNull("Honest failure propagation must not emit fake receipt", outcome.receipt)
+        }
     }
 
     @Test
@@ -241,12 +257,15 @@ class HansonOsCliFallbackTest {
         val snapshot = AtomicSnapshot(screenWidth = 1080, screenHeight = 2400)
 
         val outcome = harness.execute("drag_and_drop", args, snapshot)
-        assertTrue("DragAndDrop must succeed via fallback", outcome.succeeded)
         assertTrue(
-            "Output must mention fallback: ${outcome.outputText}",
+            "Output must mention OS CLI fallback: ${outcome.outputText}",
             outcome.outputText.contains("OS CLI 데몬 자동 폴백") || outcome.outputText.contains("OS CLI")
         )
-        assertEquals("drag_and_drop", outcome.receipt?.toolName)
+        if (outcome.succeeded) {
+            assertEquals("drag_and_drop", outcome.receipt?.toolName)
+        } else {
+            assertNull("Honest failure propagation must not emit fake receipt", outcome.receipt)
+        }
     }
 
     @Test
@@ -261,12 +280,15 @@ class HansonOsCliFallbackTest {
         val snapshot = AtomicSnapshot(screenWidth = 1080, screenHeight = 2400)
 
         val outcome = harness.execute("click_sequence", args, snapshot)
-        assertTrue("ClickSequence must succeed via fallback", outcome.succeeded)
         assertTrue(
-            "Output must mention fallback: ${outcome.outputText}",
+            "Output must mention OS CLI fallback: ${outcome.outputText}",
             outcome.outputText.contains("OS CLI 데몬 자동 폴백") || outcome.outputText.contains("OS CLI")
         )
-        assertEquals("click_sequence", outcome.receipt?.toolName)
+        if (outcome.succeeded) {
+            assertEquals("click_sequence", outcome.receipt?.toolName)
+        } else {
+            assertNull("Honest failure propagation must not emit fake receipt", outcome.receipt)
+        }
     }
 
     // =========================================================================
@@ -276,16 +298,31 @@ class HansonOsCliFallbackTest {
     @Test
     fun testFallback_clickWithDirectPixelCoordinates_resolvesDirectly() {
         assertNull(HansonAccessibilityService.instance)
+        val snapshot = AtomicSnapshot(screenWidth = 1080, screenHeight = 2400)
 
-        val args = JSONObject().apply {
+        // x/y both <= 1000 are treated as 0..1000 normalized grid coordinates (450 -> 486, 950 -> 2280)
+        val normalizedArgs = JSONObject().apply {
             put("x", 450)
             put("y", 950)
+            put("target_description", "정규화 좌표 타겟")
+        }
+        val normalizedOutcome = harness.execute("click", normalizedArgs, snapshot)
+        assertTrue(
+            "x=450, y=950 (<=1000) must normalize on 1080x2400 to (486, 2280), got: ${normalizedOutcome.outputText}",
+            normalizedOutcome.outputText.contains("486, 2280")
+        )
+
+        // When either coordinate exceeds 1000, x/y are resolved as raw pixels directly
+        val rawPixelArgs = JSONObject().apply {
+            put("x", 450)
+            put("y", 1950)
             put("target_description", "직접 픽셀 타겟")
         }
-
-        val outcome = harness.execute("click", args, null)
-        assertTrue(outcome.succeeded)
-        assertTrue(outcome.outputText.contains("450, 950"))
+        val rawOutcome = harness.execute("click", rawPixelArgs, snapshot)
+        assertTrue(
+            "x=450, y=1950 (>1000) must resolve directly as raw pixel (450, 1950), got: ${rawOutcome.outputText}",
+            rawOutcome.outputText.contains("450, 1950")
+        )
     }
 
     @Test

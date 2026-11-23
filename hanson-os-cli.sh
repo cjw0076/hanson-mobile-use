@@ -6,7 +6,7 @@
 #                Settings / ContentProvider / Artemis(:18888) Hybrid OS CLI
 # ==============================================================================
 
-VERSION="1.2.0-os-cli"
+VERSION="1.3.0-os-cli"
 A11Y_PORT=18888
 
 cmd="$1"
@@ -14,6 +14,72 @@ shift 2>/dev/null
 
 json_escape() {
     printf '%s' "$1" | tr '\n\r\t' '   ' | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+append_dedupe_service() {
+    EXISTING="$1"
+    TARGET="$2"
+    if [ -z "$EXISTING" ] || [ "$EXISTING" = "null" ]; then
+        printf '%s' "$TARGET"
+        return
+    fi
+    RESULT=""
+    FOUND=0
+    OLD_IFS="$IFS"
+    IFS=":"
+    for ENTRY in $EXISTING; do
+        [ -z "$ENTRY" ] && continue
+        [ "$ENTRY" = "null" ] && continue
+        if [ "$ENTRY" = "$TARGET" ]; then
+            FOUND=1
+        fi
+        case ":$RESULT:" in
+            *":$ENTRY:"*) ;;
+            *)
+                if [ -z "$RESULT" ]; then
+                    RESULT="$ENTRY"
+                else
+                    RESULT="$RESULT:$ENTRY"
+                fi
+                ;;
+        esac
+    done
+    IFS="$OLD_IFS"
+    if [ "$FOUND" -eq 0 ]; then
+        if [ -z "$RESULT" ]; then
+            RESULT="$TARGET"
+        else
+            RESULT="$RESULT:$TARGET"
+        fi
+    fi
+    printf '%s' "$RESULT"
+}
+
+resolve_hanson_packages() {
+    EXPLICIT="$1"
+    if [ "$EXPLICIT" = "com.hanson.mobileuse" ] || [ "$EXPLICIT" = "com.hanson.mobileuse.debug" ]; then
+        printf '%s' "$EXPLICIT"
+        return
+    fi
+    if [ "$HANSON_PACKAGE" = "com.hanson.mobileuse" ] || [ "$HANSON_PACKAGE" = "com.hanson.mobileuse.debug" ]; then
+        printf '%s' "$HANSON_PACKAGE"
+        return
+    fi
+    FOUND_PKGS=""
+    for CAND in com.hanson.mobileuse.debug com.hanson.mobileuse; do
+        if pm list packages "$CAND" 2>/dev/null | grep -q "^package:$CAND\$"; then
+            if [ -z "$FOUND_PKGS" ]; then
+                FOUND_PKGS="$CAND"
+            else
+                FOUND_PKGS="$FOUND_PKGS $CAND"
+            fi
+        fi
+    done
+    if [ -z "$FOUND_PKGS" ]; then
+        printf '%s' "com.hanson.mobileuse"
+    else
+        printf '%s' "$FOUND_PKGS"
+    fi
 }
 
 case "$cmd" in
@@ -46,7 +112,11 @@ case "$cmd" in
         dumpsys window 2>/dev/null | grep -E "mCurrentFocus|mFocusedApp" | head -n 4
         echo "--- [Artemis :18888 Real-Time Accessibility Nodes] ---"
         if command -v curl >/dev/null 2>&1; then
-            curl -s "http://127.0.0.1:$A11Y_PORT/tree"
+            if [ -n "$ARTEMIS_TOKEN" ]; then
+                curl -s -H "X-Artemis-Token: $ARTEMIS_TOKEN" "http://127.0.0.1:$A11Y_PORT/elements"
+            else
+                curl -s "http://127.0.0.1:$A11Y_PORT/elements"
+            fi
         else
             uiautomator dump /data/local/tmp/uidump.xml >/dev/null 2>&1
             cat /data/local/tmp/uidump.xml | head -c 2000
@@ -130,7 +200,7 @@ case "$cmd" in
         VAL="$*"
         if [ "$OP" = "put" ]; then
             settings put "$NS" "$KEY" "$VAL"
-            echo "{\"status\":\"ok\",\"action\":\"settings_put\",\"namespace\":\"$NS\",\"key\":\"$KEY\",\"value\":\"$VAL\"}"
+            echo "{\"status\":\"ok\",\"action\":\"settings_put\",\"namespace\":\"$NS\",\"key\":\"$KEY\",\"value\":\"$(json_escape "$VAL")\"}"
         elif [ "$OP" = "list" ]; then
             settings list "$NS" | head -n 50
         else
@@ -179,23 +249,27 @@ case "$cmd" in
         ;;
 
     self-heal)
-        # Re-grants all privileged permissions, AppOps, Accessibility & Notification listeners from inside UID 2000!
-        PKG="com.hanson.mobileuse"
-        appops set $PKG SYSTEM_ALERT_WINDOW allow 2>/dev/null
-        appops set $PKG WRITE_SETTINGS allow 2>/dev/null
-        appops set $PKG GET_USAGE_STATS allow 2>/dev/null
-        appops set $PKG ACCESS_RESTRICTED_SETTINGS allow 2>/dev/null
-        pm grant $PKG android.permission.WRITE_SECURE_SETTINGS 2>/dev/null
-        pm grant $PKG android.permission.DUMP 2>/dev/null
-        pm grant $PKG android.permission.READ_LOGS 2>/dev/null
-        settings put secure enabled_accessibility_services "$PKG/com.hanson.mobileuse.accessibility.HansonAccessibilityService"
+        # Re-grants privileged permissions, AppOps, Accessibility (append+dedupe) & Notification listeners from UID 2000
+        PKGS=$(resolve_hanson_packages "$1")
+        MERGED=$(settings get secure enabled_accessibility_services 2>/dev/null | tr -d '\r\n')
+        for PKG in $PKGS; do
+            appops set "$PKG" SYSTEM_ALERT_WINDOW allow 2>/dev/null
+            appops set "$PKG" WRITE_SETTINGS allow 2>/dev/null
+            appops set "$PKG" GET_USAGE_STATS allow 2>/dev/null
+            appops set "$PKG" ACCESS_RESTRICTED_SETTINGS allow 2>/dev/null
+            pm grant "$PKG" android.permission.WRITE_SECURE_SETTINGS 2>/dev/null
+            pm grant "$PKG" android.permission.DUMP 2>/dev/null
+            pm grant "$PKG" android.permission.READ_LOGS 2>/dev/null
+            MERGED=$(append_dedupe_service "$MERGED" "$PKG/com.hanson.mobileuse.accessibility.HansonAccessibilityService")
+            cmd notification allow_listener "$PKG/com.hanson.mobileuse.notification.HansonNotificationListenerService" 2>/dev/null
+            dumpsys deviceidle whitelist "+$PKG" >/dev/null 2>&1
+        done
+        settings put secure enabled_accessibility_services "$MERGED"
         settings put secure accessibility_enabled 1
-        cmd notification allow_listener "$PKG/com.hanson.mobileuse.notification.HansonNotificationListenerService" 2>/dev/null
-        dumpsys deviceidle whitelist +$PKG >/dev/null 2>&1
-        echo "{\"status\":\"ok\",\"action\":\"self_heal_complete\",\"package\":\"$PKG\"}"
+        echo "{\"status\":\"ok\",\"action\":\"self_heal_complete\",\"packages\":\"$(json_escape "$PKGS")\"}"
         ;;
 
-    sh|exec)
+    sh|exec|eval|bash)
         echo "{\"status\":\"error\",\"error\":\"Security rejection: arbitrary sh -c execution is disabled (use structured hanson subcommands)\"}"
         exit 126
         ;;
@@ -217,7 +291,7 @@ case "$cmd" in
         echo "   hanson notif [list|expand|collapse]     Direct StatusBar & NotificationRecord dump"
         echo "   hanson provider query <content://...>   Direct ContentProvider SQL query"
         echo "   hanson dump <service>                   Privileged dumpsys inspection"
-        echo "   hanson self-heal                        Auto-restore all permissions & A11y/Notif bindings"
+        echo "   hanson self-heal [package]              Auto-restore permissions & A11y/Notif bindings (append+dedupe)"
         echo "=================================================================="
         ;;
 esac

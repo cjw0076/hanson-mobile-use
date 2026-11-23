@@ -2,6 +2,7 @@ package com.hanson.mobileuse
 
 import com.hanson.mobileuse.accessibility.AccessibilityEngineState
 import com.hanson.mobileuse.accessibility.ArtemisCommandServer
+import com.hanson.mobileuse.agent.BlindCredentialVault
 import com.hanson.mobileuse.agent.InteractiveMorphEngine
 import com.hanson.mobileuse.oscli.HansonOsCliMain
 import com.hanson.mobileuse.ui.components.HansonJsBridge
@@ -17,7 +18,13 @@ import java.net.HttpURLConnection
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.URL
+import java.nio.charset.StandardCharsets
+import java.util.Base64
 import java.util.concurrent.Executors
+import javax.crypto.Cipher
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.SecretKeySpec
 
 /**
  * Security Hardening Verification Suite (v3.1):
@@ -345,6 +352,192 @@ class SecurityHardeningVerificationTest {
         assertTrue(
             "GeminiMultimodalClient must attach x-goog-api-key header",
             geminiSrc.contains("x-goog-api-key")
+        )
+    }
+
+    @Test
+    fun testReleaseBuildConfigAndThemeBars_blockEmbeddedApiKeyAndFixPaperContrast() {
+        val repoRoot = resolveRepoRoot()
+        val gradleText = File(repoRoot, "app/build.gradle.kts").readText()
+        val releaseSection = gradleText.substringAfter("release {")
+        assertTrue(
+            "Release buildType must explicitly override BuildConfig.GEMINI_API_KEY to empty string",
+            releaseSection.contains("""buildConfigField("String", "GEMINI_API_KEY", "\"\"")""")
+        )
+
+        val themeSrc = File(
+            repoRoot,
+            "app/src/main/java/com/hanson/mobileuse/ui/theme/Theme.kt"
+        ).readText()
+        assertTrue(
+            "Theme.kt must set light status bar icons when Paper Light theme is active",
+            themeSrc.contains("isAppearanceLightStatusBars = !isDark")
+        )
+        assertTrue(
+            "Theme.kt must set light navigation bar icons when Paper Light theme is active",
+            themeSrc.contains("isAppearanceLightNavigationBars = !isDark")
+        )
+    }
+
+    // =========================================================================
+    // 5. v6.2 Modernization Security Hardening Regression Checks
+    // =========================================================================
+
+    @Test
+    fun testNativeCodeCanvasViewport_enforcesHansonWebViewClientAndDisablesFileContentAccess() {
+        val repoRoot = resolveRepoRoot()
+        val rendererSrc = File(
+            repoRoot,
+            "app/src/main/java/com/hanson/mobileuse/ui/components/GenerativeUiRenderer.kt"
+        ).readText()
+        val canvasBlock = rendererSrc.substringAfter("private fun NativeCodeCanvasViewport")
+        assertTrue(
+            "NativeCodeCanvasViewport must attach origin-locked HansonWebViewClient",
+            canvasBlock.contains("webViewClient = HansonWebViewClient(bridge)")
+        )
+        assertTrue(
+            "NativeCodeCanvasViewport must attach HansonWebChromeClient",
+            canvasBlock.contains("webChromeClient = HansonWebChromeClient(bridge)")
+        )
+        assertTrue(
+            "NativeCodeCanvasViewport must disable settings.allowFileAccess",
+            canvasBlock.contains("settings.allowFileAccess = false")
+        )
+        assertTrue(
+            "NativeCodeCanvasViewport must disable settings.allowContentAccess",
+            canvasBlock.contains("settings.allowContentAccess = false")
+        )
+        assertTrue(
+            "NativeCodeCanvasViewport must disable allowFileAccessFromFileURLs",
+            canvasBlock.contains("settings.allowFileAccessFromFileURLs = false")
+        )
+        assertTrue(
+            "NativeCodeCanvasViewport must disable allowUniversalAccessFromFileURLs",
+            canvasBlock.contains("settings.allowUniversalAccessFromFileURLs = false")
+        )
+    }
+
+    @Test
+    fun testUniversalNexusEngine_hasZeroDuckDuckGoScrapingAndZeroXssBrowserBoard() {
+        val repoRoot = resolveRepoRoot()
+        val nexusSrc = File(
+            repoRoot,
+            "app/src/main/java/com/hanson/mobileuse/agent/UniversalNexusEngine.kt"
+        ).readText()
+        assertFalse(
+            "UniversalNexusEngine.kt must have ZERO html.duckduckgo.com references",
+            nexusSrc.contains("html.duckduckgo.com", ignoreCase = true)
+        )
+        assertFalse(
+            "UniversalNexusEngine.kt must have ZERO buildInteractiveBrowserBoardHtml references",
+            nexusSrc.contains("buildInteractiveBrowserBoardHtml")
+        )
+    }
+
+    @Test
+    fun testBlindCredentialVault_handlesAndroidKeyStoreWithoutCallerIv() {
+        val repoRoot = resolveRepoRoot()
+        val vaultSrc = File(
+            repoRoot,
+            "app/src/main/java/com/hanson/mobileuse/agent/PickleSotaAbsorptionEngine.kt"
+        ).readText()
+        val encFn = vaultSrc.substringAfter("internal fun encryptAesGcmWithKey").substringBefore("internal fun computeAuditEntryHash")
+        assertTrue(
+            "encryptAesGcmWithKey must check `key !is SecretKeySpec` for AndroidKeyStore randomized IV",
+            encFn.contains("key !is SecretKeySpec")
+        )
+        assertTrue(
+            "AndroidKeyStore branch must omit GCMParameterSpec and read cipher.iv",
+            encFn.contains("cipher.init(Cipher.ENCRYPT_MODE, key)") && encFn.contains("cipher.iv")
+        )
+
+        // Live crypto verification of BOTH branches:
+        val rawKeyBytes = ByteArray(32) { idx -> (idx * 7 + 3).toByte() }
+        val plainBytes = "TopSecretAndroidKeyStoreValue!2026".toByteArray(StandardCharsets.UTF_8)
+        val aadBytes = "hanson.blind.vault.v2|vault://ks_test".toByteArray(StandardCharsets.UTF_8)
+
+        // 1. Non-SecretKeySpec wrapper simulates AndroidKeyStore SecretKey (cipher generates IV internally)
+        val keyStoreLikeKey = object : SecretKey {
+            override fun getAlgorithm(): String = "AES"
+            override fun getFormat(): String = "RAW"
+            override fun getEncoded(): ByteArray = rawKeyBytes.copyOf()
+        }
+        val (ksIvB64, ksCtB64) = BlindCredentialVault.encryptAesGcmWithKey(keyStoreLikeKey, plainBytes, aadBytes)
+        val ksIv = Base64.getDecoder().decode(ksIvB64)
+        assertEquals("Provider-generated AES-GCM IV must be 12 bytes", 12, ksIv.size)
+
+        val decryptCipher = Cipher.getInstance("AES/GCM/NoPadding")
+        decryptCipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(rawKeyBytes, "AES"), GCMParameterSpec(128, ksIv))
+        decryptCipher.updateAAD(aadBytes)
+        assertEquals(
+            "TopSecretAndroidKeyStoreValue!2026",
+            String(decryptCipher.doFinal(Base64.getDecoder().decode(ksCtB64)), StandardCharsets.UTF_8)
+        )
+
+        // 2. Standard SecretKeySpec JVM fallback path also round-trips cleanly
+        val (specIvB64, specCtB64) = BlindCredentialVault.encryptAesGcmWithKey(
+            SecretKeySpec(rawKeyBytes, "AES"),
+            plainBytes,
+            aadBytes
+        )
+        val specIv = Base64.getDecoder().decode(specIvB64)
+        assertEquals(12, specIv.size)
+        val decryptSpec = Cipher.getInstance("AES/GCM/NoPadding")
+        decryptSpec.init(Cipher.DECRYPT_MODE, SecretKeySpec(rawKeyBytes, "AES"), GCMParameterSpec(128, specIv))
+        decryptSpec.updateAAD(aadBytes)
+        assertEquals(
+            "TopSecretAndroidKeyStoreValue!2026",
+            String(decryptSpec.doFinal(Base64.getDecoder().decode(specCtB64)), StandardCharsets.UTF_8)
+        )
+    }
+
+    @Test
+    fun testOsCliMain_verifyLoopbackPeerUidIsFailClosed() {
+        val repoRoot = resolveRepoRoot()
+        val osCliSrc = File(
+            repoRoot,
+            "app/src/main/java/com/hanson/mobileuse/oscli/HansonOsCliMain.kt"
+        ).readText()
+        val verifyFn = osCliSrc.substringAfter("internal fun verifyLoopbackPeerUid")
+            .substringBefore("private fun resolveTrustedAndroidUids")
+        assertTrue(
+            "verifyLoopbackPeerUid must fail closed when /proc/net/tcp* cannot be read",
+            verifyFn.contains("if (tcpFiles.isEmpty())") && verifyFn.contains("return false")
+        )
+        assertTrue(
+            "verifyLoopbackPeerUid must fail closed on catch",
+            verifyFn.contains("catch (_: Throwable)") && verifyFn.substringAfter("catch (_: Throwable)").contains("return false")
+        )
+
+        // Live unit tests of verifyProcNetTcpLines fail-closed behavior:
+        val trustedUids = setOf(0, 2000, 10123)
+        val header = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode"
+
+        // 1. Missing entry -> fail closed (false)
+        assertFalse(
+            "Empty /proc/net/tcp must fail closed",
+            HansonOsCliMain.verifyProcNetTcpLines(sequenceOf(header), "C350", "49CA", trustedUids)
+        )
+
+        // 2. Malformed/non-numeric UID -> fail closed (false)
+        val malformedRow = "   0: 0100007F:C350 0100007F:49CA 01 00000000:00000000 00:00000000 00000000   BADUID   0 12345"
+        assertFalse(
+            "Malformed UID must fail closed",
+            HansonOsCliMain.verifyProcNetTcpLines(sequenceOf(header, malformedRow), "C350", "49CA", trustedUids)
+        )
+
+        // 3. Untrusted third-party app UID -> fail closed (false)
+        val untrustedRow = "   0: 0100007F:C350 0100007F:49CA 01 00000000:00000000 00:00000000 00000000   10999   0 12345"
+        assertFalse(
+            "Untrusted UID 10999 must be rejected",
+            HansonOsCliMain.verifyProcNetTcpLines(sequenceOf(header, untrustedRow), "C350", "49CA", trustedUids)
+        )
+
+        // 4. Trusted Hanson/shell UID matching exact client & server hex ports -> allowed (true)
+        val trustedRow = "   0: 0100007F:C350 0100007F:49CA 01 00000000:00000000 00:00000000 00000000   10123   0 12345"
+        assertTrue(
+            "Trusted UID 10123 matching client/server ports must be accepted",
+            HansonOsCliMain.verifyProcNetTcpLines(sequenceOf(header, trustedRow), "C350", "49CA", trustedUids)
         )
     }
 }

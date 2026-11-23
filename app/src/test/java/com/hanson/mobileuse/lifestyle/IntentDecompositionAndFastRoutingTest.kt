@@ -2,13 +2,14 @@ package com.hanson.mobileuse.lifestyle
 
 import com.hanson.mobileuse.accessibility.AtomicSnapshot
 import com.hanson.mobileuse.accessibility.IndexedUiElement
+import com.hanson.mobileuse.accessibility.SetOfMarksAnnotator
 import com.hanson.mobileuse.agent.AgentToolExecutionHarness
 import com.hanson.mobileuse.agent.ChatSender
+import com.hanson.mobileuse.agent.GeminiMultimodalClient
 import com.hanson.mobileuse.agent.IntentCategory
 import com.hanson.mobileuse.agent.IntentDecomposerAndRouter
 import com.hanson.mobileuse.agent.LifestyleTaskModality
 import com.hanson.mobileuse.agent.LiveChatMessage
-import com.hanson.mobileuse.agent.ScrollStepSize
 import com.hanson.mobileuse.agent.SpatialHint
 import com.hanson.mobileuse.agent.inferModalityFromPrompt
 import org.junit.Assert.assertEquals
@@ -19,8 +20,12 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Verifies the Unified Intent Decomposer & Zero-Latency Action Router (`IntentDecomposerAndRouter`),
- * including exact regression coverage for real-device Galaxy S25 user transcripts.
+ * Verifies the modernized, strictly anchored `IntentDecomposerAndRouter` (B4 Deconstruction):
+ * - Single-word external-app navigation (`"뒤로"`, `"홈"` ONLY when `activePackage` is non-blank and not Hanson).
+ * - Strictly anchored explicit numeric alarm/timer creation (no silent 7 AM or 3-minute defaults).
+ * - Zero substring hijacking for ambiguous/general prompts (`"soxs 가격 알려 줘"`, `"SOXS 내려갔어?"`,
+ *   `"알람 꺼줘"`, `"타이머 멈춰"`, `"라이트 뭐야"`, `"한칸 내려줘"`, `"영상을 틀어 줘"`, etc.) so the real LLM/VLM handles them.
+ * - Self-blindness shield against Hanson's own chat UI and Edge panel.
  */
 class IntentDecompositionAndFastRoutingTest {
 
@@ -38,12 +43,13 @@ class IntentDecompositionAndFastRoutingTest {
         centerX: Int,
         centerY: Int,
         normX: Int,
-        normY: Int
+        normY: Int,
+        packageName: String = "com.google.android.youtube"
     ): IndexedUiElement = IndexedUiElement(
         index = index,
         shortClass = shortClass,
         className = "android.view.$shortClass",
-        packageName = "com.google.android.youtube",
+        packageName = packageName,
         text = text,
         contentDesc = contentDesc,
         resourceId = resourceId,
@@ -94,7 +100,7 @@ class IntentDecompositionAndFastRoutingTest {
                     index = 2,
                     shortClass = "ViewGroup",
                     text = "",
-                    contentDesc = "내 잘못 VS 도둑 잘못 [기시니 스릴러툰] - 6분 54초 - 기시니 스릴러툰 채널로 이동 - 기시니 스릴러툰, 인증됨 - 조회수 28만회 - 1년 전 - 동영상 재생",
+                    contentDesc = "내 잘못 VS 도둑 잘못 [기시니 스릴러툰] - 6분 54초 - 동영상 재생",
                     resourceId = "",
                     clickable = true,
                     left = 0,
@@ -127,122 +133,87 @@ class IntentDecompositionAndFastRoutingTest {
     }
 
     @Test
-    fun testReflex_oneNotchScrollDown_executesSingleTurnWithoutVerboseChatter() {
-        val intent = IntentDecomposerAndRouter.decompose("한칸 내려줘", sampleYouTubeSnapshot())
-        assertEquals(IntentCategory.REFLEX_MICRO_CONTROL, intent.primaryCategory)
-        assertEquals("up", intent.scrollDirection)
-        assertEquals(ScrollStepSize.SMALL_ONE_NOTCH, intent.scrollStepSize)
-        assertTrue(intent.autoCompleteSingleTurn)
-        assertNotNull(intent.fastDecision)
-        assertEquals("swipe", intent.fastDecision!!.toolName)
-        assertEquals("아래로 한 칸 내렸어요.", intent.fastDecision!!.spokenReply)
-        assertFalse(intent.fastDecision!!.spokenReply.contains("살펴볼게요"))
-        assertFalse(intent.fastDecision!!.spokenReply.contains("실행하여"))
+    fun testSingleWordExternalNav_triggersOnlyForExternalAppAndNeverForHansonOrNull() {
+        val externalSnap = sampleYouTubeSnapshot()
+        assertTrue(IntentDecomposerAndRouter.isExternalAppSnapshot(externalSnap))
+
+        val backIntent = IntentDecomposerAndRouter.decompose("뒤로", externalSnap)
+        assertEquals(IntentCategory.REFLEX_MICRO_CONTROL, backIntent.primaryCategory)
+        assertTrue(backIntent.autoCompleteSingleTurn)
+        assertEquals("press_key", backIntent.fastDecision?.toolName)
+        assertEquals("BACK", backIntent.fastDecision?.toolArgs?.getString("key"))
+
+        val homeIntent = IntentDecomposerAndRouter.decompose("홈", externalSnap)
+        assertEquals(IntentCategory.REFLEX_MICRO_CONTROL, homeIntent.primaryCategory)
+        assertTrue(homeIntent.autoCompleteSingleTurn)
+        assertEquals("press_key", homeIntent.fastDecision?.toolName)
+        assertEquals("HOME", homeIntent.fastDecision?.toolArgs?.getString("key"))
+
+        // When snapshot is null or Hanson's own UI, even single-word "뒤로"/"홈" must NOT hijack
+        val nullSnapBack = IntentDecomposerAndRouter.decompose("뒤로", null)
+        assertEquals(IntentCategory.MULTI_STEP_GUI_OR_CHAT, nullSnapBack.primaryCategory)
+        assertNull(nullSnapBack.fastDecision)
+
+        val hansonSnap = AtomicSnapshot(activePackage = "com.hanson.mobileuse.debug")
+        assertFalse(IntentDecomposerAndRouter.isExternalAppSnapshot(hansonSnap))
+        val ownSnapHome = IntentDecomposerAndRouter.decompose("홈", hansonSnap)
+        assertEquals(IntentCategory.MULTI_STEP_GUI_OR_CHAT, ownSnapHome.primaryCategory)
+        assertNull(ownSnapHome.fastDecision)
     }
 
     @Test
-    fun testReflex_spacedScrollDown_executesSingleTurn() {
-        val intent = IntentDecomposerAndRouter.decompose("밑으로 내려 봐", sampleYouTubeSnapshot())
-        assertEquals(IntentCategory.REFLEX_MICRO_CONTROL, intent.primaryCategory)
-        assertEquals("up", intent.scrollDirection)
-        assertEquals(ScrollStepSize.NORMAL, intent.scrollStepSize)
-        assertTrue(intent.autoCompleteSingleTurn)
-        assertEquals("swipe", intent.fastDecision?.toolName)
-    }
-
-    @Test
-    fun testScreenTarget_deicticUpperYouTubeVideoClick_matchesLongAccessibilityLabel() {
-        val snap = sampleYouTubeSnapshot()
-        val raw = "저 위에 그 내 잘못 vs 도둑 잘못 쳐 영상 클릭해 줄래"
-        val cleaned = IntentDecomposerAndRouter.cleanScreenTargetQuery(raw)
-        assertEquals("내 잘못 vs 도둑 잘못", cleaned)
-
-        val intent = IntentDecomposerAndRouter.decompose(raw, snap)
-        assertEquals(IntentCategory.SCREEN_ELEMENT_TARGET, intent.primaryCategory)
-        assertEquals(SpatialHint.UPPER, intent.spatialHint)
-        assertTrue(intent.autoCompleteSingleTurn)
-        assertNotNull(intent.fastDecision)
-        assertEquals("click", intent.fastDecision!!.toolName)
-        assertEquals(2, intent.fastDecision!!.toolArgs.getInt("element_index"))
-    }
-
-    @Test
-    fun testScreenTarget_voiceSttPhoneticTypo_matchesViaHangulJamoSlidingWindow() {
-        val snap = sampleYouTubeSnapshot()
-        // Real S25 STT transcript: "기시니 스릴러툰 저거 영상 눌러 줘" -> "귀신이 스릴노턴 적어 영상 눌러 줘"
-        val raw = "귀신이 스릴노턴 적어 영상 눌러 줘"
-        val cleaned = IntentDecomposerAndRouter.cleanScreenTargetQuery(raw)
-        assertEquals("귀신이 스릴노턴", cleaned)
-
-        val score = IntentDecomposerAndRouter.computeQueryToElementMatchScore(
-            cleaned,
-            snap.indexedElements[1].contentDesc
-        )
-        assertTrue("Expected phonetic Jamo similarity >= 0.62 but was $score", score >= 0.62)
-
-        val matched = AgentToolExecutionHarness.findBestMatchingElement(snap, raw)
-        assertNotNull(matched)
-        assertEquals(2, matched!!.index)
-
-        val intent = IntentDecomposerAndRouter.decompose(raw, snap)
-        assertEquals(IntentCategory.SCREEN_ELEMENT_TARGET, intent.primaryCategory)
-        assertEquals("click", intent.fastDecision?.toolName)
-        assertEquals(2, intent.fastDecision?.toolArgs?.getInt("element_index"))
-    }
-
-    @Test
-    fun testPlayVideo_neverHijackedByCodeAssistantMp4Synthesis() {
-        val snap = sampleYouTubeSnapshot()
-        val raw = "영상을 틀어 줘"
-
-        assertFalse(
-            "Playback command '영상을 틀어 줘' must NEVER trigger Code Assistant MP4 synthesis!",
-            IntentDecomposerAndRouter.isExplicitGenerativeOrCodeRequest(raw, raw.lowercase(), snap, false)
-        )
-        assertEquals(
-            LifestyleTaskModality.LIFESTYLE_FAST_CONVERSATION,
-            inferModalityFromPrompt(raw)
-        )
-
-        val history = listOf(
-            LiveChatMessage(sender = ChatSender.USER, text = "저 위에 그 내 잘못 vs 도둑 잘못 쳐 영상 클릭해 줄래")
-        )
-        val intent = IntentDecomposerAndRouter.decompose(raw, snap, history, isMainActivityInForeground = false)
-        assertEquals(IntentCategory.SCREEN_ELEMENT_TARGET, intent.primaryCategory)
-        assertEquals("click", intent.fastDecision?.toolName)
-        assertEquals(2, intent.fastDecision?.toolArgs?.getInt("element_index"))
-    }
-
-    @Test
-    fun testConversationalCorrection_neverParsedAsSearchQuery() {
+    fun testAmbiguousAndConversationalPrompts_delegateToRealAiWithoutHijacking() {
         val snap = sampleYouTubeSnapshot()
         val history = listOf(
-            LiveChatMessage(sender = ChatSender.USER, text = "저 위에 그 내 잘못 vs 도둑 잘못 쳐 영상 클릭해 줄래")
+            LiveChatMessage(sender = ChatSender.USER, text = "유튜브에서 영상 찾아줘")
         )
 
-        val correction1 = "아니 클릭해서 틀어 주면 되잖아"
-        val correction2 = "아니 아까 말했던 그 영상을 클릭해 봐"
+        val mustForwardToAi = listOf(
+            "soxs 가격 알려 줘",
+            "SOXS 내려갔어?",
+            "알람 꺼줘",
+            "알람 맞춰줘",
+            "타이머 멈춰",
+            "타이머 맞춰줘",
+            "라이트 뭐야",
+            "한칸 내려줘",
+            "밑으로 내려 봐",
+            "영상을 틀어 줘",
+            "아니 클릭해서 틀어 주면 되잖아",
+            "잘 준비 해줘",
+            "집중 모드 켜줘",
+            "손전등 켜줘",
+            "진동 모드로 바꿔줘",
+            "홈 화면으로 나가 봐",
+            "배달의 민족 앱 켜서 족발 검색해 봐"
+        )
 
-        assertNull(IntentDecomposerAndRouter.extractSafeSearchQueryIfExplicit(correction1))
-        assertNull(IntentDecomposerAndRouter.extractSafeSearchQueryIfExplicit(correction2))
-        assertEquals("", IntentDecomposerAndRouter.cleanScreenTargetQuery(correction1))
-        assertEquals("", IntentDecomposerAndRouter.cleanScreenTargetQuery(correction2))
-
-        val intent1 = IntentDecomposerAndRouter.decompose(correction1, snap, history, isMainActivityInForeground = false)
-        assertEquals(IntentCategory.SCREEN_ELEMENT_TARGET, intent1.primaryCategory)
-        assertTrue(intent1.isContextualFollowUp)
-        assertEquals("click", intent1.fastDecision?.toolName)
-        assertEquals(2, intent1.fastDecision?.toolArgs?.getInt("element_index"))
-
-        val intent2 = IntentDecomposerAndRouter.decompose(correction2, snap, history, isMainActivityInForeground = false)
-        assertEquals(IntentCategory.SCREEN_ELEMENT_TARGET, intent2.primaryCategory)
-        assertTrue(intent2.isContextualFollowUp)
-        assertEquals("click", intent2.fastDecision?.toolName)
-        assertEquals(2, intent2.fastDecision?.toolArgs?.getInt("element_index"))
+        for (prompt in mustForwardToAi) {
+            val intent = IntentDecomposerAndRouter.decompose(prompt, snap, history, isMainActivityInForeground = false)
+            assertEquals(
+                "Prompt '$prompt' must forward to MULTI_STEP_GUI_OR_CHAT, not regex hijack",
+                IntentCategory.MULTI_STEP_GUI_OR_CHAT,
+                intent.primaryCategory
+            )
+            assertNull("Prompt '$prompt' must have null fastDecision", intent.fastDecision)
+        }
     }
 
     @Test
-    fun testYouTubeQuotedSearchQuery_cleanlyExtractsTargetTitle() {
+    fun testSafeCompatibilityStubs_neverFabricateFuzzyClicksOrHijackGenerativeFlags() {
+        val snap = sampleYouTubeSnapshot()
+        assertEquals(SpatialHint.NONE, IntentDecomposerAndRouter.extractSpatialHint("저 위에 첫 번째"))
+        assertNull(IntentDecomposerAndRouter.findBestScreenElement(snap, "검색"))
+        assertNull(IntentDecomposerAndRouter.extractSafeSearchQueryIfExplicit("아니 클릭해서 틀어 주면 되잖아"))
+        assertEquals(null to null, IntentDecomposerAndRouter.extractCleanAppAndSearchQuery("배달의 민족 앱 켜서 족발 검색해 봐"))
+        assertFalse(IntentDecomposerAndRouter.isExplicitGenerativeOrCodeRequest("영상을 틀어 줘", "영상을 틀어 줘", snap, false))
+        assertFalse(IntentDecomposerAndRouter.isExplicitGenerativeOrCodeRequest("코드로 주간 매출 차트 그려줘"))
+        assertEquals(LifestyleTaskModality.LIFESTYLE_FAST_CONVERSATION, inferModalityFromPrompt("영상을 틀어 줘"))
+        assertEquals(LifestyleTaskModality.LIFESTYLE_MOTION_CINEMA, inferModalityFromPrompt("노을 풍경 영상 모션 생성해줘"))
+    }
+
+    @Test
+    fun testYouTubeQuotedSearchQueryAndExactAppLookup_workWithoutSubstringHijacking() {
         assertEquals(
             "아이유 밤편지",
             IntentDecomposerAndRouter.cleanYouTubeSearchQuery("유튜브 '아이유 밤편지' 영상 틀어줘")
@@ -256,57 +227,31 @@ class IntentDecompositionAndFastRoutingTest {
             IntentDecomposerAndRouter.cleanYouTubeSearchQuery("유튜브 로파이 코딩 음악 재생해 줘")
         )
 
-        val intent = IntentDecomposerAndRouter.decompose(
-            rawPrompt = "유튜브 '아이유 밤편지' 영상 틀어줘",
-            snapshot = null,
-            isMainActivityInForeground = true
-        )
-        assertEquals(IntentCategory.MEDIA_SEARCH_AND_PLAY, intent.primaryCategory)
-        assertEquals("아이유 밤편지", intent.cleanTargetOrSearchQuery)
-    }
+        // Exact app name matches cleanly
+        assertEquals("배달의민족" to "com.sampleapp", IntentDecomposerAndRouter.resolveTargetAppFromPrompt("배달의민족"))
+        assertEquals("배달의민족" to "com.sampleapp", IntentDecomposerAndRouter.resolveTargetAppFromPrompt("배민 앱"))
+        assertEquals("유튜브" to "com.google.android.youtube", IntentDecomposerAndRouter.resolveTargetAppFromPrompt("유튜브"))
 
-    @Test
-    fun testExplicitGenerativeRequests_routeToGenerativeCategory() {
-        val chartIntent = IntentDecomposerAndRouter.decompose("코드로 주간 매출 차트 그려줘")
-        assertEquals(IntentCategory.GENERATIVE_CODE_OR_MEDIA, chartIntent.primaryCategory)
-
-        val glbIntent = IntentDecomposerAndRouter.decompose("오리 Duck.glb 파일 받아서 3D로 띄워줘")
-        assertEquals(IntentCategory.GENERATIVE_CODE_OR_MEDIA, glbIntent.primaryCategory)
-
-        val motionIntent = IntentDecomposerAndRouter.decompose("노을 풍경 영상 모션 생성해줘")
-        assertEquals(IntentCategory.GENERATIVE_CODE_OR_MEDIA, motionIntent.primaryCategory)
-        assertEquals(LifestyleTaskModality.LIFESTYLE_MOTION_CINEMA, inferModalityFromPrompt("노을 풍경 영상 모션 생성해줘"))
-
-        val dutchPayIntent = IntentDecomposerAndRouter.decompose("코드로 더치페이 정산 미니앱 만들어줘")
-        assertEquals(IntentCategory.GENERATIVE_CODE_OR_MEDIA, dutchPayIntent.primaryCategory)
-        assertTrue(
-            IntentDecomposerAndRouter.isExplicitGenerativeOrCodeRequest(
-                "코드로 더치페이 정산 미니앱 만들어줘",
-                "코드로 더치페이 정산 미니앱 만들어줘",
-                null,
-                true
-            )
-        )
+        // Full sentences mentioning an app name must NOT be hijacked by substring match
+        assertNull(IntentDecomposerAndRouter.resolveTargetAppFromPrompt("챗지피티 요금제 알려줘"))
+        assertNull(IntentDecomposerAndRouter.resolveTargetAppFromPrompt("유튜브에서 로파이 틀어줘"))
     }
 
     @Test
     fun testEverydayOsAction_alarm9Am_neverClicksHansonOwnChatBubble() {
-        // Reproduce exact Galaxy S25 forensic bug: user says "9시 알람 맞춰 줘" while Hanson app is in foreground,
-        // and the snapshot contains the user's own chat bubble with text="9시 알람 맞춰 줘".
         val hansonSelfSnapshot = AtomicSnapshot(
             screenWidth = 1080,
             screenHeight = 2340,
             activePackage = "com.hanson.mobileuse.debug",
             activeWindowTitle = "Hanson",
             indexedElements = listOf(
-                IndexedUiElement(
+                uiElement(
                     index = 1,
                     shortClass = "TextView",
-                    className = "android.widget.TextView",
-                    packageName = "com.hanson.mobileuse.debug",
                     text = "9시 알람 맞춰 줘",
                     contentDesc = "",
                     resourceId = "",
+                    clickable = true,
                     left = 240,
                     top = 900,
                     right = 1020,
@@ -315,16 +260,7 @@ class IntentDecompositionAndFastRoutingTest {
                     centerY = 955,
                     normX = 583,
                     normY = 408,
-                    clickable = true,
-                    longClickable = false,
-                    scrollable = false,
-                    editable = false,
-                    checkable = false,
-                    checked = false,
-                    focused = false,
-                    enabled = true,
-                    windowType = "APPLICATION",
-                    windowLayer = 0
+                    packageName = "com.hanson.mobileuse.debug"
                 )
             )
         )
@@ -348,90 +284,46 @@ class IntentDecompositionAndFastRoutingTest {
     }
 
     @Test
-    fun testEverydayOsAction_timerAndFlashlightAndRinger() {
+    fun testEverydayOsAction_explicitNumericAlarmAndTimerVariants() {
         val timerIntent = IntentDecomposerAndRouter.decompose("라면 타이머 3분 맞춰 줘")
         assertEquals(IntentCategory.EVERYDAY_OS_ACTION, timerIntent.primaryCategory)
         assertEquals("set_timer", timerIntent.fastDecision?.toolName)
         assertEquals(180, timerIntent.fastDecision?.toolArgs?.getInt("seconds"))
         assertNotNull(timerIntent.structuredCard)
 
-        val torchIntent = IntentDecomposerAndRouter.decompose("손전등 켜줘")
-        assertEquals(IntentCategory.EVERYDAY_OS_ACTION, torchIntent.primaryCategory)
-        assertEquals("control_device_setting", torchIntent.fastDecision?.toolName)
-        assertEquals("flashlight", torchIntent.fastDecision?.toolArgs?.getString("setting"))
-        assertEquals("on", torchIntent.fastDecision?.toolArgs?.getString("value"))
+        val quickTimer = IntentDecomposerAndRouter.decompose("3분 타이머 맞춰줘")
+        assertEquals(IntentCategory.EVERYDAY_OS_ACTION, quickTimer.primaryCategory)
+        assertEquals("set_timer", quickTimer.fastDecision?.toolName)
+        assertEquals(180, quickTimer.fastDecision?.toolArgs?.getInt("seconds"))
 
-        val vibrateIntent = IntentDecomposerAndRouter.decompose("진동 모드로 바꿔줘")
-        assertEquals(IntentCategory.EVERYDAY_OS_ACTION, vibrateIntent.primaryCategory)
-        assertEquals("control_device_setting", vibrateIntent.fastDecision?.toolName)
-        assertEquals("ringer_mode", vibrateIntent.fastDecision?.toolArgs?.getString("setting"))
-        assertEquals("vibrate", vibrateIntent.fastDecision?.toolArgs?.getString("value"))
+        val pmHalfAlarm = IntentDecomposerAndRouter.decompose("오후 7시 반 알람 설정해줘")
+        assertEquals(IntentCategory.EVERYDAY_OS_ACTION, pmHalfAlarm.primaryCategory)
+        assertEquals("set_alarm", pmHalfAlarm.fastDecision?.toolName)
+        assertEquals(19, pmHalfAlarm.fastDecision?.toolArgs?.getInt("hour"))
+        assertEquals(30, pmHalfAlarm.fastDecision?.toolArgs?.getInt("minute"))
+
+        val colonAlarm = IntentDecomposerAndRouter.decompose("06:45 알람 맞춰줘")
+        assertEquals(IntentCategory.EVERYDAY_OS_ACTION, colonAlarm.primaryCategory)
+        assertEquals("set_alarm", colonAlarm.fastDecision?.toolName)
+        assertEquals(6, colonAlarm.fastDecision?.toolArgs?.getInt("hour"))
+        assertEquals(45, colonAlarm.fastDecision?.toolArgs?.getInt("minute"))
     }
 
     @Test
-    fun testCompoundLifestyleRoutine_sleepAndFocus() {
-        val sleepIntent = IntentDecomposerAndRouter.decompose("잘 준비 해줘")
-        assertEquals(IntentCategory.COMPOUND_LIFESTYLE_ROUTINE, sleepIntent.primaryCategory)
-        assertTrue(sleepIntent.autoCompleteSingleTurn)
-        assertEquals("execute_lifestyle_routine", sleepIntent.fastDecision?.toolName)
-        assertEquals("sleep", sleepIntent.fastDecision?.toolArgs?.getString("routine"))
-
-        val focusIntent = IntentDecomposerAndRouter.decompose("집중 모드 켜줘")
-        assertEquals(IntentCategory.COMPOUND_LIFESTYLE_ROUTINE, focusIntent.primaryCategory)
-        assertTrue(focusIntent.autoCompleteSingleTurn)
-        assertEquals("execute_lifestyle_routine", focusIntent.fastDecision?.toolName)
-        assertEquals("focus", focusIntent.fastDecision?.toolArgs?.getString("routine"))
-    }
-
-    @Test
-    fun testBaeminCompoundSearch_andHomeAndCloseInputReflex_neverTypesIntoChatGpt() {
-        // 1. "홈 화면으로 나가 봐" -> REFLEX_MICRO_CONTROL, press_key("HOME"), 1-turn completion
-        val homeIntent = IntentDecomposerAndRouter.decompose("홈 화면으로 나가 봐")
-        assertEquals(IntentCategory.REFLEX_MICRO_CONTROL, homeIntent.primaryCategory)
-        assertTrue(homeIntent.autoCompleteSingleTurn)
-        assertEquals("press_key", homeIntent.fastDecision?.toolName)
-        assertEquals("HOME", homeIntent.fastDecision?.toolArgs?.getString("key"))
-
-        // 2. "컴퓨터 입력 창을 닫아 봐" -> REFLEX_MICRO_CONTROL, press_key("BACK"), 1-turn completion
-        val closeInputIntent = IntentDecomposerAndRouter.decompose("컴퓨터 입력 창을 닫아 봐")
-        assertEquals(IntentCategory.REFLEX_MICRO_CONTROL, closeInputIntent.primaryCategory)
-        assertTrue(closeInputIntent.autoCompleteSingleTurn)
-        assertEquals("press_key", closeInputIntent.fastDecision?.toolName)
-        assertEquals("BACK", closeInputIntent.fastDecision?.toolArgs?.getString("key"))
-
-        // 3. Compound Baemin prompts (spaced & conversational correction) extract ("배달의민족", "com.sampleapp") and "족발"
-        val (app1, q1) = IntentDecomposerAndRouter.extractCleanAppAndSearchQuery("배달의 민족 앱 켜서 족발 검색해 봐")
-        assertEquals("배달의민족", app1?.first)
-        assertEquals("com.sampleapp", app1?.second)
-        assertEquals("족발", q1)
-
-        val (app2, q2) = IntentDecomposerAndRouter.extractCleanAppAndSearchQuery("배달의 민족 앱을 켜서 족발 검색해 봐")
-        assertEquals("배달의민족", app2?.first)
-        assertEquals("com.sampleapp", app2?.second)
-        assertEquals("족발", q2)
-
-        val (app3, q3) = IntentDecomposerAndRouter.extractCleanAppAndSearchQuery(
-            "이건 체지피티에 프롬프트 입력창에 넣은 거고 배달의 민족 앱이 있어 그거를 열어서 족발을 검색해 봐"
-        )
-        assertEquals("배달의민족", app3?.first)
-        assertEquals("com.sampleapp", app3?.second)
-        assertEquals("족발", q3)
-
-        // 4. When on the ChatGPT screen with an editable input box, inferLocalOnDeviceAction MUST launch 배달의민족, NEVER type into ChatGPT!
+    fun testOfflineFallbackAndSetOfMarksAndCustomEndpointNormalization() {
         val chatGptSnapshot = AtomicSnapshot(
             screenWidth = 1080,
             screenHeight = 2340,
             activePackage = "com.openai.chatgpt",
             activeWindowTitle = "ChatGPT",
             indexedElements = listOf(
-                IndexedUiElement(
+                uiElement(
                     index = 20,
                     shortClass = "EditText",
-                    className = "android.widget.EditText",
-                    packageName = "com.openai.chatgpt",
                     text = "메시지",
                     contentDesc = "",
                     resourceId = "",
+                    clickable = true,
                     left = 60,
                     top = 1900,
                     right = 900,
@@ -440,21 +332,13 @@ class IntentDecompositionAndFastRoutingTest {
                     centerY = 1975,
                     normX = 444,
                     normY = 844,
-                    clickable = true,
-                    longClickable = false,
-                    scrollable = false,
-                    editable = true,
-                    checkable = false,
-                    checked = false,
-                    focused = true,
-                    enabled = true,
-                    windowType = "APPLICATION",
-                    windowLayer = 0
-                )
+                    packageName = "com.openai.chatgpt"
+                ).copy(editable = true, focused = true)
             )
         )
 
-        val client = com.hanson.mobileuse.agent.GeminiMultimodalClient()
+        // When offline, inferLocalOnDeviceAction MUST NEVER type into ChatGPT or click blindly — returns ask_user
+        val client = GeminiMultimodalClient()
         val turn1Decision = client.inferLocalOnDeviceAction(
             goal = "배달의 민족 앱을 켜서 족발 검색해 봐",
             iteration = 1,
@@ -462,180 +346,31 @@ class IntentDecompositionAndFastRoutingTest {
             historySteps = emptyList(),
             previousPlan = emptyList()
         )
-        assertEquals("manage_app", turn1Decision.toolName)
-        assertEquals("launch", turn1Decision.toolArgs.getString("action"))
-        assertEquals("배달의민족", turn1Decision.toolArgs.getString("app_name"))
-    }
+        assertEquals("ask_user", turn1Decision.toolName)
+        assertNotEquals("input_text", turn1Decision.toolName)
 
-    @Test
-    fun testBaeminModalObstacleDismissal_andPostconditionCompletion_andSetOfMarksAndCustomUrl() {
-        // 1. "어 이거 지금 창 닫고 그 족발 검색해 볼래" -> extracts clean query "족발"
-        val (_, cleanQ) = IntentDecomposerAndRouter.extractCleanAppAndSearchQuery("어 이거 지금 창 닫고 그 족발 검색해 볼래")
-        assertEquals("족발", cleanQ)
-
-        // 2. "배달의 민족의 켜 볼래" -> single-step pure app launch
-        val launchIntent = IntentDecomposerAndRouter.decompose("배달의 민족의 켜 볼래")
-        assertEquals(IntentCategory.EVERYDAY_OS_ACTION, launchIntent.primaryCategory)
-        assertTrue(launchIntent.autoCompleteSingleTurn)
-        assertEquals("manage_app", launchIntent.fastDecision?.toolName)
-        assertEquals("배달의민족", launchIntent.fastDecision?.toolArgs?.getString("app_name"))
-
-        // 3. Baemin screen covered by '배민클럽 무료 이용기간' modal ('닫기') when user says "족발 검색해 줘":
-        //    - Turn 1: clicks '닫기' (popup close)
-        //    - Turn 2 (home screen now shows '먹고 싶은 메뉴, 가게 검색'): clicks search bar (NEVER prematurely calling complete_task!)
-        //    - Turn 3 (editable search input open): types "족발"
-        //    - Turn 4 (after typing "족발"): verifies postcondition and calls complete_task
-        val baeminModalSnapshot = AtomicSnapshot(
-            screenWidth = 1080,
-            screenHeight = 2340,
-            activePackage = "com.sampleapp",
-            activeWindowTitle = "배달의민족",
-            indexedElements = listOf(
-                IndexedUiElement(
-                    index = 1,
-                    shortClass = "Button",
-                    className = "android.widget.Button",
-                    packageName = "com.sampleapp",
-                    text = "닫기",
-                    contentDesc = "닫기",
-                    resourceId = "com.sampleapp:id/btn_close",
-                    left = 900,
-                    top = 180,
-                    right = 1020,
-                    bottom = 260,
-                    centerX = 960,
-                    centerY = 220,
-                    normX = 888,
-                    normY = 94,
-                    clickable = true,
-                    longClickable = false,
-                    scrollable = false,
-                    editable = false,
-                    checkable = false,
-                    checked = false,
-                    focused = false,
-                    enabled = true,
-                    windowType = "APPLICATION",
-                    windowLayer = 0
-                ),
-                IndexedUiElement(
-                    index = 2,
-                    shortClass = "TextView",
-                    className = "android.widget.TextView",
-                    packageName = "com.sampleapp",
-                    text = "무료 이용기간 중엔 결제되지 않아요",
-                    contentDesc = "",
-                    resourceId = "",
-                    left = 100,
-                    top = 800,
-                    right = 980,
-                    bottom = 920,
-                    centerX = 540,
-                    centerY = 860,
-                    normX = 500,
-                    normY = 367,
-                    clickable = false,
-                    longClickable = false,
-                    scrollable = false,
-                    editable = false,
-                    checkable = false,
-                    checked = false,
-                    focused = false,
-                    enabled = true,
-                    windowType = "APPLICATION",
-                    windowLayer = 0
-                )
-            )
-        )
-
-        val client = com.hanson.mobileuse.agent.GeminiMultimodalClient()
-        val t1 = client.inferLocalOnDeviceAction(
-            goal = "족발 검색해 줘",
-            iteration = 1,
-            snapshot = baeminModalSnapshot,
-            historySteps = emptyList(),
-            previousPlan = emptyList()
-        )
-        assertEquals("click", t1.toolName)
-        assertEquals(1, t1.toolArgs.getInt("element_index"))
-        assertEquals("팝업 닫기", t1.toolArgs.getString("target_description"))
-
-        val step1Log = com.hanson.mobileuse.agent.AgentStepLog(
-            stepNumber = 1,
-            observation = t1.observation,
-            planLedger = t1.subGoals,
-            toolName = "click",
-            toolArgsJson = t1.toolArgs.toString(),
-            resultSummary = "팝업 닫기 완료",
-            succeeded = true
-        )
-
-        val baeminHomeSnapshot = AtomicSnapshot(
-            screenWidth = 1080,
-            screenHeight = 2340,
-            activePackage = "com.sampleapp",
-            activeWindowTitle = "배달의민족",
-            indexedElements = listOf(
-                IndexedUiElement(
-                    index = 5,
-                    shortClass = "ViewGroup",
-                    className = "android.view.ViewGroup",
-                    packageName = "com.sampleapp",
-                    text = "먹고 싶은 메뉴, 가게 검색",
-                    contentDesc = "검색",
-                    resourceId = "com.sampleapp:id/search_bar",
-                    left = 60,
-                    top = 220,
-                    right = 1020,
-                    bottom = 340,
-                    centerX = 540,
-                    centerY = 280,
-                    normX = 500,
-                    normY = 120,
-                    clickable = true,
-                    longClickable = false,
-                    scrollable = false,
-                    editable = false,
-                    checkable = false,
-                    checked = false,
-                    focused = false,
-                    enabled = true,
-                    windowType = "APPLICATION",
-                    windowLayer = 0
-                )
-            )
-        )
-
-        // Turn 2 MUST click the search bar, NOT complete_task!
-        val t2 = client.inferLocalOnDeviceAction(
-            goal = "족발 검색해 줘",
-            iteration = 2,
-            snapshot = baeminHomeSnapshot,
-            historySteps = listOf(step1Log),
-            previousPlan = t1.subGoals
-        )
-        assertEquals("click", t2.toolName)
-        assertEquals(5, t2.toolArgs.getInt("element_index"))
-        assertEquals("검색창 열기", t2.toolArgs.getString("target_description"))
-
-        // 4. Verify Set-of-Marks visual grounding placements and Custom OpenAI-compatible URL normalization
-        val badges = com.hanson.mobileuse.accessibility.SetOfMarksAnnotator.computeBadgePlacements(
-            elements = baeminHomeSnapshot.indexedElements,
+        // Verify Set-of-Marks visual grounding placements and Custom OpenAI-compatible URL normalization
+        val badges = SetOfMarksAnnotator.computeBadgePlacements(
+            elements = chatGptSnapshot.indexedElements,
             screenWidth = 1080,
             screenHeight = 2340,
             bitmapWidth = 540,
             bitmapHeight = 1170
         )
         assertEquals(1, badges.size)
-        assertEquals(5, badges[0].elementIndex)
+        assertEquals(20, badges[0].elementIndex)
 
         assertEquals(
             "http://192.168.0.10:11434/v1/chat/completions",
-            com.hanson.mobileuse.agent.GeminiMultimodalClient.normalizeChatCompletionsEndpoint("http://192.168.0.10:11434/v1")
+            GeminiMultimodalClient.normalizeChatCompletionsEndpoint("http://192.168.0.10:11434/v1")
         )
         assertEquals(
             "http://127.0.0.1:8000/v1/chat/completions",
-            com.hanson.mobileuse.agent.GeminiMultimodalClient.normalizeChatCompletionsEndpoint("http://127.0.0.1:8000/")
+            GeminiMultimodalClient.normalizeChatCompletionsEndpoint("http://127.0.0.1:8000/")
         )
+    }
+
+    private fun assertNotEquals(unexpected: Any?, actual: Any?) {
+        org.junit.Assert.assertNotEquals(unexpected, actual)
     }
 }

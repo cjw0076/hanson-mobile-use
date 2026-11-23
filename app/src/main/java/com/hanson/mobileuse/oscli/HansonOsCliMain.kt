@@ -41,7 +41,14 @@ object HansonOsCliMain {
     const val TOKEN_HEADER = "X-Hanson-Cli-Token"
     private const val PREFS_NAME = "hanson_security_prefs"
     private const val PREF_KEY_CLI_TOKEN = "os_cli_daemon_token_v2"
-    private const val TOKEN_FILE_PATH = "/data/data/com.hanson.mobileuse/files/.hanson_cli_token"
+    private const val RELEASE_PACKAGE = "com.hanson.mobileuse"
+    private const val DEBUG_PACKAGE = "com.hanson.mobileuse.debug"
+    private const val A11Y_SERVICE_CLASS = "com.hanson.mobileuse.accessibility.HansonAccessibilityService"
+    private val KNOWN_HANSON_PACKAGES = listOf(DEBUG_PACKAGE, RELEASE_PACKAGE)
+    private val TOKEN_FILE_PATHS = listOf(
+        "/data/data/$RELEASE_PACKAGE/files/.hanson_cli_token",
+        "/data/data/$DEBUG_PACKAGE/files/.hanson_cli_token"
+    )
     private const val MAX_BODY_BYTES = 16_384
 
     val ALLOWED_ACTIONS: Set<String> = setOf(
@@ -84,16 +91,72 @@ object HansonOsCliMain {
         val envToken = System.getenv("HANSON_CLI_TOKEN")?.trim().orEmpty()
         if (envToken.length >= 32) return envToken
 
-        try {
-            val tokenFile = File(TOKEN_FILE_PATH)
-            if (tokenFile.isFile && tokenFile.canRead()) {
-                val fileToken = tokenFile.readText(StandardCharsets.UTF_8).trim()
-                if (fileToken.length >= 32) return fileToken
+        val envPkg = System.getenv("HANSON_PACKAGE")?.trim().orEmpty()
+        val candidatePaths = buildList {
+            if (envPkg == RELEASE_PACKAGE || envPkg == DEBUG_PACKAGE) {
+                add("/data/data/$envPkg/files/.hanson_cli_token")
             }
-        } catch (_: Throwable) {
+            addAll(TOKEN_FILE_PATHS)
+        }.distinct()
+
+        for (path in candidatePaths) {
+            try {
+                val tokenFile = File(path)
+                if (tokenFile.isFile && tokenFile.canRead()) {
+                    val fileToken = tokenFile.readText(StandardCharsets.UTF_8).trim()
+                    if (fileToken.length >= 32) return fileToken
+                }
+            } catch (_: Throwable) {
+            }
         }
 
         return generateSecureToken256()
+    }
+
+    /**
+     * Merges [servicesToAdd] onto an existing colon-separated `enabled_accessibility_services` value,
+     * preserving existing entries (TalkBack, password managers, etc.) and deduplicating cleanly.
+     */
+    fun mergeAccessibilityServices(existingRaw: String?, servicesToAdd: List<String>): String {
+        val cleaned = existingRaw?.trim().orEmpty()
+        val merged = LinkedHashSet<String>()
+        if (cleaned.isNotEmpty() && !cleaned.equals("null", ignoreCase = true)) {
+            for (token in cleaned.split(':')) {
+                val entry = token.trim()
+                if (entry.isNotEmpty() &&
+                    !entry.equals("null", ignoreCase = true) &&
+                    !containsShellMetacharacters(entry)
+                ) {
+                    merged.add(entry)
+                }
+            }
+        }
+        for (svc in servicesToAdd) {
+            val trimmed = svc.trim()
+            if (trimmed.isNotEmpty() && !containsShellMetacharacters(trimmed)) {
+                merged.add(trimmed)
+            }
+        }
+        return merged.joinToString(":")
+    }
+
+    private fun resolveTargetHansonPackages(explicitPkg: String? = null): List<String> {
+        val explicit = explicitPkg?.trim().orEmpty()
+        if (explicit == RELEASE_PACKAGE || explicit == DEBUG_PACKAGE) {
+            return listOf(explicit)
+        }
+        val envPkg = System.getenv("HANSON_PACKAGE")?.trim().orEmpty()
+        if (envPkg == RELEASE_PACKAGE || envPkg == DEBUG_PACKAGE) {
+            return listOf(envPkg)
+        }
+        val installed = runSafeProcess(listOf("pm", "list", "packages", RELEASE_PACKAGE))
+            .optString("stdout")
+            .lineSequence()
+            .map { it.trim().removePrefix("package:") }
+            .filter { it == RELEASE_PACKAGE || it == DEBUG_PACKAGE }
+            .distinct()
+            .toList()
+        return installed.ifEmpty { listOf(RELEASE_PACKAGE) }
     }
 
     /**
@@ -570,13 +633,27 @@ object HansonOsCliMain {
             }
 
             "self-heal" -> {
-                val svc = "com.hanson.mobileuse/com.hanson.mobileuse.accessibility.HansonAccessibilityService"
-                val r1 = runSafeProcess(listOf("settings", "put", "secure", "enabled_accessibility_services", svc))
+                val targetPackages = resolveTargetHansonPackages(args.getOrNull(0))
+                val targetServices = targetPackages.map { "$it/$A11Y_SERVICE_CLASS" }
+                val existingRes = runSafeProcess(
+                    listOf("settings", "get", "secure", "enabled_accessibility_services")
+                )
+                val existingRaw = if (existingRes.optString("status") == "ok") {
+                    existingRes.optString("stdout", "")
+                } else {
+                    ""
+                }
+                val mergedServices = mergeAccessibilityServices(existingRaw, targetServices)
+                val r1 = runSafeProcess(
+                    listOf("settings", "put", "secure", "enabled_accessibility_services", mergedServices)
+                )
                 val r2 = runSafeProcess(listOf("settings", "put", "secure", "accessibility_enabled", "1"))
                 JSONObject().apply {
                     put("status", if (r1.optInt("exitCode") == 0 && r2.optInt("exitCode") == 0) "ok" else "error")
                     put("action", "self-heal accessibility service")
-                    put("service", svc)
+                    put("packages", JSONArray(targetPackages))
+                    put("service", targetServices.joinToString(":"))
+                    put("mergedServices", mergedServices)
                 }
             }
 
@@ -661,10 +738,52 @@ object HansonOsCliMain {
         }
     }
 
+    private fun isAndroidRuntime(): Boolean {
+        val vmName = System.getProperty("java.vm.name").orEmpty().lowercase()
+        val vendor = System.getProperty("java.vendor").orEmpty().lowercase()
+        val runtime = System.getProperty("java.runtime.name").orEmpty().lowercase()
+        return vmName.contains("dalvik") ||
+            vmName.contains("art") ||
+            vendor.contains("android") ||
+            runtime.contains("android") ||
+            File("/system/build.prop").isFile
+    }
+
+    /**
+     * Parses `/proc/net/tcp` or `/proc/net/tcp6` lines and verifies the peer socket UID is in [trustedUids].
+     * Strictly FAIL-CLOSED: returns `false` if no matching row is found or any UID fails to parse.
+     */
+    internal fun verifyProcNetTcpLines(
+        lines: Sequence<String>,
+        clientHexPort: String,
+        serverHexPort: String?,
+        trustedUids: Set<Int>
+    ): Boolean {
+        val targetLocalSuffix = ":$clientHexPort"
+        val targetRemSuffix = serverHexPort?.let { ":$it" }
+        var matchedRowUid: Int? = null
+
+        for (line in lines.drop(1)) {
+            val cols = line.trim().split(Regex("\\s+"))
+            if (cols.size < 8) continue
+            val localEndpoint = cols[1].uppercase()
+            if (!localEndpoint.endsWith(targetLocalSuffix)) continue
+            if (targetRemSuffix != null) {
+                val remEndpoint = cols[2].uppercase()
+                if (!remEndpoint.endsWith(targetRemSuffix)) continue
+            }
+            val parsedUid = cols[7].toIntOrNull() ?: return false
+            matchedRowUid = parsedUid
+            break
+        }
+        return matchedRowUid != null && matchedRowUid in trustedUids
+    }
+
     /**
      * Verifies via `/proc/net/tcp` and `/proc/net/tcp6` that a loopback socket connection
-     * originates from `root(0)`, `shell(2000)`, our own process UID, or `com.hanson.mobileuse`.
-     * Blocks third-party untrusted apps (`u0_aYYY`) installed on the same phone.
+     * originates from `root(0)`, `shell(2000)`, our own process UID, or `com.hanson.mobileuse` /
+     * `com.hanson.mobileuse.debug`.
+     * Strictly FAIL-CLOSED on Android/Linux: returns `false` on any parse/IO error or missing socket entry.
      */
     internal fun verifyLoopbackPeerUid(socket: Socket): Boolean {
         val remoteAddr = socket.inetAddress ?: return false
@@ -673,33 +792,34 @@ object HansonOsCliMain {
         val clientPort = socket.port
         if (clientPort <= 0) return false
         val hexPort = String.format("%04X", clientPort)
+        val serverHexPort = socket.localPort.takeIf { it > 0 }?.let { String.format("%04X", it) }
+
+        // Allow desktop non-Linux JVM unit-test hosts (Windows/macOS) where /proc does not exist.
+        if (!isAndroidRuntime() && !File("/proc").isDirectory) {
+            return true
+        }
 
         val tcpFiles = listOf(File("/proc/net/tcp"), File("/proc/net/tcp6"))
             .filter { it.isFile && it.canRead() }
         if (tcpFiles.isEmpty()) {
-            // Non-Linux host (e.g. Windows/macOS JVM unit test environment)
-            return true
+            // Fail-closed on Android/Linux when /proc/net/tcp* cannot be read
+            return false
         }
 
         val trustedUids = resolveTrustedAndroidUids()
         for (tcpFile in tcpFiles) {
             try {
-                tcpFile.useLines { lines ->
-                    for (line in lines.drop(1)) {
-                        val cols = line.trim().split(Regex("\\s+"))
-                        if (cols.size >= 8) {
-                            val localEndpoint = cols[1].uppercase()
-                            if (localEndpoint.endsWith(":$hexPort")) {
-                                val socketUid = cols[7].toIntOrNull() ?: continue
-                                return socketUid in trustedUids
-                            }
-                        }
-                    }
+                val verified = tcpFile.useLines { lines ->
+                    verifyProcNetTcpLines(lines, hexPort, serverHexPort, trustedUids)
                 }
+                if (verified) return true
             } catch (_: Throwable) {
+                // Fail-closed on IO or parse exception
+                return false
             }
         }
-        return true
+        // Fail-closed when peer socket row is absent or untrusted
+        return false
     }
 
     private fun resolveTrustedAndroidUids(): Set<Int> {
@@ -710,11 +830,26 @@ object HansonOsCliMain {
         } catch (_: Throwable) {
         }
         try {
+            val statusFile = File("/proc/self/status")
+            if (statusFile.isFile && statusFile.canRead()) {
+                statusFile.useLines { lines ->
+                    for (line in lines) {
+                        if (line.startsWith("Uid:")) {
+                            val parts = line.substringAfter("Uid:").trim().split(Regex("\\s+"))
+                            parts.getOrNull(0)?.toIntOrNull()?.let { trusted.add(it) }
+                            break
+                        }
+                    }
+                }
+            }
+        } catch (_: Throwable) {
+        }
+        try {
             val pkgList = File("/data/system/packages.list")
             if (pkgList.isFile && pkgList.canRead()) {
                 pkgList.useLines { lines ->
                     for (line in lines) {
-                        if (line.startsWith("com.hanson.mobileuse ")) {
+                        if (KNOWN_HANSON_PACKAGES.any { pkg -> line.startsWith("$pkg ") }) {
                             val parts = line.split(Regex("\\s+"))
                             val uid = parts.getOrNull(1)?.toIntOrNull()
                             if (uid != null) trusted.add(uid)

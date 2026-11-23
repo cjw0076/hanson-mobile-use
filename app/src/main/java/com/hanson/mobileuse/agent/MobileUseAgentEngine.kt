@@ -1,16 +1,11 @@
 package com.hanson.mobileuse.agent
 
 import android.content.Context
+import android.util.Log
 import com.hanson.mobileuse.accessibility.AtomicSnapshot
 import com.hanson.mobileuse.accessibility.HansonAccessibilityService
 import com.hanson.mobileuse.accessibility.HierarchyDumper
 import com.hanson.mobileuse.notification.InterceptedNotification
-import com.hanson.mobileuse.paradigm.LiquidUiSynthesizer
-import com.hanson.mobileuse.paradigm.ModeTurnResult
-import com.hanson.mobileuse.paradigm.NeuralSkillCompilerAndDistiller
-import com.hanson.mobileuse.paradigm.ParadigmExecutionModeController
-import com.hanson.mobileuse.paradigm.SemanticTeleportRouter
-import com.hanson.mobileuse.paradigm.WorldModelGraph
 import com.hanson.mobileuse.service.FloatingHudService
 import com.hanson.mobileuse.service.HansonForegroundService
 import com.hanson.mobileuse.ui.components.CanvasErrorTelemetry
@@ -22,6 +17,7 @@ import com.hanson.mobileuse.workspace.ComposerCommandParser
 import com.hanson.mobileuse.workspace.MobileWorkspaceEngine
 import com.hanson.mobileuse.workspace.ParsedComposerInput
 import com.hanson.mobileuse.workspace.WorkspaceDiffRecord
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -36,6 +32,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -49,7 +46,7 @@ enum class ExecutionLaneMode(val labelKo: String, val badge: String) {
 
 data class ParallelTaskSlot(
     val taskId: String,
-    val lane: String, // "FG" or "BG"
+    val lane: String, // "FG", "BG", "GUI", or "QA"
     val goal: String,
     val startedAtMs: Long = System.currentTimeMillis()
 )
@@ -60,15 +57,17 @@ data class AgentEngineConfig(
     val maxIterations: Int = 15,
     val autoShowFloatingHud: Boolean = true,
     val ttsVoiceReply: Boolean = true,
-    val customBaseUrl: String = ""
+    val customBaseUrl: String = "",
+    val bridgeToken: String = ""
 )
 
 /**
  * Conversational Full-Control Mobile-Use Agent Engine (`MobileUseAgentEngine`).
  *
  * Bridges:
+ * - Text-First Native Grounded Web Q&A (`GeminiMultimodalClient.answerTextOrGroundedWebQuery`)
  * - Multi-Tier Mobile AI Infrastructure Router (`MobileAiInfrastructureRouter`:
- *   Galaxy S25 Built-In AICore Gemini Nano NPU + MediaPipe Tasks GenAI + Local Edge LLM + Cloud Multi-Provider VLM)
+ *   Cloud Multi-Provider VLM + Laptop CLI Bridge + MediaPipe + Local Edge + Galaxy S25 AICore Nano NPU)
  * - Set-of-Marks (`[index]` visual grounding) + Accessibility UI Tree atomic perception
  * - Full-Duplex Conversational Voice Loop (`LiveVoiceSessionManager`) with live mid-execution steering
  * - Ground-Truth Action Trajectory Verifier & Self-Healer (`ActionTrajectoryVerifierAndHealer`)
@@ -85,6 +84,7 @@ class MobileUseAgentEngine @JvmOverloads constructor(
     val personalRoutineStore: PersonalRoutineStore? = null
 ) {
     companion object {
+        private const val TAG = "HansonAgentEngine"
         private const val CONFIG_PREFS = "hanson_agent_engine_config"
         private const val KEY_API_KEY = "gemini_api_key"
         private const val KEY_MODEL = "gemini_model_name"
@@ -94,6 +94,18 @@ class MobileUseAgentEngine @JvmOverloads constructor(
         private const val KEY_CUSTOM_BASE_URL = "custom_openai_base_url"
         private const val KEY_CHAT_HISTORY = "live_chat_history_json"
         private const val KEY_UX_MODE = "hanson_ux_mode"
+        private const val VAULT_KEY_CLOUD_API_KEYS = "cloud_api_keys"
+        private const val VAULT_KEY_CLI_BRIDGE_TOKEN = "cli_bridge_token"
+
+        // Fail-closed strict affirmative regexes for AWAITING_APPROVAL and AWAITING_TAKEOVER
+        private val STRICT_APPROVAL_REGEX = Regex(
+            "^(?:응|어|네|예|확인|승인|진행|진행해|좋아|오케이|ok|yes|approve)$",
+            RegexOption.IGNORE_CASE
+        )
+        private val STRICT_TAKEOVER_RESUME_REGEX = Regex(
+            "^(?:응|어|네|예|확인|완료|했어|끝|재개|진행|진행해|ok|yes|done|resume)$",
+            RegexOption.IGNORE_CASE
+        )
     }
 
     private val prefs = context.getSharedPreferences(CONFIG_PREFS, Context.MODE_PRIVATE)
@@ -102,10 +114,6 @@ class MobileUseAgentEngine @JvmOverloads constructor(
     val aiInfrastructureRouter = MobileAiInfrastructureRouter(context, multimodalClient)
     private val toolHarness = AgentToolExecutionHarness(context, workspaceEngine)
     private val trajectoryVerifier = ActionTrajectoryVerifierAndHealer(context)
-    val worldModelGraph = WorldModelGraph(context)
-    val executionModeController = ParadigmExecutionModeController(worldModelGraph, context)
-    val neuralSkillCompiler = NeuralSkillCompilerAndDistiller(context)
-    val semanticTeleportRouter = SemanticTeleportRouter(context)
     val memoryManager = AgentMemoryManager(context)
     val resolvedVault: BlindCredentialVault by lazy {
         blindVault ?: HansonRuntimeHolder.getBlindVault(context)
@@ -154,12 +162,17 @@ class MobileUseAgentEngine @JvmOverloads constructor(
     init {
         toolHarness.attachSotaModules(resolvedVault, resolvedWatcherEngine, resolvedScratchpad)
     }
+
     private val concurrentBackgroundJobs = ConcurrentHashMap<String, Job>()
     private val pendingGuiGoals = ConcurrentLinkedQueue<String>()
+    private val pendingGuiAttachedContexts = ConcurrentHashMap<String, String>()
     private val craftAnythingEngine = CraftAnythingMobileEngine(context)
 
     @Volatile
     private var liveSteeringGoal: String? = null
+
+    private val _lastCloudApiError = MutableStateFlow<String?>(null)
+    val lastCloudApiError: StateFlow<String?> = _lastCloudApiError.asStateFlow()
 
     private val _activeParallelTasks = MutableStateFlow<List<ParallelTaskSlot>>(emptyList())
     val activeParallelTasks: StateFlow<List<ParallelTaskSlot>> = _activeParallelTasks.asStateFlow()
@@ -179,15 +192,19 @@ class MobileUseAgentEngine @JvmOverloads constructor(
     private val _allReceipts = MutableStateFlow<List<ActionReceipt>>(emptyList())
     val allReceipts: StateFlow<List<ActionReceipt>> = _allReceipts.asStateFlow()
 
-    private val _workMode = MutableStateFlow(
-        sessionStore?.state?.value?.activeSession?.mode ?: AgentWorkMode.AUTO
-    )
-    val workMode: StateFlow<AgentWorkMode> = _workMode.asStateFlow()
-
     private val _uxMode = MutableStateFlow(
         UserExperienceMode.fromId(prefs.getString(KEY_UX_MODE, UserExperienceMode.SIMPLE_HUMAN.id))
     )
     val uxMode: StateFlow<UserExperienceMode> = _uxMode.asStateFlow()
+
+    private val _workMode = MutableStateFlow(
+        if (_uxMode.value == UserExperienceMode.SIMPLE_HUMAN) {
+            AgentWorkMode.AUTO
+        } else {
+            sessionStore?.state?.value?.activeSession?.mode ?: AgentWorkMode.AUTO
+        }
+    )
+    val workMode: StateFlow<AgentWorkMode> = _workMode.asStateFlow()
 
     @Volatile
     private var pendingPlanGoal: String? = null
@@ -209,10 +226,30 @@ class MobileUseAgentEngine @JvmOverloads constructor(
         }
     }
 
+    private fun logError(message: String, throwable: Throwable? = null) {
+        runCatching {
+            if (throwable != null) {
+                Log.e(TAG, message, throwable)
+            } else {
+                Log.e(TAG, message)
+            }
+        }
+    }
+
     fun setUxMode(mode: UserExperienceMode) {
         prefs.edit().putString(KEY_UX_MODE, mode.id).apply()
         _uxMode.value = mode
+        if (mode == UserExperienceMode.SIMPLE_HUMAN && _workMode.value != AgentWorkMode.AUTO) {
+            pendingPlanGoal = null
+            setWorkMode(AgentWorkMode.AUTO)
+        }
     }
+
+    /**
+     * Alias for [setUxMode] guaranteeing [UserExperienceMode.SIMPLE_HUMAN] resets [workMode]
+     * to [AgentWorkMode.AUTO] so users are never trapped in hidden PLAN mode.
+     */
+    fun setExperienceMode(mode: UserExperienceMode) = setUxMode(mode)
 
     private fun speakIfEnabled(text: String) {
         val shouldSpeak = LiveVoiceSessionManager.state.value.isActive || _config.value.ttsVoiceReply
@@ -220,37 +257,68 @@ class MobileUseAgentEngine @JvmOverloads constructor(
         LiveVoiceSessionManager.speakConversationalFiller(text)
     }
 
+    private fun persistSecretToVaultVerified(
+        vaultKey: String,
+        label: String,
+        plaintext: String
+    ): Result<Unit> = runCatching {
+        resolvedVault.putSecret(
+            rawKey = vaultKey,
+            label = label,
+            plaintext = plaintext,
+            category = VaultSecretCategory.API_TOKEN
+        )
+        val readBack = resolvedVault.resolvePlaintextForBlindInjection(vaultKey)?.second?.trim()
+        if (readBack != plaintext) {
+            throw IllegalStateException("BlindCredentialVault read-back verification failed for '$vaultKey'")
+        }
+    }
+
+    private fun resolvePrivateKeysFile(): File? {
+        val dir = runCatching { context.filesDir }.getOrNull() ?: return null
+        return File(dir, "hanson_api_keys.txt")
+    }
+
     private fun loadConfig(): AgentEngineConfig {
-        val rawSavedModel = prefs.getString(KEY_MODEL, GeminiMultimodalClient.AUTO_MULTI_MODEL)
-            ?: GeminiMultimodalClient.AUTO_MULTI_MODEL
+        val rawSavedModel = prefs.getString(KEY_MODEL, GeminiMultimodalClient.DEFAULT_MODEL)
+            ?: GeminiMultimodalClient.DEFAULT_MODEL
         val normalizedModel = GeminiMultimodalClient.normalize2026ModelName(rawSavedModel)
         if (normalizedModel != rawSavedModel) {
             prefs.edit().putString(KEY_MODEL, normalizedModel).apply()
         }
         var resolvedKey = runCatching {
-            resolvedVault.resolvePlaintextForBlindInjection("cloud_api_keys")?.second?.trim().orEmpty()
+            resolvedVault.resolvePlaintextForBlindInjection(VAULT_KEY_CLOUD_API_KEYS)?.second?.trim().orEmpty()
+        }.onFailure { err ->
+            logError("Failed to read cloud_api_keys from BlindCredentialVault during loadConfig", err)
         }.getOrDefault("")
+
         if (resolvedKey.isEmpty()) {
-            // Migrate any legacy plaintext SharedPreferences API key into AES-256-GCM BlindCredentialVault
+            // Migrate any legacy plaintext SharedPreferences API key into AES-256-GCM BlindCredentialVault.
+            // ONLY delete KEY_API_KEY after putSecret() succeeds AND read-back matches verbatim!
             val legacyPlainKey = prefs.getString(KEY_API_KEY, "").orEmpty().trim()
             if (legacyPlainKey.isNotEmpty()) {
                 resolvedKey = legacyPlainKey
-                runCatching {
-                    resolvedVault.putSecret(
-                        rawKey = "cloud_api_keys",
-                        label = "Cloud VLM API Keys",
-                        plaintext = resolvedKey,
-                        category = VaultSecretCategory.API_TOKEN
+                val migration = persistSecretToVaultVerified(
+                    vaultKey = VAULT_KEY_CLOUD_API_KEYS,
+                    label = "Cloud VLM API Keys",
+                    plaintext = resolvedKey
+                )
+                if (migration.isSuccess) {
+                    prefs.edit().remove(KEY_API_KEY).apply()
+                } else {
+                    logError(
+                        "Failed to migrate SharedPreferences API key into BlindCredentialVault; preserving legacy key",
+                        migration.exceptionOrNull()
                     )
                 }
-                prefs.edit().remove(KEY_API_KEY).apply()
             }
         }
+
         if (resolvedKey.isEmpty()) {
             // Only read app-private filesDir (never world-readable /sdcard/Download or /data/local/tmp)
-            val privateKeysFile = java.io.File(context.filesDir, "hanson_api_keys.txt")
+            val privateKeysFile = resolvePrivateKeysFile()
             val keysFileContent = runCatching {
-                if (privateKeysFile.isFile && privateKeysFile.length() > 10L) {
+                if (privateKeysFile != null && privateKeysFile.isFile && privateKeysFile.length() > 10L) {
                     privateKeysFile.readText(Charsets.UTF_8).trim()
                 } else {
                     ""
@@ -262,23 +330,38 @@ class MobileUseAgentEngine @JvmOverloads constructor(
                 envVar = System.getenv("GEMINI_API_KEY")
             )
             if (resolvedKey.isNotEmpty()) {
-                runCatching {
-                    resolvedVault.putSecret(
-                        rawKey = "cloud_api_keys",
-                        label = "Cloud VLM API Keys",
-                        plaintext = resolvedKey,
-                        category = VaultSecretCategory.API_TOKEN
+                val migration = persistSecretToVaultVerified(
+                    vaultKey = VAULT_KEY_CLOUD_API_KEYS,
+                    label = "Cloud VLM API Keys",
+                    plaintext = resolvedKey
+                )
+                if (migration.isSuccess) {
+                    if (keysFileContent.isNotEmpty() && privateKeysFile != null && privateKeysFile.exists()) {
+                        runCatching { privateKeysFile.delete() }.onFailure { err ->
+                            logError("Failed to delete migrated legacy hanson_api_keys.txt", err)
+                        }
+                    }
+                } else {
+                    logError(
+                        "Failed to migrate legacy hanson_api_keys.txt/env API key into BlindCredentialVault; preserving source",
+                        migration.exceptionOrNull()
                     )
                 }
             }
         }
+
+        val resolvedBridgeToken = runCatching {
+            resolvedVault.resolvePlaintextForBlindInjection(VAULT_KEY_CLI_BRIDGE_TOKEN)?.second?.trim().orEmpty()
+        }.getOrDefault("")
+
         return AgentEngineConfig(
             apiKey = resolvedKey,
             modelName = normalizedModel,
             maxIterations = prefs.getInt(KEY_MAX_ITER, 15).coerceIn(3, 40),
             autoShowFloatingHud = prefs.getBoolean(KEY_AUTO_HUD, true),
             ttsVoiceReply = prefs.getBoolean(KEY_TTS_VOICE, true),
-            customBaseUrl = prefs.getString(KEY_CUSTOM_BASE_URL, "").orEmpty().trim()
+            customBaseUrl = prefs.getString(KEY_CUSTOM_BASE_URL, "").orEmpty().trim(),
+            bridgeToken = resolvedBridgeToken
         )
     }
 
@@ -288,7 +371,8 @@ class MobileUseAgentEngine @JvmOverloads constructor(
         maxIterations: Int? = null,
         autoShowFloatingHud: Boolean? = null,
         ttsVoiceReply: Boolean? = null,
-        customBaseUrl: String? = null
+        customBaseUrl: String? = null,
+        bridgeToken: String? = null
     ) {
         val current = _config.value
         val resolvedModel = GeminiMultimodalClient.normalize2026ModelName(modelName ?: current.modelName)
@@ -298,31 +382,79 @@ class MobileUseAgentEngine @JvmOverloads constructor(
             maxIterations = (maxIterations ?: current.maxIterations).coerceIn(3, 40),
             autoShowFloatingHud = autoShowFloatingHud ?: current.autoShowFloatingHud,
             ttsVoiceReply = ttsVoiceReply ?: current.ttsVoiceReply,
-            customBaseUrl = customBaseUrl?.trim() ?: current.customBaseUrl
+            customBaseUrl = customBaseUrl?.trim() ?: current.customBaseUrl,
+            bridgeToken = bridgeToken?.trim() ?: current.bridgeToken
         )
+
+        var vaultPersistSucceeded = true
+        var vaultPersistErrorMsg: String? = null
+        val privateKeysFile = resolvePrivateKeysFile()
+
         if (apiKey != null) {
             val trimmedKey = next.apiKey.trim()
-            runCatching {
-                if (trimmedKey.isNotEmpty()) {
-                    resolvedVault.putSecret(
-                        rawKey = "cloud_api_keys",
-                        label = "Cloud VLM API Keys",
-                        plaintext = trimmedKey,
-                        category = VaultSecretCategory.API_TOKEN
-                    )
+            if (trimmedKey.isNotEmpty()) {
+                val persist = persistSecretToVaultVerified(
+                    vaultKey = VAULT_KEY_CLOUD_API_KEYS,
+                    label = "Cloud VLM API Keys",
+                    plaintext = trimmedKey
+                )
+                if (persist.isSuccess) {
+                    if (privateKeysFile != null && privateKeysFile.exists()) {
+                        runCatching { privateKeysFile.delete() }.onFailure { err ->
+                            logError("Failed to delete legacy hanson_api_keys.txt after vault save", err)
+                        }
+                    }
                 } else {
-                    resolvedVault.deleteSecret("cloud_api_keys")
+                    vaultPersistSucceeded = false
+                    val err = persist.exceptionOrNull()
+                    logError("Failed to persist cloud_api_keys into BlindCredentialVault", err)
+                    vaultPersistErrorMsg = "API 키 암호화 저장(Blind Vault)에 실패했습니다: ${err?.message?.take(90) ?: "알 수 없는 오류"}"
+                }
+            } else {
+                runCatching {
+                    resolvedVault.deleteSecret(VAULT_KEY_CLOUD_API_KEYS)
+                }.onFailure { err ->
+                    logError("Failed to delete cloud_api_keys from BlindCredentialVault", err)
+                }
+                if (privateKeysFile != null && privateKeysFile.exists()) {
+                    runCatching { privateKeysFile.delete() }.onFailure { err ->
+                        logError("Failed to delete legacy hanson_api_keys.txt on key clear", err)
+                    }
                 }
             }
         }
-        prefs.edit()
-            .remove(KEY_API_KEY)
+
+        if (bridgeToken != null) {
+            val trimmedBridge = next.bridgeToken.trim()
+            if (trimmedBridge.isNotEmpty()) {
+                persistSecretToVaultVerified(
+                    vaultKey = VAULT_KEY_CLI_BRIDGE_TOKEN,
+                    label = "Laptop CLI Bridge Token",
+                    plaintext = trimmedBridge
+                ).onFailure { err ->
+                    logError("Failed to persist cli_bridge_token into BlindCredentialVault", err)
+                }
+            } else {
+                runCatching { resolvedVault.deleteSecret(VAULT_KEY_CLI_BRIDGE_TOKEN) }
+            }
+        }
+
+        // Always reset dead-key / rate-limit caches & stale cloud errors whenever config updates
+        GeminiMultimodalClient.Companion.MultiProviderApiKeySet.clearDeadKeys()
+        GeminiMultimodalClient.lastCloudApiErrorReason = null
+        aiInfrastructureRouter.clearLastCloudApiError()
+        _lastCloudApiError.value = vaultPersistErrorMsg
+
+        val editor = prefs.edit()
             .putString(KEY_MODEL, next.modelName)
             .putInt(KEY_MAX_ITER, next.maxIterations)
             .putBoolean(KEY_AUTO_HUD, next.autoShowFloatingHud)
             .putBoolean(KEY_TTS_VOICE, next.ttsVoiceReply)
             .putString(KEY_CUSTOM_BASE_URL, next.customBaseUrl)
-            .apply()
+        if (vaultPersistSucceeded) {
+            editor.remove(KEY_API_KEY)
+        }
+        editor.apply()
         _config.value = next
     }
 
@@ -419,168 +551,890 @@ class MobileUseAgentEngine @JvmOverloads constructor(
     }
 
     /**
-     * One-Touch Environment Auto-Setup:
-     * Enables unrestricted capability governance, triggers OS-level `self-heal`
-     * (Accessibility, Notification Listener, Overlay), and refreshes mobile AI infrastructure.
+     * One-Touch Environment Auto-Setup (P1-5):
+     * Enables unrestricted capability governance, tries OS-level `self-heal` when available,
+     * checks strict Accessibility + Overlay readiness, and cleanly opens Android System Settings
+     * (`ACTION_ACCESSIBILITY_SETTINGS` / `ACTION_MANAGE_OVERLAY_PERMISSION`) whenever either is missing.
      */
     fun runOneTouchAutoSetup() {
         scope.launch {
             permissionHub.setUnrestrictedMode(true)
             aiInfrastructureRouter.refreshInfrastructureState()
-            val healOutcome = toolHarness.execute(
-                toolName = "os_cli_exec",
-                args = JSONObject().put("command", "self-heal"),
-                latestSnapshot = null
-            )
-            permissionHub.refreshStatus()
-            if (_config.value.autoShowFloatingHud) {
-                FloatingHudService.startIfPermitted(context)
-            }
-            val aiState = aiInfrastructureRouter.state.value
-            val npuNote = if (aiState.googleAiCoreInstalled) {
-                "S25 내장 Gemini Nano NPU 및 접근성·오버레이 권한이 모두 연결되었습니다."
-            } else {
-                "접근성·알림·오버레이 권한 자동 구성을 완료했습니다."
-            }
-            val msgText = if (healOutcome.succeeded) npuNote else "런타임 권한과 온디바이스 AI 라우터 구성을 완료했습니다."
-            appendChatMessage(
-                LiveChatMessage(
-                    sender = ChatSender.AGENT,
-                    text = msgText,
-                    subtitle = "1-Touch Auto-Setup",
-                    toolBadge = "AUTO-SETUP"
+
+            if (ToolSpecRegistry.find("os_cli_exec") != null) {
+                val healOutcome = toolHarness.execute(
+                    toolName = "os_cli_exec",
+                    args = JSONObject().put("command", "self-heal"),
+                    latestSnapshot = null
                 )
+                if (healOutcome.succeeded) {
+                    delay(350L)
+                }
+            }
+
+            permissionHub.refreshStatus()
+            val setupResult = permissionHub.triggerOneTouchSetup(
+                launcherContext = context,
+                openMissingSettings = true
             )
-            speakIfEnabled(msgText)
+
+            if (setupResult.accessibilityReady && setupResult.overlayReady) {
+                if (_config.value.autoShowFloatingHud) {
+                    FloatingHudService.startIfPermitted(context)
+                }
+                val aiState = aiInfrastructureRouter.state.value
+                val readyMsg = if (aiState.googleAiCoreInstalled) {
+                    "접근성 서비스, 오버레이 권한 및 온디바이스 AI 라우터가 모두 정상 연결되었어요."
+                } else {
+                    setupResult.messageKo
+                }
+                appendChatMessage(
+                    LiveChatMessage(
+                        sender = ChatSender.AGENT,
+                        text = readyMsg,
+                        subtitle = "1-Touch Auto-Setup",
+                        toolBadge = "AUTO-SETUP",
+                        succeeded = true
+                    )
+                )
+                speakIfEnabled(readyMsg)
+            } else {
+                appendChatMessage(
+                    LiveChatMessage(
+                        sender = ChatSender.AGENT,
+                        text = setupResult.messageKo,
+                        subtitle = "1-Touch Auto-Setup · 시스템 권한 필요",
+                        toolBadge = "권한 설정 필요",
+                        succeeded = false
+                    )
+                )
+                speakIfEnabled(setupResult.messageKo)
+            }
         }
     }
 
     /**
-     * Handles explicit Hanson self-configuration or mobile AI model management commands
-     * without intercepting normal app-control requests like "유튜브 켜줘".
+     * Handles ONLY explicit `/slash` self-configuration commands (`/setup`, `/memory`, `/theme`, `/model`, `/models`).
+     * NEVER hijacks natural-language queries (e.g. `"메모리 반도체"`, `"라이트 모드 장점"`, `"모바일 AI 전망"`).
      */
     private fun tryHandleExplicitHansonSelfConfig(prompt: String): Boolean {
-        val lower = prompt.lowercase(Locale.ROOT).trim()
+        val trimmed = prompt.trim()
+        if (!trimmed.startsWith("/")) return false
 
-        // 1. Mobile On-Device Model Download / Infrastructure status
-        if (
-            lower.contains("온디바이스 모델") ||
-            lower.contains("모바일 모델") ||
-            lower.contains("모바일 ai") ||
-            lower.contains("모델 다운로드") ||
-            lower.contains("모델 받아") ||
-            lower.contains("인프라 상태")
-        ) {
-            val urlMatch = Regex("(https?://[^\\s]+)").find(prompt)?.value
-            scope.launch {
-                val statusMsg = aiInfrastructureRouter.downloadOnDeviceModel(urlMatch)
-                appendChatMessage(
-                    LiveChatMessage(
-                        sender = ChatSender.AGENT,
-                        text = statusMsg,
-                        subtitle = "Mobile AI Infrastructure Router",
-                        toolBadge = aiInfrastructureRouter.state.value.lastUsedBackendBadge
+        val lower = trimmed.lowercase(Locale.ROOT)
+        val cmdToken = lower.substringBefore(' ').trim()
+        val argRaw = trimmed.substringAfter(' ', "").trim()
+        val argLower = argRaw.lowercase(Locale.ROOT)
+
+        when (cmdToken) {
+            "/models" -> {
+                val urlMatch = Regex("(https?://[^\\s]+)").find(argRaw)?.value
+                scope.launch {
+                    val statusMsg = aiInfrastructureRouter.downloadOnDeviceModel(urlMatch)
+                    appendChatMessage(
+                        LiveChatMessage(
+                            sender = ChatSender.AGENT,
+                            text = statusMsg,
+                            subtitle = "Mobile AI Infrastructure Router",
+                            toolBadge = aiInfrastructureRouter.state.value.lastUsedBackendBadge
+                        )
                     )
-                )
-                speakIfEnabled(statusMsg)
+                    speakIfEnabled(statusMsg)
+                }
+                return true
             }
-            return true
-        }
-
-        // 2. Auto-setup / permissions
-        if (lower.contains("권한 원터치") || lower.contains("환경 원터치") || lower.contains("권한 자동 구성") || lower.contains("자가 치유")) {
-            runOneTouchAutoSetup()
-            return true
-        }
-
-        // 2-B. 3-Tier Memory Management & Optimization ("메모리 관리", "메모리 정리", "메모리 상태", "기억 초기화")
-        if (lower.contains("메모리") || lower.contains("기억 정리") || lower.contains("기억 초기화") || lower.contains("컨텍스트 압축")) {
-            if (lower.contains("초기화") || lower.contains("다 지워")) {
-                memoryManager.clearAllSemanticMemories()
+            "/setup" -> {
+                runOneTouchAutoSetup()
+                return true
             }
-            runMemoryOptimization()
-            return true
-        }
-
-        // 3. Theme switching (Ahaboard Paper Light vs Carbon Dark)
-        if (lower == "다크 모드" || lower == "다크모드" || lower.contains("다크 모드로") || lower.contains("카본 모드로")) {
-            ObsidianColors.isDark = true
-            val reply = "다크 카본 무채색 모드로 바꿨어요."
-            appendChatMessage(
-                LiveChatMessage(
-                    sender = ChatSender.AGENT,
-                    text = reply,
-                    toolBadge = "CARBON"
-                )
-            )
-            speakIfEnabled(reply)
-            return true
-        }
-        if (lower == "라이트 모드" || lower == "라이트모드" || lower.contains("라이트 모드로") || lower.contains("페이퍼 모드로")) {
-            ObsidianColors.isDark = false
-            val reply = "밝은 페이퍼 무채색 모드로 바꿨어요."
-            appendChatMessage(
-                LiveChatMessage(
-                    sender = ChatSender.AGENT,
-                    text = reply,
-                    toolBadge = "PAPER"
-                )
-            )
-            speakIfEnabled(reply)
-            return true
-        }
-
-        // 4. Explicit Model / AI Router tier switching
-        if (lower.contains("모델") && (lower.contains("바꿔") || lower.contains("변경") || lower.contains("전환") || lower.contains("적재적소") || lower.contains("멀티"))) {
-            val matchedModel: Pair<String, String>? = when {
-                lower.contains("멀티") || lower.contains("적재적소") || lower.contains("자동") || lower.contains("auto") -> {
-                    aiInfrastructureRouter.setPreferredTier(MobileAiRouteTier.AUTO_SMART)
-                    GeminiMultimodalClient.AUTO_MULTI_MODEL to "적재적소 멀티모델 자동 오케스트레이터"
+            "/memory" -> {
+                if (argLower.contains("clear") || argLower.contains("reset") || argLower.contains("초기화")) {
+                    memoryManager.clearAllSemanticMemories()
                 }
-                lower.contains("나노") || lower.contains("nano") || lower.contains("온디바이스") || lower.contains("npu") -> {
-                    aiInfrastructureRouter.setPreferredTier(MobileAiRouteTier.S25_AICORE_NANO)
-                    "gemma-4-26b-a4b-it" to "Galaxy S25 내장 Gemini Nano NPU"
-                }
-                lower.contains("argon") || lower.contains("아곤") -> {
-                    aiInfrastructureRouter.setPreferredTier(MobileAiRouteTier.AUTO_SMART)
-                    "gemini-4-argon" to "Gemini 4 Argon"
-                }
-                lower.contains("opus") || lower.contains("오퍼스") || lower.contains("클로드") -> {
-                    aiInfrastructureRouter.setPreferredTier(MobileAiRouteTier.AUTO_SMART)
-                    "claude-opus-4-6" to "Claude Opus 4.6"
-                }
-                lower.contains("3.8") -> {
-                    aiInfrastructureRouter.setPreferredTier(MobileAiRouteTier.AUTO_SMART)
-                    "gemini-3.8-flash" to "Gemini 3.8 Flash"
-                }
-                lower.contains("3.5") || lower.contains("라이트") || lower.contains("lite") -> {
-                    aiInfrastructureRouter.setPreferredTier(MobileAiRouteTier.AUTO_SMART)
-                    "gemini-3.5-flash-lite" to "Gemini 3.5 Flash-Lite"
-                }
-                lower.contains("cli") || lower.contains("구독") || lower.contains("노트북") -> {
-                    aiInfrastructureRouter.setPreferredTier(MobileAiRouteTier.AUTO_SMART)
-                    "cli-subscription-bridge" to "노트북 CLI 구독 브리지"
-                }
-                else -> null
+                runMemoryOptimization()
+                return true
             }
-
-            if (matchedModel != null) {
-                val (modelId, label) = matchedModel
+            "/theme" -> {
+                return when {
+                    argLower in setOf("dark", "carbon", "다크", "카본") -> {
+                        ObsidianColors.isDark = true
+                        val reply = "다크 카본 무채색 모드로 바꿨어요."
+                        appendChatMessage(
+                            LiveChatMessage(sender = ChatSender.AGENT, text = reply, toolBadge = "CARBON")
+                        )
+                        speakIfEnabled(reply)
+                        true
+                    }
+                    argLower in setOf("light", "paper", "라이트", "페이퍼") -> {
+                        ObsidianColors.isDark = false
+                        val reply = "밝은 페이퍼 무채색 모드로 바꿨어요."
+                        appendChatMessage(
+                            LiveChatMessage(sender = ChatSender.AGENT, text = reply, toolBadge = "PAPER")
+                        )
+                        speakIfEnabled(reply)
+                        true
+                    }
+                    else -> {
+                        ObsidianColors.isDark = !ObsidianColors.isDark
+                        val reply = if (ObsidianColors.isDark) "다크 카본 무채색 모드로 바꿨어요." else "밝은 페이퍼 무채색 모드로 바꿨어요."
+                        appendChatMessage(
+                            LiveChatMessage(
+                                sender = ChatSender.AGENT,
+                                text = reply,
+                                toolBadge = if (ObsidianColors.isDark) "CARBON" else "PAPER"
+                            )
+                        )
+                        speakIfEnabled(reply)
+                        true
+                    }
+                }
+            }
+            "/model" -> {
+                if (argRaw.isBlank()) {
+                    val cur = _config.value.modelName
+                    appendChatMessage(
+                        LiveChatMessage(
+                            sender = ChatSender.AGENT,
+                            text = "현재 선택된 모델은 `$cur` 입니다. `/model gemini-2.5-flash`, `/model auto`, `/model cli` 형식으로 변경할 수 있어요.",
+                            toolBadge = "MODEL"
+                        )
+                    )
+                    return true
+                }
+                val (modelId, label) = when {
+                    argLower in setOf("auto", "multi", "자동", "멀티") -> {
+                        aiInfrastructureRouter.setPreferredTier(MobileAiRouteTier.AUTO_SMART)
+                        GeminiMultimodalClient.AUTO_MULTI_MODEL to "멀티모델 자동 라우팅"
+                    }
+                    argLower in setOf("nano", "npu", "ondevice", "온디바이스") -> {
+                        aiInfrastructureRouter.setPreferredTier(MobileAiRouteTier.S25_AICORE_NANO)
+                        "gemma-4-26b-a4b-it" to "온디바이스 Gemini Nano NPU"
+                    }
+                    argLower in setOf("cli", "bridge", "노트북", "구독") -> {
+                        aiInfrastructureRouter.setPreferredTier(MobileAiRouteTier.AUTO_SMART)
+                        "cli-subscription-bridge" to "노트북 CLI 구독 브리지"
+                    }
+                    else -> {
+                        aiInfrastructureRouter.setPreferredTier(MobileAiRouteTier.AUTO_SMART)
+                        val normalized = GeminiMultimodalClient.normalize2026ModelName(argRaw)
+                        normalized to normalized
+                    }
+                }
                 updateConfig(modelName = modelId)
-                val reply = "네, 추론 엔진을 $label 모드로 전환했어요."
+                val reply = "추론 모델을 `$label` 모드로 전환했어요."
                 appendChatMessage(
                     LiveChatMessage(
                         sender = ChatSender.AGENT,
                         text = reply,
-                        toolBadge = "AUTO-MULTI-MODEL"
+                        toolBadge = "MODEL"
                     )
                 )
                 speakIfEnabled(reply)
                 return true
             }
+            else -> return false
+        }
+    }
+
+    private fun resolveCliBridgeToken(cfg: AgentEngineConfig = _config.value): String {
+        return cfg.bridgeToken.trim().ifBlank {
+            runCatching { System.getenv("HANSON_CLI_BRIDGE_TOKEN") }.getOrNull()?.trim().orEmpty()
+        }
+    }
+
+    private fun canonicalizeToolName(rawName: String): String = when (rawName.trim().lowercase(Locale.ROOT)) {
+        "open_url" -> "open_link"
+        "wait" -> "wait_for_delay"
+        else -> rawName.trim()
+    }
+
+    internal fun isExplicitCraftAnythingRequest(gLower: String): Boolean {
+        if (gLower.contains("마인크래프트") || gLower.contains("스타크래프트") || gLower.contains("워크래프트") ||
+            gLower.contains("minecraft") || gLower.contains("starcraft") || gLower.contains("warcraft")
+        ) {
+            return false
+        }
+        return gLower.contains("craft-anything") ||
+            gLower.contains("craft anything") ||
+            gLower.contains("크래프트 애니씽") ||
+            gLower.contains("클린룸") ||
+            gLower.contains("리버스 엔지니어링") ||
+            gLower.contains("apk 구조 분석") ||
+            gLower.contains("앱 구조 분석") ||
+            gLower.contains("보드로 만들어")
+    }
+
+    /**
+     * Classifies whether a pure [pureUserGoal] is a knowledge / stock-price / news / weather /
+     * web-search / conversational Q&A that should be answered directly via
+     * [GeminiMultimodalClient.answerTextOrGroundedWebQuery] with ZERO accessibility dumps,
+     * ZERO self-screenshots of Hanson's UI, and ZERO DuckDuckGo HTML scraping.
+     */
+    internal fun isPureTextOrGroundedWebQuery(pureUserGoal: String): Boolean {
+        val g = pureUserGoal.trim()
+        if (g.isEmpty()) return false
+        val gLower = g.lowercase(Locale.ROOT)
+
+        // 1. Slash commands, @mentions, or canvas JS error self-correction payloads
+        if (g.startsWith("/") ||
+            g.contains("[CANVAS_JS_ERROR]") ||
+            Regex("(?:^|\\s)@[a-zA-Z0-9_:/.-]+").containsMatchIn(g)
+        ) {
+            return false
         }
 
-        return false
+        // 2. Explicit current-screen inspection cues -> needs live screen perception
+        val explicitScreenCues = listOf(
+            "지금 화면", "이 화면", "현재 화면", "화면 봐", "화면 좀", "화면에", "화면을",
+            "화면 캡처", "스크린샷", "방금 화면", "보고 있는 화면", "화면 설명", "화면 브리핑",
+            "on screen", "this screen", "current screen", "screenshot"
+        )
+        if (explicitScreenCues.any { gLower.contains(it) }) {
+            return false
+        }
+
+        // 3. Single-word navigation & explicit UI gesture/input imperatives
+        val normalizedWord = gLower.trimEnd('.', '!', '~', ' ')
+        if (normalizedWord in setOf("뒤로", "뒤로가기", "홈", "홈으로", "back", "home", "recents")) {
+            return false
+        }
+        val explicitGuiActionCues = listOf(
+            "눌러", "클릭", "탭해", "탭 해", "터치해", "터치 해", "길게 눌러",
+            "스크롤", "스와이프", "드래그", "끌어서", "끌어다", "슬라이더",
+            "한 칸 내려", "위로 올려", "아래로 내려", "밑으로 내려", "내려줘", "올려줘",
+            "입력해", "쳐줘", "검색창에", "선택해", "체크해", "뒤로 가", "뒤로가", "홈으로 가"
+        )
+        if (explicitGuiActionCues.any { gLower.contains(it) }) {
+            return false
+        }
+
+        // 4. Explicit app-launch / app-switch / in-app interactive verbs
+        val explicitAppLaunchOrControlCues = listOf(
+            "열어줘", "열어 줘", "열어주세요", "열어봐", "열어서", "열고 ",
+            "실행해", "실행 해", "실행시켜", "켜줘", "켜 줘", "켜서", "들어가",
+            "띄워줘", "띄워 줘", "닫아줘", "닫아 줘", "종료해", "앱으로", "앱 열", "앱 켜",
+            "launch ", "open app"
+        )
+        if (explicitAppLaunchOrControlCues.any { gLower.contains(it) }) {
+            return false
+        }
+        if (Regex("(?:^|\\s)(?:open|launch)\\s+[a-z0-9가-힣._-]+").containsMatchIn(gLower)) {
+            return false
+        }
+        val inAppTargetingRegex = Regex(
+            "(?:유튜브|youtube|카카오톡|카톡|카카오맵|카카오택시|카카오t|배달의민족|배민|쿠팡이츠|쿠팡|요기요|당근마켓|당근|네이버지도|네이버카페|네이버|토스|인스타그램|인스타|크롬|chrome|텔레그램|슬랙|디스코드|퍼플렉시티|perplexity|챗지피티|chatgpt|빅스비|bixby|갤러리|카메라|시계|설정)\\s*(?:앱)?\\s*(?:에서|로|을|를)\\s*(?:검색|찾아|틀어|재생|주문|예약|결제|송금|이체|보내|열어|켜|실행|보여|확인|가줘|가자|이동)"
+        )
+        if (inAppTargetingRegex.containsMatchIn(gLower)) {
+            return false
+        }
+
+        // 5. External communication / financial / transactional imperatives on device
+        val transactionalOrCommCues = listOf(
+            "보내줘", "보내 줘", "전송해", "전송 해", "답장해", "답장 해",
+            "문자 보내", "카톡 보내", "전화 걸", "전화해", "전화 해", "통화해",
+            "송금해", "송금 해", "이체해", "이체 해", "주문해", "주문 해", "예약해", "예약 해", "결제해", "결제 해"
+        )
+        if (transactionalOrCommCues.any { gLower.contains(it) }) {
+            return false
+        }
+
+        // 6. Strict numeric alarm/timer & on-device OS/personal data commands
+        if (IntentDecomposerAndRouter.decompose(rawPrompt = g, snapshot = null).fastDecision != null) {
+            return false
+        }
+        val osAndDeviceCues = listOf(
+            "알람 맞춰", "알람 설정", "알람 걸", "타이머 맞춰", "타이머 설정", "타이머 시작",
+            "화면 밝기", "밝기 높", "밝기 낮", "밝기 줄", "밝기 올", "밝기 최", "밝기 설정", "밝기 맞춰",
+            "볼륨", "음량", "소리 줄", "소리 키", "소리 크", "소리 작", "소리 안나", "소리 최대", "음소거",
+            "방해금지", "손전등", "플래시", "후레쉬", "진동 모드", "무음 모드", "무음으로", "벨소리 모드",
+            "와이파이 켜", "와이파이 꺼", "와이파이 설정", "블루투스 켜", "블루투스 꺼", "블루투스 설정",
+            "블루투스 기기", "주변 기기", "스피커폰", "노트북으로",
+            "내 폰에", "설치된 앱", "깔린 앱", "깔린 게임", "내 앱",
+            "알림 확인", "알림 요약", "알림 왔", "알림 보여", "알림 읽어", "알림 오면", "카톡 왔어", "카톡 요약",
+            "연락처", "전화번호 찾아", "전화번호 검색",
+            "내 일정", "오늘 일정", "내일 일정", "캘린더", "일정 등록", "일정 추가", "일정 확인", "일정 알려",
+            "메모 저장", "메모 읽어", "메모 확인", "노트에 저장", "노트 읽어", "클립보드",
+            "감시 규칙", "워처 등록", "무슨 작업 중", "병렬 상태", "배터리 얼마나"
+        )
+        if (osAndDeviceCues.any { gLower.contains(it) }) {
+            return false
+        }
+
+        // 7. Explicit in-app media playback, code canvas, visual/3D/MP4/GIF generation, or explicit clean-room APK analysis
+        if (AgentMediaFileEngine.containsYouTubeUrlOrInAppRequest(g)) {
+            return false
+        }
+        if ((gLower.contains("영상") || gLower.contains("뮤비") || gLower.contains("노래")) &&
+            (gLower.contains("틀어") || gLower.contains("재생"))
+        ) {
+            return false
+        }
+        val explicitMediaOrCodeGenCues = listOf(
+            "코드로 그려", "캔버스", "canvas", "svg 차트", "차트 그려", "그래프 그려",
+            "이미지 생성", "그림 그려", "일러스트 그려", "포스터 만들어", "배경화면 생성",
+            "3d 모델", "glb", "gltf", "mp4 생성", "동영상 만들어", "영상 생성", "gif 만들어", "움짤 만들어"
+        )
+        if (explicitMediaOrCodeGenCues.any { gLower.contains(it) }) {
+            return false
+        }
+        if (isExplicitCraftAnythingRequest(gLower)) {
+            return false
+        }
+
+        return true
+    }
+
+    /**
+     * Builds the supplementary system context strictly SEPARATE from `userGoal` (P0-4).
+     * NEVER concatenate bubbles, tips, scratchpad, or vault handles onto `userGoal`!
+     */
+    private fun buildSystemContextBlock(
+        pureUserGoal: String,
+        snapshot: AtomicSnapshot? = null,
+        attachedContext: String = ""
+    ): String = buildString {
+        val bubblesBlock = resolvedMemoryBubbles.formatBubblesForSystemPrompt(resolvedVault)
+        if (bubblesBlock.isNotBlank()) {
+            appendLine(bubblesBlock)
+        }
+        val appTip = snapshot?.let {
+            AppSpecificTipBank.getTipForPackageOrGoal(it.activePackage, pureUserGoal)
+        }.orEmpty()
+        if (appTip.isNotBlank()) {
+            appendLine("[App Tip] $appTip")
+        }
+        val notetakerBlock = resolvedScratchpad.toPromptBlock(maxChars = 420)
+        if (notetakerBlock.isNotBlank()) {
+            appendLine(notetakerBlock)
+        }
+        val vaultHandlesSummary = resolvedVault.listHandles()
+            .joinToString(", ") { "${it.handle}(${it.category.labelKo})" }
+        if (vaultHandlesSummary.isNotBlank()) {
+            appendLine("[Blind Vault Handles Available] $vaultHandlesSummary")
+        }
+        if (attachedContext.isNotBlank()) {
+            appendLine(resolvedVault.redactSensitiveText(attachedContext))
+        }
+    }.trim()
+
+    private fun buildOneTapFixHintKo(errReason: String, cfg: AgentEngineConfig): String {
+        val lower = errReason.lowercase(Locale.ROOT)
+        return when {
+            lower.contains("402") || lower.contains("크레딧") ->
+                "해결 방법: 선불 크레딧이 소진되었어요. 상단 설정에서 무료 Gemini AI Studio API 키(AIza...)를 입력하거나 노트북 CLI 브리지(:18889)로 전환해 주세요."
+            lower.contains("401") || lower.contains("403") || lower.contains("api 키") || lower.contains("형식") ->
+                "해결 방법: 상단 설정에서 유효한 Gemini·Claude·OpenAI API 키를 다시 입력한 뒤 '연결 테스트'를 탭해 주세요."
+            lower.contains("429") || lower.contains("한도") || lower.contains("쿨다운") ->
+                "해결 방법: 요청 한도에 잠시 도달했어요. 약 45초 후 다시 시도하거나 설정에서 `gemini-2.5-flash-lite` 모델로 전환해 주세요."
+            lower.contains("404") || lower.contains("모델") ->
+                "해결 방법: 선택한 모델(`${cfg.modelName}`)이 지원되지 않아요. 설정에서 기본 모델(`gemini-2.5-flash`)로 변경해 주세요."
+            lower.contains("18889") || lower.contains("브리지") || lower.contains("미연결") || lower.contains("설정되지") ->
+                "해결 방법: 상단 설정에서 Gemini API 키(AIza...)를 등록하거나, 노트북 CLI 브리지(:18889 + `adb reverse tcp:18889 tcp:18889`)를 연결한 뒤 다시 시도해 주세요."
+            else ->
+                "해결 방법: 인터넷 연결 및 상단 설정의 API 키/모델 상태를 확인한 뒤 다시 시도해 주세요."
+        }
+    }
+
+    private enum class SafetyGateEvaluationOutcome {
+        PROCEED,
+        STOPPED_OR_DENIED,
+        TAKEOVER_RESUMED_REOBSERVE
+    }
+
+    /**
+     * Centralized mandatory fail-closed safety gate (B3):
+     * 1. Fails CLOSED if [toolName] (after canonical alias mapping) is missing from [ToolSpecRegistry].
+     * 2. Always evaluates [FinancialAndTakeoverGuard.assessBeforeAction] (CAPTCHA/2FA/Secure takeover,
+     *    financial commit, price drift, sensitive vault handle — even when unrestrictedAutonomousMode == true).
+     * 3. Always evaluates [ToolSafetyGate.evaluate].
+     */
+    private suspend fun evaluateMandatorySafetyGates(
+        toolName: String,
+        args: JSONObject,
+        snapshot: AtomicSnapshot?,
+        allowInteractivePrompt: Boolean
+    ): Pair<SafetyGateEvaluationOutcome, String?> {
+        val canonical = canonicalizeToolName(toolName)
+        val spec = ToolSpecRegistry.find(canonical)
+        if (spec == null) {
+            val denyMsg = "등록되지 않은 도구('$toolName')는 보안 정책에 따라 실행이 차단되었어요."
+            logError("Fail-closed safety gate blocked unregistered tool '$toolName'")
+            if (allowInteractivePrompt) {
+                stopRun(denyMsg)
+            }
+            return SafetyGateEvaluationOutcome.STOPPED_OR_DENIED to denyMsg
+        }
+
+        val effectiveSnap = snapshot ?: AtomicSnapshot(
+            screenWidth = 1080,
+            screenHeight = 2340,
+            activePackage = context.packageName,
+            activeWindowTitle = "Hanson Board"
+        )
+        val activeEpoch = currentControlEpoch.get()
+        val consumedSnapshot = consumedExternalApprovalReceipts.toSet()
+        val hsAssessment = FinancialAndTakeoverGuard.assessBeforeAction(
+            toolName = canonical,
+            args = args,
+            snapshot = effectiveSnap,
+            lastApprovedAmount = lastApprovedAmountText,
+            expectedControlEpoch = activeEpoch,
+            consumedReceiptIds = consumedSnapshot
+        )
+        if (hsAssessment.externalApprovalValidated && !hsAssessment.externalApprovalReceiptId.isNullOrBlank()) {
+            consumedExternalApprovalReceipts.add(hsAssessment.externalApprovalReceiptId)
+            resolvedVault.recordAuditEvent(
+                action = "EXTERNAL_APPROVAL_BOUND",
+                handle = args.optString("handle", canonical).ifBlank { canonical },
+                approvedReceiptId = hsAssessment.externalApprovalReceiptId,
+                controlEpoch = hsAssessment.controlEpoch ?: activeEpoch,
+                outcome = "APPROVED"
+            )
+        }
+
+        if (hsAssessment.kind in setOf(
+                HighStakesKind.CAPTCHA_BOT_GATE,
+                HighStakesKind.TWO_FACTOR_OR_BIOMETRIC,
+                HighStakesKind.SECURE_SURFACE_BLOCKED
+            )
+        ) {
+            if (!allowInteractivePrompt) {
+                val msg = "보안/본인확인 화면(${hsAssessment.kind.name})이 감지되어 백그라운드 실행을 차단했어요. 직접 확인해 주세요."
+                return SafetyGateEvaluationOutcome.STOPPED_OR_DENIED to msg
+            }
+            val tkDeferred = CompletableDeferred<Boolean>()
+            takeoverDeferred = tkDeferred
+            val takeoverState = HumanTakeoverState(
+                kind = hsAssessment.kind,
+                titleKo = hsAssessment.targetLabel.ifBlank { "사용자 직접 인증 필요" },
+                reasonKo = hsAssessment.reasonKo,
+                activePackage = effectiveSnap.activePackage
+            )
+            _currentSession.update {
+                it.copy(
+                    status = AgentRunStatus.AWAITING_TAKEOVER,
+                    pendingTakeover = takeoverState
+                )
+            }
+            appendChatMessage(
+                LiveChatMessage(
+                    sender = ChatSender.AGENT,
+                    text = hsAssessment.reasonKo,
+                    subtitle = "Non-Bypass Human Takeover",
+                    toolBadge = "HUMAN TAKEOVER"
+                )
+            )
+            speakIfEnabled(hsAssessment.reasonKo)
+            FloatingHudService.updateHudStatus("사용자 직접 확인 대기", takeoverState.titleKo.take(28), true)
+            syncSessionStoreStatus("TAKEOVER", takeoverState.titleKo.take(60), hasPendingApproval = true)
+            val completedByHuman = tkDeferred.await()
+            takeoverDeferred = null
+            _currentSession.update {
+                it.copy(
+                    status = if (completedByHuman) AgentRunStatus.OBSERVING else AgentRunStatus.STOPPED,
+                    pendingTakeover = null
+                )
+            }
+            if (!completedByHuman) {
+                val cancelMsg = "사용자 직접 확인 단계에서 작업을 취소했어요."
+                stopRun(cancelMsg)
+                return SafetyGateEvaluationOutcome.STOPPED_OR_DENIED to cancelMsg
+            }
+            loopBreaker.reset()
+            return SafetyGateEvaluationOutcome.TAKEOVER_RESUMED_REOBSERVE to null
+        }
+
+        // Mandatory Financial / Price-Drift or Sensitive Vault Handle approval (EVEN when unrestrictedAutonomousMode == true!)
+        val sensitiveVaultSummary = if (canonical == "vault_blind_inject") {
+            val handleArg = args.optString("handle", "").trim()
+            resolvedVault.getHandleSummary(handleArg)?.takeIf { it.category.alwaysRequireApproval }
+        } else {
+            null
+        }
+        val sensitiveVaultNeedsApproval = sensitiveVaultSummary != null && !hsAssessment.externalApprovalValidated
+
+        if (hsAssessment.kind == HighStakesKind.FINANCIAL_COMMIT ||
+            hsAssessment.kind == HighStakesKind.PRICE_DRIFT_ALERT ||
+            sensitiveVaultNeedsApproval
+        ) {
+            val reason = sensitiveVaultSummary?.let { s ->
+                "[민감 볼트(${s.category.labelKo}) 주입 승인] ${s.handle} (${s.label}) 값을 현재 입력란에 안전 주입할까요?"
+            } ?: hsAssessment.reasonKo
+
+            if (!allowInteractivePrompt) {
+                val msg = "고위험 결제·민감 볼트 작업은 백그라운드에서 자동 실행할 수 없어요: $reason"
+                return SafetyGateEvaluationOutcome.STOPPED_OR_DENIED to msg
+            }
+
+            val deferred = CompletableDeferred<Boolean>()
+            approvalDeferred = deferred
+            lastBoundApprovalReceiptId = null
+            lastBoundControlEpoch = null
+            _currentSession.update {
+                it.copy(
+                    status = AgentRunStatus.AWAITING_APPROVAL,
+                    pendingApproval = PendingApprovalRequest(
+                        toolSpec = spec,
+                        args = args,
+                        reasonKo = reason,
+                        isHighStakesFinancial = hsAssessment.kind != HighStakesKind.NONE,
+                        detectedPriceText = hsAssessment.detectedAmountText.ifBlank { null },
+                        priceDriftNoticeKo = if (hsAssessment.kind == HighStakesKind.PRICE_DRIFT_ALERT) {
+                            "${hsAssessment.previousApprovedAmount} → ${hsAssessment.detectedAmountText}"
+                        } else null,
+                        targetAppOrMerchant = hsAssessment.merchantOrApp.ifBlank { null },
+                        controlEpoch = activeEpoch,
+                        externalApprovalReceiptId = hsAssessment.externalApprovalReceiptId
+                    )
+                )
+            }
+            appendChatMessage(
+                LiveChatMessage(
+                    sender = ChatSender.AGENT,
+                    text = "$reason 승인 버튼을 누르거나 '승인'/'네'라고 정확히 답하시면 실행할게요.",
+                    toolBadge = if (hsAssessment.kind == HighStakesKind.PRICE_DRIFT_ALERT) "PRICE DRIFT" else "고위험 승인"
+                )
+            )
+            speakIfEnabled(reason)
+            FloatingHudService.updateHudStatus("고위험 승인 대기", reason.take(28), true)
+            FloatingHudService.updateApprovalPrompt(true, reason)
+            syncSessionStoreStatus("APPROVAL", reason.take(60), hasPendingApproval = true)
+            val approved = deferred.await()
+            approvalDeferred = null
+            FloatingHudService.updateApprovalPrompt(false)
+            syncSessionStoreStatus(if (approved) "ACTING" else "STOPPED", spec.name, hasPendingApproval = false)
+            _currentSession.update { it.copy(pendingApproval = null) }
+            if (!approved) {
+                val rejectMsg = "고위험 결제·민감 작업 승인을 거절하여 실행하지 않았어요."
+                stopRun(rejectMsg)
+                return SafetyGateEvaluationOutcome.STOPPED_OR_DENIED to rejectMsg
+            }
+            if (hsAssessment.detectedAmountText.isNotBlank()) {
+                lastApprovedAmountText = hsAssessment.detectedAmountText
+            }
+            lastBoundApprovalReceiptId?.let { boundId ->
+                args.put("external_approval_receipt_id", boundId)
+            }
+            lastBoundControlEpoch?.let { boundEpoch ->
+                args.put("control_epoch", boundEpoch)
+            }
+            return SafetyGateEvaluationOutcome.PROCEED to null
+        }
+
+        // Standard ToolSafetyGate governance check
+        when (val gate = ToolSafetyGate.evaluate(spec, args, permissionHub)) {
+            is SafetyGateDecision.Allow -> return SafetyGateEvaluationOutcome.PROCEED to null
+            is SafetyGateDecision.Deny -> {
+                val msg = "보안 설정으로 인해 '${spec.name}' 작업이 제한되어 있어요. 권한 설정을 확인해 주세요."
+                if (allowInteractivePrompt) {
+                    stopRun(msg)
+                }
+                return SafetyGateEvaluationOutcome.STOPPED_OR_DENIED to msg
+            }
+            is SafetyGateDecision.AskUser -> {
+                if (!allowInteractivePrompt) {
+                    val msg = "${gate.reasonKo}\n백그라운드 자동 실행을 중단했어요. 포그라운드에서 승인 후 실행해 주세요."
+                    return SafetyGateEvaluationOutcome.STOPPED_OR_DENIED to msg
+                }
+                val deferred = CompletableDeferred<Boolean>()
+                approvalDeferred = deferred
+                _currentSession.update {
+                    it.copy(
+                        status = AgentRunStatus.AWAITING_APPROVAL,
+                        pendingApproval = PendingApprovalRequest(
+                            toolSpec = spec,
+                            args = args,
+                            reasonKo = gate.reasonKo
+                        )
+                    )
+                }
+                val askMsg = "${gate.reasonKo} 진행할까요? 승인 버튼을 누르거나 '네' 또는 '승인'이라고 답하시면 실행할게요."
+                appendChatMessage(
+                    LiveChatMessage(
+                        sender = ChatSender.AGENT,
+                        text = askMsg,
+                        toolBadge = "승인 확인"
+                    )
+                )
+                speakIfEnabled(askMsg)
+                FloatingHudService.updateHudStatus("승인 대기 중", "'승인' 또는 버튼 선택", true)
+                FloatingHudService.updateApprovalPrompt(true, gate.reasonKo)
+                syncSessionStoreStatus("APPROVAL", gate.reasonKo.take(60), hasPendingApproval = true)
+                val approved = deferred.await()
+                approvalDeferred = null
+                FloatingHudService.updateApprovalPrompt(false)
+                syncSessionStoreStatus(if (approved) "ACTING" else "STOPPED", spec.name, hasPendingApproval = false)
+                _currentSession.update { it.copy(pendingApproval = null) }
+                if (!approved) {
+                    val cancelMsg = "네, 실행하지 않고 취소했어요."
+                    stopRun(cancelMsg)
+                    return SafetyGateEvaluationOutcome.STOPPED_OR_DENIED to cancelMsg
+                }
+                return SafetyGateEvaluationOutcome.PROCEED to null
+            }
+        }
+    }
+
+    /**
+     * Executes a validated tool call while ensuring `browser_use` receives live API credentials/model/bridgeToken
+     * for 2026 native web grounding without ever embedding secrets inside `args`.
+     */
+    private fun executeToolWithConfig(
+        toolName: String,
+        args: JSONObject,
+        snapshot: AtomicSnapshot?,
+        cfg: AgentEngineConfig
+    ): ToolExecutionOutcome {
+        val canonical = canonicalizeToolName(toolName)
+        if (canonical == "browser_use") {
+            val rawOutcome = universalNexusEngine.executeMobileBrowserUse(
+                args = args,
+                apiKey = cfg.apiKey,
+                modelName = cfg.modelName,
+                customBaseUrl = cfg.customBaseUrl,
+                bridgeToken = resolveCliBridgeToken(cfg)
+            )
+            val redactedText = resolvedVault.redactSensitiveText(rawOutcome.outputText)
+            val redactedReceipt = rawOutcome.receipt?.let { r ->
+                r.copy(
+                    summaryKo = resolvedVault.redactSensitiveText(r.summaryKo),
+                    detailKo = resolvedVault.redactSensitiveText(r.detailKo),
+                    undoHintKo = resolvedVault.redactSensitiveText(r.undoHintKo)
+                )
+            }
+            return rawOutcome.copy(outputText = redactedText, receipt = redactedReceipt)
+        }
+        return toolHarness.execute(canonical, args, snapshot)
+    }
+
+    private suspend fun executeBackgroundToolSafely(
+        toolName: String,
+        args: JSONObject,
+        snapshot: AtomicSnapshot?,
+        cfg: AgentEngineConfig
+    ): ToolExecutionOutcome {
+        val (gateOutcome, denyReason) = evaluateMandatorySafetyGates(
+            toolName = toolName,
+            args = args,
+            snapshot = snapshot,
+            allowInteractivePrompt = false
+        )
+        if (gateOutcome != SafetyGateEvaluationOutcome.PROCEED) {
+            return ToolExecutionOutcome(
+                succeeded = false,
+                outputText = denyReason ?: "보안 정책에 따라 '$toolName' 백그라운드 실행이 차단되었어요."
+            )
+        }
+        return executeToolWithConfig(toolName, args, snapshot, cfg)
+    }
+
+    /**
+     * A1 / C2 Text-First & Native Grounded Web Q&A fast lane.
+     * ZERO accessibility dumps, ZERO self-screenshots of Hanson's UI, ZERO DuckDuckGo HTML scraping.
+     */
+    private fun launchTextFirstGroundedQa(
+        pureUserGoal: String,
+        attachedContext: String = ""
+    ) {
+        val cfg = _config.value
+        val safeGoal = resolvedVault.redactSensitiveText(pureUserGoal)
+        val systemContext = buildSystemContextBlock(
+            pureUserGoal = safeGoal,
+            snapshot = null,
+            attachedContext = attachedContext
+        )
+        val recentChatHistory: List<Pair<String, String>> = _chatMessages.value
+            .filter { it.sender == ChatSender.USER || it.sender == ChatSender.AGENT }
+            .takeLast(12)
+            .map { m ->
+                val role = if (m.sender == ChatSender.USER) "user" else "model"
+                role to m.text
+            }
+        val bridgeToken = resolveCliBridgeToken(cfg)
+
+        val isGuiBusy = activeJob?.isActive == true &&
+            (_currentSession.value.status == AgentRunStatus.OBSERVING ||
+                _currentSession.value.status == AgentRunStatus.THINKING ||
+                _currentSession.value.status == AgentRunStatus.ACTING)
+
+        val taskId = "qa_${System.currentTimeMillis()}_${(100..999).random()}"
+        registerParallelSlot(ParallelTaskSlot(taskId = taskId, lane = "QA", goal = pureUserGoal))
+
+        if (!isGuiBusy) {
+            activeJob?.cancel()
+            val qaSession = AgentRunSession(
+                goal = pureUserGoal,
+                status = AgentRunStatus.THINKING,
+                maxIterations = 1,
+                subGoals = listOf(SubGoalItem("질문 분석 및 실시간 웹 검색 응답 생성", SubGoalStatus.IN_PROGRESS))
+            )
+            _currentSession.value = qaSession
+        }
+
+        val qaJob = scope.launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
+            try {
+                val answer = multimodalClient.answerTextOrGroundedWebQuery(
+                    userGoal = safeGoal,
+                    systemContext = systemContext,
+                    apiKey = cfg.apiKey,
+                    modelName = cfg.modelName,
+                    customBaseUrl = cfg.customBaseUrl,
+                    chatHistory = recentChatHistory,
+                    enableWebSearch = true,
+                    bridgeToken = bridgeToken
+                )
+
+                if (answer.succeeded && answer.answerKo.isNotBlank()) {
+                    _lastCloudApiError.value = null
+                    aiInfrastructureRouter.clearLastCloudApiError()
+
+                    val verifiedCitations = answer.citations
+                        .filter { (_, uri) -> uri.trim().startsWith("https://", ignoreCase = true) }
+                        .distinctBy { (_, uri) -> uri.trim() }
+                        .take(8)
+
+                    val combinedWithCitations = buildString {
+                        append(answer.answerKo.trim())
+                        if (verifiedCitations.isNotEmpty()) {
+                            appendLine()
+                            appendLine()
+                            appendLine("출처:")
+                            verifiedCitations.forEach { (title, uri) ->
+                                val safeTitle = title
+                                    .replace("[", "(")
+                                    .replace("]", ")")
+                                    .replace("\n", " ")
+                                    .trim()
+                                    .ifBlank { uri.trim() }
+                                appendLine("- [$safeTitle](${uri.trim()})")
+                            }
+                        }
+                    }.trim()
+
+                    val badge = answer.providerBadge.ifBlank { "GEMINI-WEB" }
+                    val extractedInlineCitations = HumanSummaryAndCardBuilder.extractVerifiedHttpsCitations(combinedWithCitations)
+                    val totalCitations = maxOf(verifiedCitations.size, extractedInlineCitations.size)
+                    val rawAgentMsg = LiveChatMessage(
+                        sender = ChatSender.AGENT,
+                        text = combinedWithCitations,
+                        subtitle = if (totalCitations > 0) "실시간 웹 검색 · 출처 ${totalCitations}건" else "텍스트 AI 응답",
+                        toolBadge = badge,
+                        succeeded = true
+                    )
+                    val formattedMsg = if (totalCitations > 0) {
+                        HumanSummaryAndCardBuilder.transformGroundedWebResponse(
+                            msg = rawAgentMsg,
+                            cleanedRaw = combinedWithCitations,
+                            specialistRoleKo = "실시간 네이티브 웹 그라운딩 Q&A"
+                        )
+                    } else {
+                        rawAgentMsg
+                    }
+
+                    if (!isGuiBusy) {
+                        _currentSession.update { prev ->
+                            val completed = prev.copy(
+                                status = AgentRunStatus.COMPLETED,
+                                subGoals = prev.subGoals.map { it.copy(status = SubGoalStatus.COMPLETED) },
+                                finalSummary = formattedMsg.text,
+                                finishedAtMs = System.currentTimeMillis()
+                            )
+                            archiveSession(completed)
+                            completed
+                        }
+                        syncSessionStoreStatus("DONE", formattedMsg.text.take(80), hasPendingApproval = false)
+                    }
+                    appendChatMessage(formattedMsg)
+                    speakIfEnabled(formattedMsg.text)
+                } else {
+                    val errReason = answer.errorReason?.takeIf { it.isNotBlank() }
+                        ?: GeminiMultimodalClient.lastCloudApiErrorReason?.takeIf { it.isNotBlank() }
+                        ?: "AI API 키 또는 노트북 CLI 브리지(:18889)가 연결되지 않았습니다."
+                    _lastCloudApiError.value = errReason
+                    aiInfrastructureRouter.recordCloudApiError(errReason, badge = "AI 연결 오류")
+
+                    val fixHint = buildOneTapFixHintKo(errReason, cfg)
+                    val honestErrorText = buildString {
+                        appendLine("AI 응답을 가져오지 못했어요.")
+                        appendLine("원인: $errReason")
+                        append(fixHint)
+                    }.trim()
+
+                    if (!isGuiBusy) {
+                        _currentSession.update { prev ->
+                            val failed = prev.copy(
+                                status = AgentRunStatus.ERROR,
+                                finalSummary = honestErrorText,
+                                finishedAtMs = System.currentTimeMillis()
+                            )
+                            archiveSession(failed)
+                            failed
+                        }
+                        syncSessionStoreStatus("ERROR", errReason.take(80), hasPendingApproval = false)
+                    }
+                    appendChatMessage(
+                        LiveChatMessage(
+                            sender = ChatSender.AGENT,
+                            text = honestErrorText,
+                            subtitle = "AI 연결 오류 · 설정 또는 브리지 확인 필요",
+                            toolBadge = "AI 연결 오류",
+                            succeeded = false
+                        )
+                    )
+                    speakIfEnabled("AI 연결 오류가 발생했어요. 설정에서 API 키 또는 브리지 연결을 확인해 주세요.")
+                }
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                val errReason = "AI 요청 처리 중 예외가 발생했습니다: ${t.message?.take(120) ?: t.javaClass.simpleName}"
+                logError(errReason, t)
+                _lastCloudApiError.value = errReason
+                aiInfrastructureRouter.recordCloudApiError(errReason, badge = "AI 연결 오류")
+                if (!isGuiBusy) {
+                    _currentSession.update { prev ->
+                        val failed = prev.copy(
+                            status = AgentRunStatus.ERROR,
+                            finalSummary = errReason,
+                            finishedAtMs = System.currentTimeMillis()
+                        )
+                        archiveSession(failed)
+                        failed
+                    }
+                    syncSessionStoreStatus("ERROR", errReason.take(80), hasPendingApproval = false)
+                }
+                appendChatMessage(
+                    LiveChatMessage(
+                        sender = ChatSender.AGENT,
+                        text = "AI 응답 처리 중 오류가 발생했어요.\n원인: $errReason",
+                        subtitle = "AI 실행 예외",
+                        toolBadge = "AI 연결 오류",
+                        succeeded = false
+                    )
+                )
+            } finally {
+                concurrentBackgroundJobs.remove(taskId)
+                unregisterParallelSlot(taskId)
+                if (!isGuiBusy) {
+                    val curStatus = _currentSession.value.status
+                    if (curStatus == AgentRunStatus.THINKING || curStatus == AgentRunStatus.OBSERVING || curStatus == AgentRunStatus.ACTING) {
+                        _currentSession.update {
+                            it.copy(status = AgentRunStatus.STOPPED, finishedAtMs = System.currentTimeMillis())
+                        }
+                    }
+                    val nextQueuedGui = pendingGuiGoals.poll()
+                    if (!nextQueuedGui.isNullOrBlank()) {
+                        startGuiLaneLoop(nextQueuedGui, pendingGuiAttachedContexts.remove(nextQueuedGui).orEmpty())
+                    }
+                }
+            }
+        }
+
+        if (isGuiBusy) {
+            concurrentBackgroundJobs[taskId] = qaJob
+        } else {
+            activeJob = qaJob
+        }
+        qaJob.start()
     }
 
     fun runMemoryOptimization() {
@@ -726,17 +1580,19 @@ class MobileUseAgentEngine @JvmOverloads constructor(
         }
 
         // Never hijack foreground multi-step app launch / search / click intents into the headless background lane!
-        val hasTargetExternalApp = IntentDecomposerAndRouter.resolveTargetAppFromPrompt(goal) != null
-        val hasForegroundActionVerb = gLower.contains("열어서") || gLower.contains("켜서") ||
-            gLower.contains("검색") || gLower.contains("클릭") || gLower.contains("눌러") ||
-            gLower.contains("들어가") || gLower.contains("틀어")
-        if (hasTargetExternalApp && hasForegroundActionVerb) {
+        val hasForegroundAppLaunchOrInteract = gLower.contains("열어서") || gLower.contains("열고 ") ||
+            gLower.contains("켜서") || gLower.contains("앱 열") || gLower.contains("앱 켜") ||
+            gLower.contains("클릭") || gLower.contains("눌러") || gLower.contains("들어가") || gLower.contains("틀어")
+        if (hasForegroundAppLaunchOrInteract) {
             return false
         }
 
-        val isGameOrAppInventory = (gLower.contains("게임") || gLower.contains("내 앱") || gLower.contains("설치된 앱") || gLower.contains("깔린 앱") || gLower.contains("깔린 게임")) &&
-            (gLower.contains("찾아") || gLower.contains("뭐 있") || gLower.contains("무슨") || gLower.contains("알려") || gLower.contains("확인") || gLower.contains("목록") || gLower.contains("스캔"))
-        val isCraftBlueprint = gLower.contains("크래프트") || gLower.contains("craft") || gLower.contains("클린룸") || gLower.contains("구조 분석") || gLower.contains("리버스 엔지니어링")
+        val isGameOrAppInventory = (
+            gLower.contains("내 앱") || gLower.contains("설치된 앱") || gLower.contains("깔린 앱") ||
+                gLower.contains("깔린 게임") ||
+                (gLower.contains("게임") && (gLower.contains("깔려") || gLower.contains("깔린") || gLower.contains("설치") || gLower.contains("내 폰") || gLower.contains("폰에")))
+            ) && (gLower.contains("찾아") || gLower.contains("뭐 있") || gLower.contains("무슨") || gLower.contains("알려") || gLower.contains("확인") || gLower.contains("목록") || gLower.contains("스캔"))
+        val isCraftBlueprint = isExplicitCraftAnythingRequest(gLower)
         val isNotifCheckOrReply = gLower.contains("알림") || gLower.contains("답장") || (gLower.contains("카톡") && (gLower.contains("왔어") || gLower.contains("요약")))
         val isScreenOrStatusInquiry = (gLower.contains("화면") && (gLower.contains("뭐") || gLower.contains("설명") || gLower.contains("브리핑"))) ||
             gLower.contains("무슨 작업 중") || gLower.contains("병렬 상태")
@@ -748,29 +1604,40 @@ class MobileUseAgentEngine @JvmOverloads constructor(
         return isGameOrAppInventory || isCraftBlueprint || isNotifCheckOrReply || isDeviceSetting || isScreenOrStatusInquiry || isOmniNexusHeadless
     }
 
-    private fun launchParallelBackgroundTask(bgGoal: String) {
+    private fun launchParallelBackgroundTask(bgGoal: String, attachedContext: String = "") {
         val taskId = "bg_${System.currentTimeMillis()}_${(100..999).random()}"
         val slot = ParallelTaskSlot(taskId = taskId, lane = "BG", goal = bgGoal)
         registerParallelSlot(slot)
 
         val job = scope.launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
             try {
+                val cfg = _config.value
+                val bridgeToken = resolveCliBridgeToken(cfg)
                 val gLower = bgGoal.lowercase(Locale.ROOT).trim()
                 val snapshot = HansonAccessibilityService.instance?.captureSnapshotNow(includeScreenshot = false)
 
-                // Check Universal Omni-Nexus Fast-Path first (Browser-Use, Code Canvas, Image/GIF/MP4/GLB Gen, Cross-Device, Pipelines)
+                // Check Universal Omni-Nexus Fast-Path first (Native Web Grounding, Code Canvas, Image/Media Gen, Cross-Device, Pipelines)
                 val nexusRes = universalNexusEngine.tryExecuteUniversalNexus(
                     prompt = bgGoal,
                     latestSnapshot = snapshot,
-                    apiKey = _config.value.apiKey
+                    apiKey = cfg.apiKey,
+                    modelName = cfg.modelName,
+                    customBaseUrl = cfg.customBaseUrl,
+                    bridgeToken = bridgeToken
                 )
                 if (nexusRes != null && nexusRes.handled) {
+                    if (nexusRes.hasError) {
+                        GeminiMultimodalClient.lastCloudApiErrorReason?.takeIf { it.isNotBlank() }?.let {
+                            _lastCloudApiError.value = it
+                        }
+                    }
                     appendChatMessage(
                         LiveChatMessage(
                             sender = ChatSender.AGENT,
                             text = nexusRes.summaryKo,
                             subtitle = "Universal Omni-Nexus · ${nexusRes.badge}",
                             toolBadge = nexusRes.badge,
+                            succeeded = !nexusRes.hasError,
                             mediaBlock = nexusRes.mediaBlock
                         )
                     )
@@ -782,7 +1649,8 @@ class MobileUseAgentEngine @JvmOverloads constructor(
                 }
 
                 when {
-                    (gLower.contains("게임") || gLower.contains("내 앱") || gLower.contains("설치된 앱") || gLower.contains("깔린")) -> {
+                    (gLower.contains("내 앱") || gLower.contains("설치된 앱") || gLower.contains("깔린") ||
+                        (gLower.contains("게임") && (gLower.contains("깔려") || gLower.contains("깔린") || gLower.contains("설치") || gLower.contains("내 폰") || gLower.contains("폰에")))) -> {
                         val wantsGames = gLower.contains("게임")
                         val report = toolHarness.scanInstalledGamesAndApps(
                             query = "",
@@ -798,7 +1666,7 @@ class MobileUseAgentEngine @JvmOverloads constructor(
                         )
                         speakIfEnabled(report)
                     }
-                    (gLower.contains("크래프트") || gLower.contains("craft") || gLower.contains("클린룸") || gLower.contains("구조 분석") || gLower.contains("리버스 엔지니어링")) -> {
+                    isExplicitCraftAnythingRequest(gLower) -> {
                         val snap = snapshot ?: AtomicSnapshot(
                             screenWidth = 1080,
                             screenHeight = 2340,
@@ -823,10 +1691,11 @@ class MobileUseAgentEngine @JvmOverloads constructor(
                         val replyMsg = bgGoal.substringAfter("\"", "").substringBefore("\"", "")
                             .ifBlank { bgGoal.substringAfter("'", "").substringBefore("'", "") }
                             .ifBlank { bgGoal.replace("답장해줘", "").replace("답장", "").trim() }
-                        val outcome = toolHarness.execute(
+                        val outcome = executeBackgroundToolSafely(
                             toolName = "reply_notification",
                             args = JSONObject().put("target", "").put("message", replyMsg),
-                            latestSnapshot = snapshot
+                            snapshot = snapshot,
+                            cfg = cfg
                         )
                         recordReceipt(outcome.receipt)
                         appendChatMessage(
@@ -834,18 +1703,22 @@ class MobileUseAgentEngine @JvmOverloads constructor(
                                 sender = ChatSender.AGENT,
                                 text = outcome.outputText,
                                 subtitle = "병렬 백그라운드 · RemoteInput",
-                                toolBadge = "병렬완료 · 즉시답장"
+                                toolBadge = if (outcome.succeeded) "병렬완료 · 즉시답장" else "승인/권한 필요",
+                                succeeded = outcome.succeeded
                             )
                         )
                         speakIfEnabled(outcome.outputText)
                     }
                     (gLower.contains("알림") || (gLower.contains("카톡") && (gLower.contains("왔어") || gLower.contains("요약")))) -> {
-                        val outcome = toolHarness.execute(
+                        val outcome = executeBackgroundToolSafely(
                             toolName = "list_notifications",
                             args = JSONObject().put("only_replyable", false).put("limit", 8),
-                            latestSnapshot = snapshot
+                            snapshot = snapshot,
+                            cfg = cfg
                         )
-                        val notifSummary = if (outcome.outputText.contains("없습니다") || outcome.outputText.isBlank()) {
+                        val notifSummary = if (!outcome.succeeded) {
+                            outcome.outputText
+                        } else if (outcome.outputText.contains("없습니다") || outcome.outputText.isBlank()) {
                             "백그라운드에서 확인해 보니 현재 새로 쌓인 알림 세션이 없어요."
                         } else {
                             val lines = outcome.outputText.lines().filter { it.isNotBlank() }.take(4)
@@ -856,7 +1729,8 @@ class MobileUseAgentEngine @JvmOverloads constructor(
                                 sender = ChatSender.AGENT,
                                 text = notifSummary,
                                 subtitle = "병렬 백그라운드 · 알림 브리핑",
-                                toolBadge = "병렬완료 · 알림브리핑"
+                                toolBadge = if (outcome.succeeded) "병렬완료 · 알림브리핑" else "알림 조회 제한",
+                                succeeded = outcome.succeeded
                             )
                         )
                         speakIfEnabled(notifSummary)
@@ -893,14 +1767,15 @@ class MobileUseAgentEngine @JvmOverloads constructor(
                                 JSONObject().put("setting", "volume_media").put("value", num.toString())
                             }
                         }
-                        val outcome = toolHarness.execute("control_device_setting", settingArgs, snapshot)
+                        val outcome = executeBackgroundToolSafely("control_device_setting", settingArgs, snapshot, cfg)
                         recordReceipt(outcome.receipt)
                         appendChatMessage(
                             LiveChatMessage(
                                 sender = ChatSender.AGENT,
                                 text = outcome.outputText,
                                 subtitle = "병렬 백그라운드 · OS Fast-Lane",
-                                toolBadge = "병렬완료 · OS제어"
+                                toolBadge = if (outcome.succeeded) "병렬완료 · OS제어" else "OS 제어 제한",
+                                succeeded = outcome.succeeded
                             )
                         )
                         speakIfEnabled(outcome.outputText)
@@ -908,34 +1783,36 @@ class MobileUseAgentEngine @JvmOverloads constructor(
                     // 5. Headless Contacts / Calendar / Notes / OS CLI / General Background Task Execution
                     gLower.contains("연락처") || gLower.contains("전화번호") -> {
                         val q = bgGoal.replace("연락처", "").replace("전화번호", "").replace("찾아줘", "").replace("찾아", "").replace("알려줘", "").trim()
-                        val outcome = toolHarness.execute("search_contacts", JSONObject().put("query", q), snapshot)
+                        val outcome = executeBackgroundToolSafely("search_contacts", JSONObject().put("query", q), snapshot, cfg)
                         appendChatMessage(
                             LiveChatMessage(
                                 sender = ChatSender.AGENT,
                                 text = outcome.outputText,
                                 subtitle = "병렬 백그라운드 · 연락처 조회",
-                                toolBadge = "병렬완료 · BG연락처"
+                                toolBadge = if (outcome.succeeded) "병렬완료 · BG연락처" else "연락처 조회 제한",
+                                succeeded = outcome.succeeded
                             )
                         )
                         speakIfEnabled(outcome.outputText)
                     }
                     gLower.contains("일정") || gLower.contains("캘린더") -> {
-                        val outcome = toolHarness.execute("manage_calendar", JSONObject().put("action", "list"), snapshot)
+                        val outcome = executeBackgroundToolSafely("manage_calendar", JSONObject().put("action", "list"), snapshot, cfg)
                         appendChatMessage(
                             LiveChatMessage(
                                 sender = ChatSender.AGENT,
                                 text = outcome.outputText,
                                 subtitle = "병렬 백그라운드 · 캘린더 조회",
-                                toolBadge = "병렬완료 · BG캘린더"
+                                toolBadge = if (outcome.succeeded) "병렬완료 · BG캘린더" else "캘린더 조회 제한",
+                                succeeded = outcome.succeeded
                             )
                         )
                         speakIfEnabled(outcome.outputText)
                     }
                     gLower.contains("메모") || gLower.contains("노트") -> {
                         val outcome = if (gLower.contains("저장") || gLower.contains("기억")) {
-                            toolHarness.execute("save_note", JSONObject().put("key", "bg_note").put("content", bgGoal), snapshot)
+                            executeBackgroundToolSafely("save_note", JSONObject().put("key", "bg_note").put("content", bgGoal), snapshot, cfg)
                         } else {
-                            toolHarness.execute("read_note", JSONObject().put("key", ""), snapshot)
+                            executeBackgroundToolSafely("read_note", JSONObject().put("key", ""), snapshot, cfg)
                         }
                         recordReceipt(outcome.receipt)
                         appendChatMessage(
@@ -943,7 +1820,8 @@ class MobileUseAgentEngine @JvmOverloads constructor(
                                 sender = ChatSender.AGENT,
                                 text = outcome.outputText,
                                 subtitle = "병렬 백그라운드 · 메모리 노트",
-                                toolBadge = "병렬완료 · BG노트"
+                                toolBadge = if (outcome.succeeded) "병렬완료 · BG노트" else "노트 접근 제한",
+                                succeeded = outcome.succeeded
                             )
                         )
                         speakIfEnabled(outcome.outputText)
@@ -955,32 +1833,65 @@ class MobileUseAgentEngine @JvmOverloads constructor(
                             activePackage = context.packageName,
                             activeWindowTitle = "Hanson Board"
                         )
-                        val cfg = _config.value
+                        val safeGoal = resolvedVault.redactSensitiveText(bgGoal)
+                        val systemContext = buildSystemContextBlock(
+                            pureUserGoal = safeGoal,
+                            snapshot = snap,
+                            attachedContext = attachedContext
+                        )
                         val decision = aiInfrastructureRouter.routeAndDecide(
                             apiKey = cfg.apiKey,
                             modelName = cfg.modelName,
-                            goal = bgGoal,
+                            userGoal = safeGoal,
                             iteration = 1,
                             snapshot = snap,
                             historySteps = emptyList(),
                             previousPlan = emptyList(),
                             chatHistory = _chatMessages.value,
-                            customBaseUrl = cfg.customBaseUrl
+                            customBaseUrl = cfg.customBaseUrl,
+                            systemContext = systemContext,
+                            bridgeToken = bridgeToken
                         )
+                        val routerState = aiInfrastructureRouter.state.value
+                        _lastCloudApiError.value = routerState.lastCloudApiError
+                        val isCloudError = decision.toolArgs.optBoolean("is_cloud_error", false) || !routerState.lastDecisionSucceeded
+
+                        if (isCloudError) {
+                            val errBadge = decision.toolArgs.optString("error_badge").ifBlank { "AI 연결 오류" }
+                            val errText = decision.toolArgs.optString("question").ifBlank {
+                                decision.spokenReply.ifBlank { "AI 연결 오류로 백그라운드 작업을 완료하지 못했어요." }
+                            }
+                            appendChatMessage(
+                                LiveChatMessage(
+                                    sender = ChatSender.AGENT,
+                                    text = errText,
+                                    subtitle = "병렬 백그라운드 · $errBadge",
+                                    toolBadge = errBadge,
+                                    succeeded = false
+                                )
+                            )
+                            return@launch
+                        }
+
                         val headlessSafeTools = setOf(
                             "list_notifications", "reply_notification", "control_device_setting",
-                            "search_contacts", "manage_calendar", "set_alarm", "save_note", "read_note",
+                            "search_contacts", "manage_calendar", "set_alarm", "set_timer", "save_note", "read_note",
                             "os_cli_exec", "reverse_engineer_app", "learn_app_skill", "render_generative_ui",
                             "browser_use", "cross_device_control", "draw_with_code", "generate_visual_media",
                             "workspace_list", "workspace_read", "workspace_write",
                             "workspace_edit", "workspace_search", "workspace_exec",
                             "vault_list_handles", "watcher_manage", "a2a_negotiate_schedule", "scratchpad_note"
                         )
-                        val resultText = if (decision.toolName in headlessSafeTools ||
-                            (decision.toolName == "manage_app" && decision.toolArgs.optString("action") != "launch")
+                        val canonicalTool = canonicalizeToolName(decision.toolName)
+                        var bgSucceeded = true
+                        var bgStructuredCard: StructuredUiCard? = null
+                        val resultText = if (canonicalTool in headlessSafeTools ||
+                            (canonicalTool == "manage_app" && decision.toolArgs.optString("action") != "launch")
                         ) {
-                            val outcome = toolHarness.execute(decision.toolName, decision.toolArgs, snap)
+                            val outcome = executeBackgroundToolSafely(canonicalTool, decision.toolArgs, snap, cfg)
                             recordReceipt(outcome.receipt)
+                            bgSucceeded = outcome.succeeded
+                            bgStructuredCard = outcome.structuredCard
                             outcome.outputText.ifBlank { decision.spokenReply }
                         } else {
                             decision.spokenReply.ifBlank {
@@ -992,12 +1903,27 @@ class MobileUseAgentEngine @JvmOverloads constructor(
                                 sender = ChatSender.AGENT,
                                 text = resultText,
                                 subtitle = "병렬 백그라운드 (BG Lane)",
-                                toolBadge = "병렬완료 · BG실행"
+                                toolBadge = if (bgSucceeded) "병렬완료 · BG실행" else "BG 실행 제한",
+                                succeeded = bgSucceeded,
+                                structuredCard = bgStructuredCard
                             )
                         )
                         speakIfEnabled(resultText)
                     }
                 }
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                logError("Background parallel task failed", t)
+                appendChatMessage(
+                    LiveChatMessage(
+                        sender = ChatSender.AGENT,
+                        text = "백그라운드 작업 처리 중 오류가 발생했어요: ${t.message?.take(100) ?: t.javaClass.simpleName}",
+                        subtitle = "병렬 백그라운드 예외",
+                        toolBadge = "BG 오류",
+                        succeeded = false
+                    )
+                )
             } finally {
                 concurrentBackgroundJobs.remove(taskId)
                 unregisterParallelSlot(taskId)
@@ -1057,19 +1983,25 @@ class MobileUseAgentEngine @JvmOverloads constructor(
             return
         }
 
-        if (tryHandleExplicitHansonSelfConfig(trimmedGoal)) {
-            return
-        }
-
+        // B3: Fail-closed approval check BEFORE anything else when awaiting user approval.
+        // Default MUST be REJECT; ONLY approve on exact affirmative match; NEVER auto-set alwaysAllowCapability = true!
         if (_currentSession.value.status == AgentRunStatus.AWAITING_APPROVAL && approvalDeferred != null) {
-            val approve = !(lower.contains("아니") || lower.contains("취소") || lower.contains("거절") || lower.contains("마"))
-            resolvePendingApproval(approve, alwaysAllowCapability = approve)
+            val normalizedReply = lower.trim().trimEnd('.', '!', '~', ' ')
+            val approve = STRICT_APPROVAL_REGEX.matches(normalizedReply)
+            resolvePendingApproval(approved = approve, alwaysAllowCapability = false)
             return
         }
 
+        // Fail-closed human takeover resume check
         if (_currentSession.value.status == AgentRunStatus.AWAITING_TAKEOVER && takeoverDeferred != null) {
-            val resume = !(lower.contains("취소") || lower.contains("중단") || lower.contains("그만"))
+            val normalizedReply = lower.trim().trimEnd('.', '!', '~', ' ')
+            val resume = STRICT_TAKEOVER_RESUME_REGEX.matches(normalizedReply)
             resolveHumanTakeover(completedByHuman = resume)
+            return
+        }
+
+        // Explicit /slash self-config commands only (never hijacks natural language)
+        if (tryHandleExplicitHansonSelfConfig(trimmedGoal)) {
             return
         }
 
@@ -1092,9 +2024,15 @@ class MobileUseAgentEngine @JvmOverloads constructor(
             }
         }
 
-        val effectiveWorkMode = parsedInput.resolvedMode ?: _workMode.value
+        val effectiveWorkMode = when {
+            parsedInput.resolvedMode != null -> parsedInput.resolvedMode
+            _uxMode.value == UserExperienceMode.SIMPLE_HUMAN && _workMode.value == AgentWorkMode.PLAN -> AgentWorkMode.AUTO
+            else -> _workMode.value
+        }
         if (parsedInput.slashCommand in listOf("/auto", "/plan", "/build")) {
             setWorkMode(effectiveWorkMode)
+        } else if (_uxMode.value == UserExperienceMode.SIMPLE_HUMAN && _workMode.value == AgentWorkMode.PLAN) {
+            setWorkMode(AgentWorkMode.AUTO)
         }
 
         val baseGoal = if (parsedInput.slashCommand != null || parsedInput.mentions.isNotEmpty()) {
@@ -1108,28 +2046,40 @@ class MobileUseAgentEngine @JvmOverloads constructor(
             return
         }
 
-        val dispatchGoal = if (parsedInput.mentions.isNotEmpty()) {
-            buildContextualPrompt(baseGoal, parsedInput)
+        // P0-4: Keep pureUserGoal strictly clean; place @mention attachments into separate systemContext!
+        val attachedMentionContext = if (parsedInput.mentions.isNotEmpty()) {
+            buildAttachedContextForMentions(parsedInput)
         } else {
-            baseGoal
+            ""
         }
         syncSessionStoreStatus(statusBadge = "RUNNING", previewLine = baseGoal.take(80), hasPendingApproval = false)
 
         // Explicit BACKGROUND dispatch: force all sub-goals into the non-blocking Background Lane!
         if (effectiveLane == ExecutionLaneMode.BACKGROUND) {
-            val subGoals = splitCompoundParallelGoals(dispatchGoal)
-            subGoals.forEach { launchParallelBackgroundTask(it) }
+            val subGoals = splitCompoundParallelGoals(baseGoal)
+            subGoals.forEach { launchParallelBackgroundTask(it, attachedMentionContext) }
             return
         }
 
         // Explicit FOREGROUND dispatch: force into the Foreground GUI Lane!
         if (effectiveLane == ExecutionLaneMode.FOREGROUND) {
-            dispatchToForegroundGuiLane(listOf(dispatchGoal))
+            dispatchToForegroundGuiLane(listOf(baseGoal), attachedMentionContext)
             return
         }
 
-        // AUTO smart lane splitting: fan out compound goals into BG and FG lanes simultaneously!
-        val subGoals = splitCompoundParallelGoals(dispatchGoal)
+        // AUTO smart lane splitting:
+        val subGoals = splitCompoundParallelGoals(baseGoal)
+
+        // A1 / C2 Text-First & Native Grounded Web Q&A Path (ZERO accessibility dumps, ZERO screenshots, ZERO DuckDuckGo!)
+        if (subGoals.size == 1 && parsedInput.mentions.isEmpty()) {
+            val singleGoal = subGoals.first()
+            val (sgLane, sgClean) = extractExplicitLanePrefix(singleGoal)
+            if (sgLane == ExecutionLaneMode.AUTO && isPureTextOrGroundedWebQuery(sgClean)) {
+                launchTextFirstGroundedQa(sgClean)
+                return
+            }
+        }
+
         val bgSubGoals = mutableListOf<String>()
         val guiSubGoals = mutableListOf<String>()
 
@@ -1144,21 +2094,29 @@ class MobileUseAgentEngine @JvmOverloads constructor(
         }
 
         for (bgGoal in bgSubGoals) {
-            launchParallelBackgroundTask(bgGoal)
+            launchParallelBackgroundTask(bgGoal, attachedMentionContext)
         }
 
         if (guiSubGoals.isEmpty()) {
             return
         }
 
-        dispatchToForegroundGuiLane(guiSubGoals)
+        dispatchToForegroundGuiLane(guiSubGoals, attachedMentionContext)
     }
 
-    private fun dispatchToForegroundGuiLane(guiSubGoals: List<String>) {
+    private fun dispatchToForegroundGuiLane(
+        guiSubGoals: List<String>,
+        attachedContext: String = ""
+    ) {
         if (guiSubGoals.isEmpty()) return
         val primaryGuiGoal = guiSubGoals.first()
         val extraGuiGoals = guiSubGoals.drop(1)
-        extraGuiGoals.forEach { pendingGuiGoals.offer(it) }
+        extraGuiGoals.forEach { queued ->
+            if (attachedContext.isNotBlank()) {
+                pendingGuiAttachedContexts[queued] = attachedContext
+            }
+            pendingGuiGoals.offer(queued)
+        }
 
         val isGuiLaneBusy = activeJob?.isActive == true &&
             (_currentSession.value.status == AgentRunStatus.OBSERVING ||
@@ -1183,6 +2141,9 @@ class MobileUseAgentEngine @JvmOverloads constructor(
                 FloatingHudService.updateHudStatus("실시간 방향 수정", primaryGuiGoal.take(30), true)
                 return
             } else {
+                if (attachedContext.isNotBlank()) {
+                    pendingGuiAttachedContexts[primaryGuiGoal] = attachedContext
+                }
                 pendingGuiGoals.offer(primaryGuiGoal)
                 val queueSize = pendingGuiGoals.size
                 appendChatMessage(
@@ -1197,10 +2158,13 @@ class MobileUseAgentEngine @JvmOverloads constructor(
             }
         }
 
-        startGuiLaneLoop(primaryGuiGoal)
+        startGuiLaneLoop(primaryGuiGoal, attachedContext)
     }
 
-    private fun startGuiLaneLoop(guiGoal: String) {
+    private fun startGuiLaneLoop(
+        guiGoal: String,
+        attachedContext: String = ""
+    ) {
         activeJob?.cancel()
         approvalDeferred?.complete(false)
         liveSteeringGoal = null
@@ -1224,14 +2188,63 @@ class MobileUseAgentEngine @JvmOverloads constructor(
 
         activeJob = scope.launch {
             try {
-                FloatingHudService.setTouchPassthrough(true)
-                runLoop(guiGoal, cfg)
+                // Do NOT hold HUD FLAG_NOT_TOUCHABLE across the loop — AgentToolExecutionHarness
+                // toggles FloatingHudService.setPassThroughTemporarily strictly during gesture dispatch
+                // so the emergency Stop button stays touchable throughout the run!
+                runLoop(guiGoal, cfg, attachedContext)
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                val errSummary = "화면 제어 루프 중 예기치 않은 오류가 발생했어요: ${t.message?.take(120) ?: t.javaClass.simpleName}"
+                logError("GUI loop crashed unexpectedly", t)
+                _currentSession.update { prev ->
+                    val failed = prev.copy(
+                        status = AgentRunStatus.ERROR,
+                        pendingApproval = null,
+                        pendingTakeover = null,
+                        finalSummary = errSummary,
+                        finishedAtMs = System.currentTimeMillis()
+                    )
+                    archiveSession(failed)
+                    failed
+                }
+                syncSessionStoreStatus("ERROR", errSummary.take(80), hasPendingApproval = false)
+                appendChatMessage(
+                    LiveChatMessage(
+                        sender = ChatSender.AGENT,
+                        text = errSummary,
+                        subtitle = "GUI 실행 오류",
+                        toolBadge = "실행 오류",
+                        succeeded = false
+                    )
+                )
+                FloatingHudService.updateHudStatus("실행 오류", errSummary.take(28), false)
             } finally {
                 FloatingHudService.setTouchPassthrough(false)
+                FloatingHudService.updateApprovalPrompt(false)
                 unregisterParallelSlot(guiTaskId)
+                // Guarantee busy state NEVER freezes forever if coroutine exited abnormally or via cancellation
+                val curStatus = _currentSession.value.status
+                if (curStatus == AgentRunStatus.OBSERVING ||
+                    curStatus == AgentRunStatus.THINKING ||
+                    curStatus == AgentRunStatus.ACTING ||
+                    curStatus == AgentRunStatus.AWAITING_APPROVAL ||
+                    curStatus == AgentRunStatus.AWAITING_TAKEOVER
+                ) {
+                    _currentSession.update { prev ->
+                        prev.copy(
+                            status = AgentRunStatus.STOPPED,
+                            pendingApproval = null,
+                            pendingTakeover = null,
+                            finishedAtMs = System.currentTimeMillis()
+                        )
+                    }
+                    FloatingHudService.updateHudStatus("소통 및 제어 대기", "대기 중", false)
+                }
                 val nextQueuedGui = pendingGuiGoals.poll()
                 if (!nextQueuedGui.isNullOrBlank()) {
-                    startGuiLaneLoop(nextQueuedGui)
+                    val nextAttached = pendingGuiAttachedContexts.remove(nextQueuedGui).orEmpty()
+                    startGuiLaneLoop(nextQueuedGui, nextAttached)
                 }
             }
         }
@@ -1241,6 +2254,7 @@ class MobileUseAgentEngine @JvmOverloads constructor(
         FloatingHudService.setTouchPassthrough(false)
         FloatingHudService.updateApprovalPrompt(false)
         pendingGuiGoals.clear()
+        pendingGuiAttachedContexts.clear()
         concurrentBackgroundJobs.values.forEach { it.cancel() }
         concurrentBackgroundJobs.clear()
         _activeParallelTasks.value = emptyList()
@@ -1386,18 +2400,24 @@ class MobileUseAgentEngine @JvmOverloads constructor(
                 HansonAccessibilityService.instance?.captureSnapshotNow(includeScreenshot = false)
             }.getOrNull()
             val undoArgs = runCatching { JSONObject(target.undoArgsJson) }.getOrDefault(JSONObject())
-            toolHarness.execute(
+            val outcome = executeBackgroundToolSafely(
                 toolName = target.undoToolName,
                 args = undoArgs,
-                latestSnapshot = snap
+                snapshot = snap,
+                cfg = _config.value
             )
-            val confirmKo = "↩ '${target.summaryKo}' 작업을 되돌렸어요."
+            val confirmKo = if (outcome.succeeded) {
+                "↩ '${target.summaryKo}' 작업을 되돌렸어요."
+            } else {
+                "↩ '${target.summaryKo}' 되돌리기가 제한되었어요: ${outcome.outputText}"
+            }
             appendChatMessage(
                 LiveChatMessage(
                     sender = ChatSender.AGENT,
                     text = confirmKo,
                     subtitle = "1-Tap Undo Receipt",
-                    toolBadge = "되돌리기 완료"
+                    toolBadge = if (outcome.succeeded) "되돌리기 완료" else "되돌리기 제한",
+                    succeeded = outcome.succeeded
                 )
             )
             speakIfEnabled(confirmKo)
@@ -1432,8 +2452,13 @@ class MobileUseAgentEngine @JvmOverloads constructor(
         return created
     }
 
-    private suspend fun runLoop(initialGoal: String, cfg: AgentEngineConfig) {
+    private suspend fun runLoop(
+        initialGoal: String,
+        cfg: AgentEngineConfig,
+        attachedContext: String = ""
+    ) {
         val (fallbackW, fallbackH) = HierarchyDumper.getScreenDimensions(context)
+        val bridgeToken = resolveCliBridgeToken(cfg)
         var currentGoal = initialGoal
         var lastSpokenStepText = ""
         loopBreaker.reset()
@@ -1461,9 +2486,8 @@ class MobileUseAgentEngine @JvmOverloads constructor(
             )
 
             // =========================================================================
-            // LAYER 0-REFLEX: ZERO-LATENCY (<30ms) ATOMIC REFLEX & SCREEN ELEMENT DISPATCH
-            // Executes "한칸 내려줘", "밑으로 내려 봐", "뒤로 가", "저 위에 내 잘못 vs 도둑 잘못 영상 클릭해 줘"
-            // IMMEDIATELY without screenshot encoding delay, without pre-action LLM chatter, and without Turn 2 loop!
+            // LAYER 0-REFLEX: STRICT ANCHORED FAST-LANE (single-word external nav / explicit numeric alarm & timer)
+            // Runs mandatory fail-closed FinancialAndTakeoverGuard + ToolSafetyGate BEFORE execution!
             // =========================================================================
             if (iter == 1) {
                 val reflexSnap = fastSnapshot ?: AtomicSnapshot(
@@ -1480,14 +2504,32 @@ class MobileUseAgentEngine @JvmOverloads constructor(
                 )
                 val fastDec = decomposed.fastDecision
                 if (fastDec != null && decomposed.autoCompleteSingleTurn) {
-                    _currentSession.update { it.copy(status = AgentRunStatus.ACTING, subGoals = fastDec.subGoals) }
-                    val outcome = toolHarness.execute(
+                    val (fastGate, _) = evaluateMandatorySafetyGates(
                         toolName = fastDec.toolName,
                         args = fastDec.toolArgs,
-                        latestSnapshot = reflexSnap
+                        snapshot = reflexSnap,
+                        allowInteractivePrompt = true
+                    )
+                    if (fastGate == SafetyGateEvaluationOutcome.STOPPED_OR_DENIED) {
+                        return
+                    }
+                    if (fastGate == SafetyGateEvaluationOutcome.TAKEOVER_RESUMED_REOBSERVE) {
+                        continue
+                    }
+
+                    _currentSession.update { it.copy(status = AgentRunStatus.ACTING, subGoals = fastDec.subGoals) }
+                    val outcome = executeToolWithConfig(
+                        toolName = fastDec.toolName,
+                        args = fastDec.toolArgs,
+                        snapshot = reflexSnap,
+                        cfg = cfg
                     )
                     recordReceipt(outcome.receipt)
-                    val conciseSummary = fastDec.spokenReply.ifBlank { outcome.outputText }
+                    val conciseSummary = if (outcome.succeeded) {
+                        fastDec.spokenReply.ifBlank { outcome.outputText }
+                    } else {
+                        outcome.outputText.ifBlank { fastDec.spokenReply }
+                    }
                     val cleanSummary = HumanStepTranslator.sanitizeForHumanDisplay(conciseSummary)
                         .ifBlank { conciseSummary }
                     val stepLog = AgentStepLog(
@@ -1501,10 +2543,9 @@ class MobileUseAgentEngine @JvmOverloads constructor(
                         activePackage = reflexSnap.activePackage,
                         elementCount = reflexSnap.indexedElements.size
                     )
-                    FloatingHudService.setTouchPassthrough(false)
                     _currentSession.update { prev ->
                         val completed = prev.copy(
-                            status = AgentRunStatus.COMPLETED,
+                            status = if (outcome.succeeded) AgentRunStatus.COMPLETED else AgentRunStatus.ERROR,
                             subGoals = fastDec.subGoals.map { it.copy(status = SubGoalStatus.COMPLETED) },
                             steps = prev.steps + stepLog,
                             receipts = if (outcome.receipt != null) prev.receipts + outcome.receipt else prev.receipts,
@@ -1532,6 +2573,7 @@ class MobileUseAgentEngine @JvmOverloads constructor(
                             text = conciseSummary,
                             subtitle = reflexBadge,
                             toolBadge = "${fastDec.toolName} · $reflexBadge",
+                            succeeded = outcome.succeeded,
                             structuredCard = decomposed.structuredCard ?: outcome.structuredCard,
                             mediaBlock = outcome.mediaBlock
                         )
@@ -1551,29 +2593,38 @@ class MobileUseAgentEngine @JvmOverloads constructor(
                 activeWindowTitle = "Hanson Board"
             )
 
+            // P0-4: Estimate complexity strictly on pure currentGoal (never polluted by systemContext/bubbles)
             val taskComplexity = aiInfrastructureRouter.estimateTaskComplexity(currentGoal, baseSnapshot)
             _currentSession.update { it.copy(status = AgentRunStatus.THINKING) }
             FloatingHudService.updateHudStatus("관측 · 추론 [${taskComplexity.name}]", currentGoal.take(28), true)
 
-            val stepStartMs = System.currentTimeMillis()
             val prevSteps = _currentSession.value.steps
 
             // =========================================================================
-            // LAYER 0: UNIVERSAL OMNI-NEXUS (Zero-GUI Teleport, Cross-App Pipe, Browser-Use, Code Canvas, Image Gen, Cross-Device)
+            // LAYER 0: UNIVERSAL OMNI-NEXUS (Zero-GUI Teleport, Cross-App Pipe, Native Web Grounding, Code Canvas, Image Gen, Cross-Device)
             // =========================================================================
             if (iter == 1) {
                 val nexusHit = universalNexusEngine.tryExecuteUniversalNexus(
                     prompt = currentGoal,
                     latestSnapshot = baseSnapshot,
-                    apiKey = cfg.apiKey
+                    apiKey = cfg.apiKey,
+                    modelName = cfg.modelName,
+                    customBaseUrl = cfg.customBaseUrl,
+                    bridgeToken = bridgeToken
                 )
                 if (nexusHit != null && nexusHit.handled) {
+                    if (nexusHit.hasError) {
+                        GeminiMultimodalClient.lastCloudApiErrorReason?.takeIf { it.isNotBlank() }?.let {
+                            _lastCloudApiError.value = it
+                        }
+                    }
                     appendChatMessage(
                         LiveChatMessage(
                             sender = ChatSender.AGENT,
                             text = nexusHit.summaryKo,
                             subtitle = "Universal Omni-Nexus · ${nexusHit.badge}",
                             toolBadge = nexusHit.badge,
+                            succeeded = !nexusHit.hasError,
                             mediaBlock = nexusHit.mediaBlock
                         )
                     )
@@ -1583,10 +2634,9 @@ class MobileUseAgentEngine @JvmOverloads constructor(
                         delay(450L)
                         continue
                     } else {
-                        FloatingHudService.setTouchPassthrough(false)
                         _currentSession.update { prev ->
                             val completed = prev.copy(
-                                status = AgentRunStatus.COMPLETED,
+                                status = if (nexusHit.hasError) AgentRunStatus.ERROR else AgentRunStatus.COMPLETED,
                                 finalSummary = nexusHit.summaryKo,
                                 finishedAtMs = System.currentTimeMillis()
                             )
@@ -1600,24 +2650,12 @@ class MobileUseAgentEngine @JvmOverloads constructor(
             }
 
             // =========================================================================
-            // LAYER 1 & 2: UNIFIED FAST-PATH + SET-OF-MARKS DELIBERATIVE VLM ROUTER
-            // Guarantees stateful turn progression and Set-of-Marks `[index]` visual grounding on every VLM turn.
+            // LAYER 1 & 2: SET-OF-MARKS DELIBERATIVE VLM ROUTER
+            // Guarantees live screenshot + Set-of-Marks `[index]` visual grounding and strict
+            // `userGoal` vs `systemContext` separation on every VLM turn!
             // =========================================================================
-            val instantReflex = multimodalClient.tryInstantConversationalOrScreenFastPath(
-                goal = currentGoal,
-                iteration = iter,
-                snapshot = baseSnapshot,
-                historySteps = prevSteps
-            )
-
-            // Empirical Fix: Whenever deliberative VLM / CLI Bridge routing runs, ALWAYS capture
-            // a live screenshot (`includeScreenshot = true`) so Set-of-Marks `[index]` visual grounding
-            // (`snapshot.visualGroundingBase64`) is delivered even on dense commercial apps (>4 UI nodes)!
-            val snapshot: AtomicSnapshot = if (instantReflex != null) {
-                baseSnapshot
-            } else {
+            val snapshot: AtomicSnapshot =
                 HansonAccessibilityService.instance?.captureSnapshotNow(includeScreenshot = true) ?: baseSnapshot
-            }
 
             // Notetaker cross-app auto-extraction + Proactive Watcher live evaluation
             resolvedScratchpad.observeAndAutoExtract(snapshot, resolvedVault)
@@ -1634,46 +2672,34 @@ class MobileUseAgentEngine @JvmOverloads constructor(
                     )
                 }
             }
-            val notetakerBlock = resolvedScratchpad.toPromptBlock(maxChars = 420)
-            val bubblesBlock = resolvedMemoryBubbles.toPromptContextBlock(resolvedVault)
-            val appTip = AppSpecificTipBank.getTipForPackageOrGoal(snapshot.activePackage, currentGoal)
-            val vaultHandlesSummary = resolvedVault.listHandles().joinToString(", ") { "${it.handle}(${it.category.labelKo})" }
-            val enrichedGoalForRouter = buildString {
-                append(resolvedVault.redactSensitiveText(currentGoal))
-                if (bubblesBlock.isNotBlank()) {
-                    append("\n\n")
-                    append(bubblesBlock)
-                }
-                if (appTip.isNotBlank()) {
-                    append("\n\n[App Tip] ")
-                    append(appTip)
-                }
-                if (notetakerBlock.isNotBlank()) {
-                    append("\n\n")
-                    append(notetakerBlock)
-                }
-                if (vaultHandlesSummary.isNotBlank()) {
-                    append("\n[Blind Vault Handles Available] ")
-                    append(vaultHandlesSummary)
-                }
-            }
 
-            val (rawDecision, backendBadge, actorTier) = if (instantReflex != null) {
-                val badge = if (instantReflex.toolName == "complete_task") "S1-REFLEX" else "S1-FASTPATH"
-                Triple(instantReflex, badge, "S1_REFLEX")
+            // P0-4: Strict userGoal vs systemContext separation (NEVER concatenate bubbles/tips/notes onto userGoal!)
+            val pureSafeGoal = resolvedVault.redactSensitiveText(currentGoal)
+            val systemContext = buildSystemContextBlock(
+                pureUserGoal = pureSafeGoal,
+                snapshot = snapshot,
+                attachedContext = attachedContext
+            )
+
+            val rawDecision = aiInfrastructureRouter.routeAndDecide(
+                apiKey = cfg.apiKey,
+                modelName = cfg.modelName,
+                userGoal = pureSafeGoal,
+                iteration = iter,
+                snapshot = snapshot,
+                historySteps = prevSteps,
+                previousPlan = _currentSession.value.subGoals,
+                chatHistory = _chatMessages.value,
+                customBaseUrl = cfg.customBaseUrl,
+                systemContext = systemContext,
+                bridgeToken = bridgeToken
+            )
+            val routerState = aiInfrastructureRouter.state.value
+            _lastCloudApiError.value = routerState.lastCloudApiError
+            val backendBadge = if (routerState.lastDecisionSucceeded) {
+                "S2-${routerState.lastUsedBackendBadge}"
             } else {
-                val s2Decision = aiInfrastructureRouter.routeAndDecide(
-                    apiKey = cfg.apiKey,
-                    modelName = cfg.modelName,
-                    goal = enrichedGoalForRouter,
-                    iteration = iter,
-                    snapshot = snapshot,
-                    historySteps = prevSteps,
-                    previousPlan = _currentSession.value.subGoals,
-                    chatHistory = _chatMessages.value,
-                    customBaseUrl = cfg.customBaseUrl
-                )
-                Triple(s2Decision, "S2-${aiInfrastructureRouter.state.value.lastUsedBackendBadge}", "S2_DELIBERATIVE")
+                routerState.lastUsedBackendBadge
             }
 
             // Minitap MetaCognitive LoopBreaker: detect stalled repeats & 2-step oscillations and escape cleanly
@@ -1722,8 +2748,6 @@ class MobileUseAgentEngine @JvmOverloads constructor(
 
             // 1. Task Completion -> speak and post natural conversational response
             if (decision.toolName == "complete_task") {
-                FloatingHudService.setTouchPassthrough(false)
-                executionModeController.finalizeEpisode(episodeGoalReached = true)
                 val rawSummary = decision.spokenReply.ifBlank {
                     decision.toolArgs.optString("summary", "요청하신 작업을 완료했어요.")
                 }
@@ -1762,7 +2786,8 @@ class MobileUseAgentEngine @JvmOverloads constructor(
                         sender = ChatSender.AGENT,
                         text = summary,
                         subtitle = backendBadge,
-                        toolBadge = backendBadge
+                        toolBadge = backendBadge,
+                        succeeded = true
                     )
                 )
                 speakIfEnabled(summary)
@@ -1770,12 +2795,42 @@ class MobileUseAgentEngine @JvmOverloads constructor(
                 return
             }
 
-            // 2. Conversational Clarification (`ask_user`) -> speak question & listen for user's answer
+            // 2. Conversational Clarification (`ask_user`) OR Honest Cloud Connection Failure
             if (decision.toolName == "ask_user") {
-                FloatingHudService.setTouchPassthrough(false)
+                val isCloudError = decision.toolArgs.optBoolean("is_cloud_error", false) || !routerState.lastDecisionSucceeded
                 val question = decision.toolArgs.optString("question").ifBlank {
                     decision.spokenReply.ifBlank { "어떤 항목을 선택할지 말씀해 주세요." }
                 }
+                if (isCloudError) {
+                    val errReason = decision.toolArgs.optString("error_reason").ifBlank {
+                        routerState.lastCloudApiError ?: GeminiMultimodalClient.lastCloudApiErrorReason ?: question
+                    }
+                    val errBadge = decision.toolArgs.optString("error_badge").ifBlank { "AI 연결 오류" }
+                    _lastCloudApiError.value = errReason
+                    _currentSession.update { prev ->
+                        val failed = prev.copy(
+                            status = AgentRunStatus.ERROR,
+                            finalSummary = question,
+                            finishedAtMs = System.currentTimeMillis()
+                        )
+                        archiveSession(failed)
+                        failed
+                    }
+                    syncSessionStoreStatus("ERROR", errReason.take(80), hasPendingApproval = false)
+                    appendChatMessage(
+                        LiveChatMessage(
+                            sender = ChatSender.AGENT,
+                            text = question,
+                            subtitle = errBadge,
+                            toolBadge = errBadge,
+                            succeeded = false
+                        )
+                    )
+                    speakIfEnabled("AI 연결 오류가 발생했어요. 설정에서 API 키 또는 브리지 연결을 확인해 주세요.")
+                    FloatingHudService.updateHudStatus("AI 연결 오류", errBadge.take(30), false)
+                    return
+                }
+
                 _currentSession.update { prev ->
                     val finished = prev.copy(
                         status = AgentRunStatus.COMPLETED,
@@ -1790,7 +2845,8 @@ class MobileUseAgentEngine @JvmOverloads constructor(
                         sender = ChatSender.AGENT,
                         text = question,
                         subtitle = backendBadge,
-                        toolBadge = "대화 확인"
+                        toolBadge = "대화 확인",
+                        succeeded = true
                     )
                 )
                 speakIfEnabled(question)
@@ -1798,7 +2854,7 @@ class MobileUseAgentEngine @JvmOverloads constructor(
                 return
             }
 
-            // 3. D-Artemis Deliberative Aligner (TAC + ACA) for mutating GUI actions
+            // 3. Advisory Safety Alignment check (never mutates VLM click/input coordinates)
             val effDecision = if (decision.toolName in setOf("click", "long_press", "input_text", "press_key")) {
                 val alignment = ArtemisDeliberativeAligner.alignBeforeExecution(
                     toolName = decision.toolName,
@@ -1826,188 +2882,18 @@ class MobileUseAgentEngine @JvmOverloads constructor(
                 .replace(Regex("^['\"][^'\"]{1,30}['\"]\\s*(?:을|를|명령을)?\\s*실행하여\\s*"), "")
                 .trim()
 
-            // 3A. Strict Non-Bypass Takeover (CAPTCHA/2FA/Biometric) & Irreversible Financial/Price-Drift Gate
-            val spec = ToolSpecRegistry.find(effDecision.toolName)
-            val activeEpoch = currentControlEpoch.get()
-            val consumedSnapshot = consumedExternalApprovalReceipts.toSet()
-            val hsAssessment = FinancialAndTakeoverGuard.assessBeforeAction(
+            // 3A. Mandatory Fail-Closed Registry + Financial/Takeover + ToolSafetyGate Check
+            val (gateOutcome, _) = evaluateMandatorySafetyGates(
                 toolName = effDecision.toolName,
                 args = effDecision.toolArgs,
                 snapshot = snapshot,
-                lastApprovedAmount = lastApprovedAmountText,
-                expectedControlEpoch = activeEpoch,
-                consumedReceiptIds = consumedSnapshot
+                allowInteractivePrompt = true
             )
-            if (hsAssessment.externalApprovalValidated && !hsAssessment.externalApprovalReceiptId.isNullOrBlank()) {
-                consumedExternalApprovalReceipts.add(hsAssessment.externalApprovalReceiptId)
-                resolvedVault.recordAuditEvent(
-                    action = "EXTERNAL_APPROVAL_BOUND",
-                    handle = effDecision.toolArgs.optString("handle", effDecision.toolName).ifBlank { effDecision.toolName },
-                    approvedReceiptId = hsAssessment.externalApprovalReceiptId,
-                    controlEpoch = hsAssessment.controlEpoch ?: activeEpoch,
-                    outcome = "APPROVED"
-                )
+            if (gateOutcome == SafetyGateEvaluationOutcome.STOPPED_OR_DENIED) {
+                return
             }
-
-            if (hsAssessment.kind in setOf(
-                    HighStakesKind.CAPTCHA_BOT_GATE,
-                    HighStakesKind.TWO_FACTOR_OR_BIOMETRIC,
-                    HighStakesKind.SECURE_SURFACE_BLOCKED
-                )
-            ) {
-                val tkDeferred = CompletableDeferred<Boolean>()
-                takeoverDeferred = tkDeferred
-                val takeoverState = HumanTakeoverState(
-                    kind = hsAssessment.kind,
-                    titleKo = hsAssessment.targetLabel.ifBlank { "사용자 직접 인증 필요" },
-                    reasonKo = hsAssessment.reasonKo,
-                    activePackage = snapshot.activePackage
-                )
-                _currentSession.update {
-                    it.copy(
-                        status = AgentRunStatus.AWAITING_TAKEOVER,
-                        pendingTakeover = takeoverState
-                    )
-                }
-                appendChatMessage(
-                    LiveChatMessage(
-                        sender = ChatSender.AGENT,
-                        text = hsAssessment.reasonKo,
-                        subtitle = "Non-Bypass Human Takeover",
-                        toolBadge = "HUMAN TAKEOVER"
-                    )
-                )
-                speakIfEnabled(hsAssessment.reasonKo)
-                FloatingHudService.updateHudStatus("사용자 직접 확인 대기", takeoverState.titleKo.take(28), true)
-                syncSessionStoreStatus("TAKEOVER", takeoverState.titleKo.take(60), hasPendingApproval = true)
-                val completedByHuman = tkDeferred.await()
-                takeoverDeferred = null
-                _currentSession.update {
-                    it.copy(
-                        status = if (completedByHuman) AgentRunStatus.OBSERVING else AgentRunStatus.STOPPED,
-                        pendingTakeover = null
-                    )
-                }
-                if (!completedByHuman) {
-                    stopRun("사용자 직접 확인 단계에서 작업을 취소했어요.")
-                    return
-                }
-                loopBreaker.reset()
+            if (gateOutcome == SafetyGateEvaluationOutcome.TAKEOVER_RESUMED_REOBSERVE) {
                 continue
-            }
-
-            // Mandatory Financial / Price-Drift or Sensitive Vault Handle approval (EVEN when unrestrictedAutonomousMode == true!)
-            val sensitiveVaultSummary = if (effDecision.toolName == "vault_blind_inject") {
-                val handleArg = effDecision.toolArgs.optString("handle", "").trim()
-                resolvedVault.getHandleSummary(handleArg)?.takeIf { it.category.alwaysRequireApproval }
-            } else {
-                null
-            }
-
-            val sensitiveVaultNeedsApproval = sensitiveVaultSummary != null && !hsAssessment.externalApprovalValidated
-
-            if (spec != null && (hsAssessment.kind == HighStakesKind.FINANCIAL_COMMIT ||
-                    hsAssessment.kind == HighStakesKind.PRICE_DRIFT_ALERT ||
-                    sensitiveVaultNeedsApproval)
-            ) {
-                val reason = sensitiveVaultSummary?.let { s ->
-                    "[민감 볼트(${s.category.labelKo}) 주입 승인] ${s.handle} (${s.label}) 값을 현재 입력란에 안전 주입할까요?"
-                } ?: hsAssessment.reasonKo
-                val deferred = CompletableDeferred<Boolean>()
-                approvalDeferred = deferred
-                lastBoundApprovalReceiptId = null
-                lastBoundControlEpoch = null
-                _currentSession.update {
-                    it.copy(
-                        status = AgentRunStatus.AWAITING_APPROVAL,
-                        pendingApproval = PendingApprovalRequest(
-                            toolSpec = spec,
-                            args = effDecision.toolArgs,
-                            reasonKo = reason,
-                            isHighStakesFinancial = hsAssessment.kind != HighStakesKind.NONE,
-                            detectedPriceText = hsAssessment.detectedAmountText.ifBlank { null },
-                            priceDriftNoticeKo = if (hsAssessment.kind == HighStakesKind.PRICE_DRIFT_ALERT) {
-                                "${hsAssessment.previousApprovedAmount} → ${hsAssessment.detectedAmountText}"
-                            } else null,
-                            targetAppOrMerchant = hsAssessment.merchantOrApp.ifBlank { null },
-                            controlEpoch = activeEpoch,
-                            externalApprovalReceiptId = hsAssessment.externalApprovalReceiptId
-                        )
-                    )
-                }
-                appendChatMessage(
-                    LiveChatMessage(
-                        sender = ChatSender.AGENT,
-                        text = "$reason 승인하시면 바로 실행할게요.",
-                        toolBadge = if (hsAssessment.kind == HighStakesKind.PRICE_DRIFT_ALERT) "PRICE DRIFT" else "고위험 승인"
-                    )
-                )
-                speakIfEnabled(reason)
-                FloatingHudService.updateHudStatus("고위험 승인 대기", reason.take(28), true)
-                FloatingHudService.updateApprovalPrompt(true, reason)
-                syncSessionStoreStatus("APPROVAL", reason.take(60), hasPendingApproval = true)
-                val approved = deferred.await()
-                approvalDeferred = null
-                FloatingHudService.updateApprovalPrompt(false)
-                syncSessionStoreStatus("ACTING", spec.name, hasPendingApproval = false)
-                _currentSession.update { it.copy(pendingApproval = null) }
-                if (!approved) {
-                    stopRun("고위험 결제·민감 작업 승인을 거절하여 실행하지 않았어요.")
-                    return
-                }
-                if (hsAssessment.detectedAmountText.isNotBlank()) {
-                    lastApprovedAmountText = hsAssessment.detectedAmountText
-                }
-                lastBoundApprovalReceiptId?.let { boundId ->
-                    effDecision.toolArgs.put("external_approval_receipt_id", boundId)
-                }
-                lastBoundControlEpoch?.let { boundEpoch ->
-                    effDecision.toolArgs.put("control_epoch", boundEpoch)
-                }
-            } else if (spec != null) {
-                when (val gate = ToolSafetyGate.evaluate(spec, effDecision.toolArgs, permissionHub)) {
-                    is SafetyGateDecision.Allow -> Unit
-                    is SafetyGateDecision.Deny -> {
-                        val msg = "보안 설정으로 인해 '${spec.name}' 작업이 제한되어 있어요. 원터치 자동 구성을 실행해 주세요."
-                        stopRun(msg)
-                        return
-                    }
-                    is SafetyGateDecision.AskUser -> {
-                        val deferred = CompletableDeferred<Boolean>()
-                        approvalDeferred = deferred
-                        _currentSession.update {
-                            it.copy(
-                                status = AgentRunStatus.AWAITING_APPROVAL,
-                                pendingApproval = PendingApprovalRequest(
-                                    toolSpec = spec,
-                                    args = effDecision.toolArgs,
-                                    reasonKo = gate.reasonKo
-                                )
-                            )
-                        }
-                        val askMsg = "${gate.reasonKo} 진행할까요? '응'이라고 말씀하시면 바로 실행할게요."
-                        appendChatMessage(
-                            LiveChatMessage(
-                                sender = ChatSender.AGENT,
-                                text = askMsg,
-                                toolBadge = "승인 확인"
-                            )
-                        )
-                        speakIfEnabled(askMsg)
-                        FloatingHudService.updateHudStatus("승인 대기 중", "'응'이라고 말씀하세요", true)
-                        FloatingHudService.updateApprovalPrompt(true, gate.reasonKo)
-                        syncSessionStoreStatus("APPROVAL", gate.reasonKo.take(60), hasPendingApproval = true)
-                        val approved = deferred.await()
-                        approvalDeferred = null
-                        FloatingHudService.updateApprovalPrompt(false)
-                        syncSessionStoreStatus("ACTING", spec.name, hasPendingApproval = false)
-                        _currentSession.update { it.copy(pendingApproval = null) }
-                        if (!approved) {
-                            stopRun("네, 실행하지 않고 취소했어요.")
-                            return
-                        }
-                    }
-                }
             }
 
             // 4. Execute Tool Action on the Phone FIRST (Zero pre-action narration delay!)
@@ -2023,10 +2909,11 @@ class MobileUseAgentEngine @JvmOverloads constructor(
                 true
             )
 
-            val outcome = toolHarness.execute(
+            val outcome = executeToolWithConfig(
                 toolName = effDecision.toolName,
                 args = effDecision.toolArgs,
-                latestSnapshot = snapshot
+                snapshot = snapshot,
+                cfg = cfg
             )
             HansonAccessibilityService.instance?.captureSnapshotNow(includeScreenshot = false)?.let { postQuickSnap ->
                 val postFp = loopBreaker.computeScreenFingerprint(postQuickSnap)
@@ -2041,7 +2928,9 @@ class MobileUseAgentEngine @JvmOverloads constructor(
                         sender = ChatSender.AGENT,
                         text = stepNarration,
                         subtitle = backendBadge,
-                        toolBadge = "${effDecision.toolName} · $backendBadge"
+                        toolBadge = "${effDecision.toolName} · $backendBadge",
+                        succeeded = outcome.succeeded,
+                        structuredCard = outcome.structuredCard
                     )
                 )
                 speakIfEnabled(stepNarration)
@@ -2156,45 +3045,6 @@ class MobileUseAgentEngine @JvmOverloads constructor(
                 )
             }
 
-            val updatedSteps = _currentSession.value.steps
-            val stepLatencyMs = (System.currentTimeMillis() - stepStartMs).coerceAtLeast(1L)
-            scope.launch(Dispatchers.IO) {
-                worldModelGraph.recordTransition(
-                    preSnapshot = snapshot,
-                    postSnapshot = verification.finalSnapshot,
-                    toolName = effDecision.toolName,
-                    toolArgsJson = effDecision.toolArgs.toString(),
-                    verifiedSuccess = verification.verifiedSuccess,
-                    uiDeltaRatio = verification.treeDeltaRatio,
-                    selfHealRecipe = verification.recoveryActionKo
-                )
-                executionModeController.recordStepTransition(
-                    stepNumber = iter,
-                    preSnapshot = snapshot,
-                    postSnapshot = verification.finalSnapshot,
-                    actorTier = actorTier,
-                    toolName = effDecision.toolName,
-                    toolArgsJson = effDecision.toolArgs.toString(),
-                    verifiedSuccess = verification.verifiedSuccess,
-                    uiDeltaRatio = verification.treeDeltaRatio,
-                    recoveryAttempted = verification.recoveryAttempted,
-                    latencyMs = stepLatencyMs,
-                    goal = currentGoal
-                )
-                neuralSkillCompiler.compileAndDistillVerifiedStep(
-                    goal = currentGoal,
-                    preSnapshot = snapshot,
-                    toolName = effDecision.toolName,
-                    toolArgs = effDecision.toolArgs,
-                    verifiedSuccess = verification.verifiedSuccess
-                )
-                LiquidUiSynthesizer.updateLiveTrajectoryHud(
-                    goal = currentGoal,
-                    steps = updatedSteps,
-                    worldGraph = worldModelGraph
-                )
-            }
-
             delay(60L)
         }
 
@@ -2286,12 +3136,11 @@ class MobileUseAgentEngine @JvmOverloads constructor(
         startRun(targetGoal, appendUserBubble = true)
     }
 
-    fun buildContextualPrompt(
-        baseGoal: String,
+    private fun buildAttachedContextForMentions(
         parsed: ParsedComposerInput,
         snapshot: AtomicSnapshot? = null
     ): String {
-        if (parsed.mentions.isEmpty()) return baseGoal
+        if (parsed.mentions.isEmpty()) return ""
         val liveSnap = snapshot ?: runCatching {
             HansonAccessibilityService.instance?.captureSnapshotNow(includeScreenshot = false)
         }.getOrNull()
@@ -2376,13 +3225,25 @@ class MobileUseAgentEngine @JvmOverloads constructor(
                 }
             }
         }
+        if (blocks.isEmpty()) return ""
+        return resolvedVault.redactSensitiveText(
+            "<attached_context>\n${blocks.joinToString("\n\n")}\n</attached_context>"
+        )
+    }
+
+    fun buildContextualPrompt(
+        baseGoal: String,
+        parsed: ParsedComposerInput,
+        snapshot: AtomicSnapshot? = null
+    ): String {
+        if (parsed.mentions.isEmpty()) return baseGoal
         val safeBase = resolvedVault.redactSensitiveText(baseGoal)
-        if (blocks.isEmpty()) return safeBase
+        val attachedBlock = buildAttachedContextForMentions(parsed, snapshot)
+        if (attachedBlock.isEmpty()) return safeBase
         val assembled = buildString {
             append(safeBase.ifBlank { "첨부된 컨텍스트를 분석하고 처리해 주세요." })
-            append("\n\n<attached_context>\n")
-            append(blocks.joinToString("\n\n"))
-            append("\n</attached_context>")
+            append("\n\n")
+            append(attachedBlock)
         }
         return resolvedVault.redactSensitiveText(assembled)
     }

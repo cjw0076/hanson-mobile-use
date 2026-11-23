@@ -89,7 +89,7 @@ fun SettingsScreen(
     var connectionTestMessage by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
 
-    val allModels = GeminiMultimodalClient.AISTUDIO_OFFICIAL_MODELS
+    val allModels = GeminiMultimodalClient.VLM_PICKER_MODELS
     val displayedModels = if (showAllModels) allModels else allModels.take(8)
 
     AhaboardDotGridBox(modifier = Modifier.fillMaxSize()) {
@@ -244,7 +244,7 @@ fun SettingsScreen(
                             },
                             placeholder = {
                                 Text(
-                                    "예: http://192.168.0.10:11434/v1 또는 https://openrouter.ai/api/v1",
+                                    "예: http://127.0.0.1:18889/v1 또는 https://openrouter.ai/api/v1",
                                     color = ObsidianColors.TextMuted,
                                     fontSize = 11.sp
                                 )
@@ -257,6 +257,15 @@ fun SettingsScreen(
                             ),
                             singleLine = true,
                             shape = RoundedCornerShape(12.dp)
+                        )
+
+                        Spacer(modifier = Modifier.height(6.dp))
+
+                        Text(
+                            text = "보안 안내: 로컬 HTTP(http://127.0.0.1:18889)는 adb reverse 루프백으로 연결되며, 외부 원격 엔드포인트는 HTTPS만 허용됩니다.",
+                            color = ObsidianColors.TextMuted,
+                            fontSize = 10.5.sp,
+                            lineHeight = 14.5.sp
                         )
 
                         Spacer(modifier = Modifier.height(8.dp))
@@ -276,10 +285,16 @@ fun SettingsScreen(
                                         connectionTestMessage = "연결 확인 중..."
                                         scope.launch {
                                             val result = withContext(Dispatchers.IO) {
+                                                val trimmedUrl = customBaseUrl.trim()
+                                                val effectiveModel = if (trimmedUrl.contains("18889")) {
+                                                    "cli-subscription-bridge"
+                                                } else {
+                                                    modelName.trim()
+                                                }
                                                 GeminiMultimodalClient().verifyConnectionHealth(
                                                     apiKey = apiKey.trim(),
-                                                    modelName = modelName.trim(),
-                                                    customBaseUrl = customBaseUrl.trim()
+                                                    modelName = effectiveModel,
+                                                    customBaseUrl = trimmedUrl
                                                 )
                                             }
                                             connectionTestMessage = result.messageKo

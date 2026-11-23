@@ -88,128 +88,104 @@ class ChallengerM2StressAndEdgeCaseTest {
         isBgGoalMethod.invoke(engine, goal) as Boolean
 
     // =========================================================================
-    // 1. Flashlight Rapid Alternating Toggle Stress (100 iterations)
+    // 1. Strict Alarm/Timer Fast-Lane vs Non-Hijacked Flashlight/Light Prompts (100 iterations)
     // =========================================================================
 
     @Test
     fun testFlashlight_rapidAlternatingToggleStress() {
-        val onPrompts = listOf("손전등 켜줘", "플래시 켜", "후레쉬 켜줘", "라이트 켜", "손전등 ON", "플래시 ON")
-        val offPrompts = listOf("손전등 꺼줘", "플래시 꺼", "후레쉬 꺼줘", "라이트 꺼", "손전등 OFF", "플래시 OFF", "후레쉬 해제")
+        // B4 Deconstruction: Flashlight/light phrases must NOT be substring-hijacked in IntentDecomposerAndRouter
+        // so ambiguous prompts like "라이트 뭐야" reach the real LLM, while explicit flashlight commands remain
+        // background-safe in MobileUseAgentEngine.isBackgroundParallelizableGoal.
+        val flashlightPrompts = listOf(
+            "손전등 켜줘", "플래시 켜", "후레쉬 켜줘", "손전등 꺼줘", "플래시 꺼", "후레쉬 꺼줘", "손전등 ON", "손전등 OFF"
+        )
+        val ambiguousLightPrompts = listOf("라이트 뭐야", "라이트 노벨 추천해줘", "플래시 메모리 설명해줘")
 
         for (i in 0 until 100) {
-            val isTurnOn = (i % 2 == 0)
-            val prompt = if (isTurnOn) onPrompts[i % onPrompts.size] else offPrompts[i % offPrompts.size]
+            val prompt = flashlightPrompts[i % flashlightPrompts.size]
             val intent = IntentDecomposerAndRouter.decompose(prompt)
+            assertEquals("Prompt '$prompt' must delegate to real AI lane", IntentCategory.MULTI_STEP_GUI_OR_CHAT, intent.primaryCategory)
+            assertNull("IntentDecomposerAndRouter must not fabricate fastDecision for '$prompt'", intent.fastDecision)
+            assertTrue("Explicit flashlight prompt '$prompt' stays background-safe", invokeIsBgGoal(prompt))
+        }
 
-            assertEquals("Prompt '$prompt' should decompose to EVERYDAY_OS_ACTION", IntentCategory.EVERYDAY_OS_ACTION, intent.primaryCategory)
-            assertEquals("Prompt '$prompt' should have tool control_device_setting", "control_device_setting", intent.fastDecision?.toolName)
-
-            val toolArgs = intent.fastDecision?.toolArgs
-            assertNotNull("toolArgs must not be null for '$prompt'", toolArgs)
-            assertEquals("setting argument must be flashlight", "flashlight", toolArgs?.getString("setting"))
-
-            val expectedInt = if (isTurnOn) 1 else 0
-            val expectedStr = if (isTurnOn) "on" else "off"
-
-            // Integer getter contracts
-            assertEquals("getInt('value') must return $expectedInt for '$prompt'", expectedInt, toolArgs?.getInt("value"))
-            assertEquals("optInt('value') must return $expectedInt for '$prompt'", expectedInt, toolArgs?.optInt("value"))
-            assertEquals("optInt('value', -1) must return $expectedInt for '$prompt'", expectedInt, toolArgs?.optInt("value", -1))
-            assertEquals("getInt('value_int') must return $expectedInt", expectedInt, toolArgs?.getInt("value_int"))
-            assertEquals("getInt('enabled') must return $expectedInt", expectedInt, toolArgs?.getInt("enabled"))
-
-            // String backward-compatibility getter contracts
-            assertEquals("getString('value') must return '$expectedStr' for '$prompt'", expectedStr, toolArgs?.getString("value"))
-            assertEquals("optString('value') must return '$expectedStr' for '$prompt'", expectedStr, toolArgs?.optString("value"))
-            assertEquals("optString('value', 'def') must return '$expectedStr' for '$prompt'", expectedStr, toolArgs?.optString("value", "def"))
-            assertEquals("getString('state') must return '$expectedStr'", expectedStr, toolArgs?.getString("state"))
+        for (ambiguous in ambiguousLightPrompts) {
+            val intent = IntentDecomposerAndRouter.decompose(ambiguous)
+            assertEquals("Ambiguous prompt '$ambiguous' must not be hijacked", IntentCategory.MULTI_STEP_GUI_OR_CHAT, intent.primaryCategory)
+            assertNull("Ambiguous prompt '$ambiguous' must have null fastDecision", intent.fastDecision)
         }
     }
 
     // =========================================================================
-    // 2. Flashlight JSON Wire Serialization and Round-Trip Deserialization
+    // 2. Explicit Numeric Timer/Alarm JSON Wire Serialization and Round-Trip
     // =========================================================================
 
     @Test
     fun testFlashlight_jsonWireSerializationAndRoundTrip() {
-        val onIntent = IntentDecomposerAndRouter.decompose("손전등 켜줘")
-        val onArgs = onIntent.fastDecision?.toolArgs
-        assertNotNull(onArgs)
+        val timerIntent = IntentDecomposerAndRouter.decompose("3분 타이머 맞춰줘")
+        assertEquals(IntentCategory.EVERYDAY_OS_ACTION, timerIntent.primaryCategory)
+        val timerArgs = timerIntent.fastDecision?.toolArgs
+        assertNotNull(timerArgs)
 
-        val onWireJson = onArgs!!.toString()
-        assertTrue("Serialized wire JSON must contain integer 'value':1: $onWireJson", onWireJson.contains("\"value\":1"))
+        val timerWireJson = timerArgs!!.toString()
+        assertTrue("Serialized wire JSON must contain integer seconds:180: $timerWireJson", timerWireJson.contains("\"seconds\":180"))
 
-        // Round-trip into a brand-new standard Android JSONObject
-        val parsedOn = JSONObject(onWireJson)
-        assertEquals(1, parsedOn.getInt("value"))
-        assertEquals(1, parsedOn.optInt("value"))
-        assertEquals("on", parsedOn.getString("state"))
-        assertEquals(1, parsedOn.getInt("enabled"))
-        // In downstream executeControlDeviceSetting:
-        val onSettingVal = parsedOn.optString("value")
-        val onEnable = onSettingVal.lowercase() !in listOf("off", "false", "0", "끄기", "꺼")
-        assertTrue("Parsed JSON '1' must evaluate to enable=true in device setting harness", onEnable)
+        val parsedTimer = JSONObject(timerWireJson)
+        assertEquals(180, parsedTimer.getInt("seconds"))
+        assertEquals(180, parsedTimer.optInt("seconds"))
 
-        val offIntent = IntentDecomposerAndRouter.decompose("손전등 꺼줘")
-        val offArgs = offIntent.fastDecision?.toolArgs
-        assertNotNull(offArgs)
+        val alarmIntent = IntentDecomposerAndRouter.decompose("오후 7시 30분 알람 맞춰줘")
+        assertEquals(IntentCategory.EVERYDAY_OS_ACTION, alarmIntent.primaryCategory)
+        val alarmArgs = alarmIntent.fastDecision?.toolArgs
+        assertNotNull(alarmArgs)
 
-        val offWireJson = offArgs!!.toString()
-        assertTrue("Serialized wire JSON must contain integer 'value':0: $offWireJson", offWireJson.contains("\"value\":0"))
+        val parsedAlarm = JSONObject(alarmArgs!!.toString())
+        assertEquals(19, parsedAlarm.getInt("hour"))
+        assertEquals(30, parsedAlarm.getInt("minute"))
 
-        val parsedOff = JSONObject(offWireJson)
-        assertEquals(0, parsedOff.getInt("value"))
-        assertEquals(0, parsedOff.optInt("value"))
-        assertEquals("off", parsedOff.getString("state"))
-        assertEquals(0, parsedOff.getInt("enabled"))
+        // Verify control_device_setting flashlight value parsing parity ("1"/"on" vs "0"/"off")
+        val onEnable = JSONObject().put("setting", "flashlight").put("value", "on").optString("value")
+            .lowercase(Locale.ROOT) !in listOf("off", "false", "0", "끄기", "꺼")
+        assertTrue("Flashlight 'on' must evaluate to enable=true", onEnable)
 
-        val offSettingVal = parsedOff.optString("value")
-        val offEnable = offSettingVal.lowercase() !in listOf("off", "false", "0", "끄기", "꺼")
-        assertFalse("Parsed JSON '0' must evaluate to enable=false in device setting harness", offEnable)
+        val offEnable = JSONObject().put("setting", "flashlight").put("value", "0").optString("value")
+            .lowercase(Locale.ROOT) !in listOf("off", "false", "0", "끄기", "꺼")
+        assertFalse("Flashlight '0' must evaluate to enable=false", offEnable)
     }
 
     // =========================================================================
-    // 3. Flashlight Phrasing Variations, Casing, Whitespace, Punctuation
+    // 3. Anchored Explicit Numeric Timer/Alarm vs Non-Create Phrasing Variations
     // =========================================================================
 
     @Test
     fun testFlashlight_phrasingVariationsAndCasing() {
-        val testCases = listOf(
-            "손전등 켜줘" to true,
-            "손전등 켜" to true,
-            "손전등켜" to true,
-            "  손전등   켜줘  " to true,
-            "손전등 켜줘!!!" to true,
-            "손전등 ON" to true,
-            "손전등 On" to true,
-            "플래시 켜" to true,
-            "플래시 ON" to true,
-            "플래시 On" to true,
-            "후레쉬 켜줘" to true,
-            "라이트 켜" to true,
-            "라이트 ON" to true,
-            "손전등 꺼줘" to false,
-            "손전등 꺼" to false,
-            "손전등꺼" to false,
-            "손전등 해제" to false,
-            "  손전등   꺼줘   " to false,
-            "손전등 꺼줄래?" to false,
-            "손전등 OFF" to false,
-            "손전등 Off" to false,
-            "플래시 꺼" to false,
-            "플래시 OFF" to false,
-            "플래시 Off" to false,
-            "후레쉬 꺼줘" to false,
-            "후레쉬 해제" to false,
-            "라이트 꺼" to false,
-            "라이트 OFF" to false
+        val validTimers = listOf(
+            "3분 타이머 맞춰줘" to 180,
+            "라면 타이머 4분 30초 시작해줘" to 270,
+            "1시간 10분 타이머 설정해줘" to 4200,
+            "45초 타이머 걸어줘" to 45
         )
-
-        for ((prompt, expectedOn) in testCases) {
+        for ((prompt, expectedSec) in validTimers) {
             val intent = IntentDecomposerAndRouter.decompose(prompt)
             assertEquals("Prompt '$prompt' should decompose to EVERYDAY_OS_ACTION", IntentCategory.EVERYDAY_OS_ACTION, intent.primaryCategory)
-            val expectedVal = if (expectedOn) 1 else 0
-            assertEquals("Prompt '$prompt' should have value $expectedVal", expectedVal, intent.fastDecision?.toolArgs?.getInt("value"))
+            assertEquals("set_timer", intent.fastDecision?.toolName)
+            assertEquals("Prompt '$prompt' should have seconds=$expectedSec", expectedSec, intent.fastDecision?.toolArgs?.getInt("seconds"))
+        }
+
+        val nonCreatePrompts = listOf(
+            "타이머 멈춰",
+            "타이머 꺼줘",
+            "타이머 맞춰줘", // missing explicit duration -> never defaults to 3 min
+            "알람 꺼줘",
+            "알람 맞춰줘",   // missing explicit time -> never defaults to 7 AM
+            "라이트 켜",
+            "라이트 꺼",
+            "라이트 뭐야"
+        )
+        for (prompt in nonCreatePrompts) {
+            val intent = IntentDecomposerAndRouter.decompose(prompt)
+            assertEquals("Non-anchored prompt '$prompt' must route to real AI", IntentCategory.MULTI_STEP_GUI_OR_CHAT, intent.primaryCategory)
+            assertNull("Non-anchored prompt '$prompt' must have null fastDecision", intent.fastDecision)
         }
     }
 
@@ -297,11 +273,15 @@ class ChallengerM2StressAndEdgeCaseTest {
                     if (isSetting) {
                         val prompt = if (index % 4 == 0) "손전등 켜줘" else "소리 볼륨 50%로 맞춰줘"
                         val intent = IntentDecomposerAndRouter.decompose(prompt)
-                        assertEquals(IntentCategory.EVERYDAY_OS_ACTION, intent.primaryCategory)
+                        assertEquals(IntentCategory.MULTI_STEP_GUI_OR_CHAT, intent.primaryCategory)
+                        assertNull(intent.fastDecision)
                         assertTrue(invokeIsBgGoal(prompt))
                     } else {
+                        val timerIntent = IntentDecomposerAndRouter.decompose("3분 타이머 맞춰줘")
+                        assertEquals(IntentCategory.EVERYDAY_OS_ACTION, timerIntent.primaryCategory)
                         val fgPrompt = "카카오톡 열어서 팀 단톡방에 메시지 보내줘"
                         val intent = IntentDecomposerAndRouter.decompose(fgPrompt)
+                        assertEquals(IntentCategory.MULTI_STEP_GUI_OR_CHAT, intent.primaryCategory)
                         assertFalse(invokeIsBgGoal(fgPrompt))
                     }
                 } catch (t: Throwable) {

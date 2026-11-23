@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Hanson v6.1 — Flagship Generative Motion &amp; Companion UI</title>
+  <title>Hanson v6.2 — Flagship Generative Motion &amp; Companion UI</title>
   <style>
     :root {
       --paper: #FAFAFA;
@@ -474,6 +474,8 @@
       font-size: 10.5px;
       font-weight: 700;
       color: var(--ink-secondary);
+      white-space: nowrap;
+      flex-shrink: 0;
     }
 
     .pager-controls {
@@ -1110,6 +1112,9 @@
         </div>
 
         <div class="topbar-actions">
+          <button id="onboarding-open-btn" class="circle-btn" title="3단계 빠른 시작 가이드" aria-label="3단계 시작 가이드 열기" onclick="openOnboarding()">
+            <span style="font-size:13px;line-height:1;">✦</span>
+          </button>
           <button id="voice-toggle-btn" class="circle-btn" title="실시간 보이스 파형" aria-label="보이스 전환" onclick="toggleVoiceState()">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Zm7 10a7 7 0 0 1-14 0M12 19v3M8 22h8"/></svg>
           </button>
@@ -1243,6 +1248,7 @@
         </div>
 
         <nav class="quick-dock" aria-label="빠른 도구">
+          <button id="dock-onboarding-btn" class="dock-pill" onclick="openOnboarding()">✨ 시작 가이드</button>
           <button id="dock-bubbles-btn" class="dock-pill" onclick="openDrawer('bubbles')">🫧 취향 <span id="dock-bubbles-count">3</span></button>
           <button id="dock-routines-btn" class="dock-pill" onclick="openDrawer('routines')">⚡ 루틴 <span id="dock-routines-count">3</span></button>
           <button id="dock-morph-btn" class="dock-pill" onclick="cycleMorphShowcase()">✦ UI 변형</button>
@@ -1276,6 +1282,18 @@
             <button id="tab-safety" class="dock-pill" onclick="switchDrawerTab('safety')">🛡️ 안전·동기화</button>
           </div>
           <div id="sheet-body" class="sheet-scroll"></div>
+        </div>
+      </div>
+
+      <!-- 6. v6.2 3-Step Consumer Onboarding Wizard Sheet -->
+      <div id="onboarding-backdrop" class="sheet-backdrop hidden" onclick="if(event.target===this) closeOnboarding()">
+        <div class="bottom-sheet" role="dialog" aria-modal="true" aria-label="한슨 3단계 빠른 시작 가이드">
+          <div class="drag-handle"></div>
+          <div class="sheet-header">
+            <strong id="onboarding-step-label" style="font-size:14px;font-weight:800;">✨ 시작 가이드 · 1 / 3</strong>
+            <button id="onboarding-close-btn" class="toggle-chip" onclick="closeOnboarding()">닫기</button>
+          </div>
+          <div id="onboarding-body" class="sheet-scroll"></div>
         </div>
       </div>
 
@@ -1314,6 +1332,18 @@
         enabled: false,
         projectId: "my-hanson-project",
         lastStatus: "로컬 모드 (Vault 비밀키는 절대 업로드 안 됨)"
+      },
+      onboarding: {
+        open: false,
+        step: 0,
+        track: "free_cloud",
+        keyInput: "",
+        localUrl: "http://127.0.0.1:18889/v1",
+        testStatus: "",
+        showRestrictedTip: false,
+        a11yReady: false,
+        hudReady: true,
+        notifReady: true
       }
     };
 
@@ -1983,6 +2013,145 @@
             <strong style="font-size:13px;">🛡️ CAPTCHA · 보안 키패드 안전 정지</strong>
             <div style="font-size:12px;color:var(--ink-secondary);">자동화 도중 인증·결제 창을 만나면 즉시 일시정지하고 사용자에게 인계합니다.</div>
             <button id="demo-captcha-btn" type="button" class="btn-secondary" onclick="triggerTakeoverDemo()">Takeover 동작 미리보기</button>
+          </div>
+        `;
+      }
+    }
+
+    function openOnboarding() {
+      state.onboarding.open = true;
+      state.onboarding.step = 0;
+      document.getElementById("onboarding-backdrop").classList.remove("hidden");
+      renderOnboarding();
+    }
+
+    function closeOnboarding() {
+      state.onboarding.open = false;
+      document.getElementById("onboarding-backdrop").classList.add("hidden");
+    }
+
+    function setOnboardingStep(nextStep) {
+      state.onboarding.step = Math.max(0, Math.min(2, nextStep));
+      renderOnboarding();
+    }
+
+    function selectOnboardingTrack(trackId) {
+      state.onboarding.track = trackId;
+      state.onboarding.testStatus = "";
+      renderOnboarding();
+    }
+
+    function pasteDemoOnboardingKey() {
+      state.onboarding.keyInput = "demo-gemini-preview-key-0001-local";
+      state.onboarding.testStatus = "✓ 데모 AI 키 형식 확인 · 실제 앱에서는 기기 AES-256 금고에 저장됩니다";
+      renderOnboarding();
+    }
+
+    function runOnboardingConnectionCheck() {
+      const ob = state.onboarding;
+      if (ob.track === "free_cloud") {
+        ob.testStatus = ob.keyInput.trim().length >= 16
+          ? "✓ Google Gemini API 연결 정상 (380ms · 시뮬레이션)"
+          : "먼저 '무료 키 예시 붙여넣기' 또는 발급받은 키를 입력해 주세요.";
+      } else if (ob.track === "local_bridge") {
+        ob.testStatus = "✓ 로컬 브리지(:18889) / Ollama 호환 주소 형식 확인 완료";
+      }
+      renderOnboarding();
+    }
+
+    function finishOnboarding() {
+      closeOnboarding();
+      setUxMode("human");
+      dispatchUserPrompt("강남역 삼겹살 회식 18만 6천원 5명 더치페이 계산해줘");
+      showUndoToast("3단계 시작 설정 완료 · 인터랙티브 카드 바로 체험 중");
+    }
+
+    function renderOnboarding() {
+      const ob = state.onboarding;
+      document.getElementById("onboarding-step-label").textContent = `✨ 시작 가이드 · ${ob.step + 1} / 3`;
+      const body = document.getElementById("onboarding-body");
+      if (ob.step === 0) {
+        const chips = state.bubbles.map(b => `
+          <button type="button" class="toggle-chip ${b.enabled ? 'active' : ''}" onclick="toggleBubbleItem('${escapeHtml(b.id)}');renderOnboarding()">
+            ${escapeHtml(b.emoji)} ${escapeHtml(b.fact)} ${b.enabled ? '✓' : ''}
+          </button>
+        `).join("");
+        body.innerHTML = `
+          <div class="sheet-box">
+            <div style="font-size:16px;font-weight:800;line-height:1.35;">권한 없이 바로 써보는 인터랙티브 AI</div>
+            <div style="font-size:12px;color:var(--ink-secondary);line-height:1.5;">말 한마디를 바로 조작하는 카드로 바꿔드려요. 자주 쓰는 취향만 골라두면 매번 설명할 필요가 없어요.</div>
+            <div class="morph-chip-row" style="margin-top:6px;">${chips}</div>
+            <button type="button" id="onboarding-next-btn" class="btn-primary" style="width:100%;margin-top:4px;" onclick="setOnboardingStep(1)">다음 · AI 두뇌 10초 연결하기</button>
+          </div>
+        `;
+      } else if (ob.step === 1) {
+        const tracks = [
+          { id: "free_cloud", title: "무료 AI 키로 10초 시작", badge: "추천", sub: "Google AI Studio 무료 키를 복사해 붙이면 바로 대화·화면을 이해해요." },
+          { id: "local_bridge", title: "내 컴퓨터·로컬 AI 연결 (비용 0원)", badge: "로컬", sub: "노트북 CLI 브리지(:18889) 또는 Ollama 주소로 비용 없이 연결해요." },
+          { id: "offline_first", title: "지금은 키 없이 바로 써보기", badge: "빠른 체험", sub: "더치페이·메뉴 보드·모션 코스 카드를 권한·키 없이 먼저 체험해요." }
+        ];
+        const trackHtml = tracks.map(t => `
+          <button type="button" class="morph-option ${ob.track === t.id ? 'selected' : ''}" onclick="selectOnboardingTrack('${t.id}')">
+            <div style="min-width:0;">
+              <div style="font-size:12.5px;font-weight:800;">${escapeHtml(t.title)}</div>
+              <div class="morph-option-sub">${escapeHtml(t.sub)}</div>
+            </div>
+            <span class="soft-tag">${escapeHtml(t.badge)}</span>
+          </button>
+        `).join("");
+        const extraInput = ob.track === "free_cloud" ? `
+          <div class="sheet-input-row">
+            <input id="onboarding-key-input" class="sheet-input" type="password" value="${escapeHtml(ob.keyInput)}" placeholder="AI 키 붙여넣기 (Gemini · Claude · OpenAI)" oninput="state.onboarding.keyInput=this.value" />
+            <button type="button" class="dock-pill" onclick="pasteDemoOnboardingKey()">예시 붙여넣기</button>
+          </div>
+          <div class="cta-row">
+            <button type="button" class="btn-secondary" onclick="runOnboardingConnectionCheck()">⚡ 연결 테스트</button>
+            <button type="button" id="onboarding-next-btn" class="btn-primary" onclick="setOnboardingStep(2)">저장하고 다음으로</button>
+          </div>
+        ` : (ob.track === "local_bridge" ? `
+          <div class="sheet-input-row">
+            <input id="onboarding-url-input" class="sheet-input" value="${escapeHtml(ob.localUrl)}" oninput="state.onboarding.localUrl=this.value" />
+            <button type="button" class="dock-pill" onclick="runOnboardingConnectionCheck()">연결 확인</button>
+          </div>
+          <button type="button" id="onboarding-next-btn" class="btn-primary" style="width:100%;" onclick="setOnboardingStep(2)">저장하고 다음으로</button>
+        ` : `
+          <button type="button" id="onboarding-next-btn" class="btn-primary" style="width:100%;" onclick="setOnboardingStep(2)">건너뛰고 다음으로</button>
+        `);
+        body.innerHTML = `
+          <div class="sheet-box">
+            <div style="font-size:16px;font-weight:800;">AI 두뇌 10초 연결</div>
+            <div style="font-size:11.5px;color:var(--ink-secondary);">키는 기기 내부 AES-256 금고에만 암호화 저장됩니다.</div>
+            <div class="morph-option-list" style="margin-bottom:8px;">${trackHtml}</div>
+            ${extraInput}
+            ${ob.testStatus ? `<div style="font-size:11.5px;font-weight:700;color:var(--ink);margin-top:4px;">${escapeHtml(ob.testStatus)}</div>` : ""}
+            <button type="button" class="btn-secondary" style="width:100%;margin-top:2px;" onclick="setOnboardingStep(0)">← 이전 단계</button>
+          </div>
+        `;
+      } else {
+        body.innerHTML = `
+          <div class="sheet-box">
+            <div style="font-size:16px;font-weight:800;line-height:1.35;">필요할 때만 켜는 폰 제어 도우미 (선택)</div>
+            <div style="font-size:12px;color:var(--ink-secondary);line-height:1.5;">지금 권한을 켜지 않아도 바로 시작할 수 있어요.</div>
+            <button type="button" class="bubble-item ${ob.a11yReady ? 'on' : ''}" onclick="state.onboarding.a11yReady=!state.onboarding.a11yReady;renderOnboarding()">
+              <span>화면 함께 보기 (접근성)</span>
+              <span>${ob.a11yReady ? '✓ 켜짐' : '켜기'}</span>
+            </button>
+            <button type="button" class="bubble-item ${ob.hudReady ? 'on' : ''}" onclick="state.onboarding.hudReady=!state.onboarding.hudReady;renderOnboarding()">
+              <span>다른 앱 위 미니 바</span>
+              <span>${ob.hudReady ? '✓ 켜짐' : '켜기'}</span>
+            </button>
+            <button type="button" class="bubble-item ${ob.notifReady ? 'on' : ''}" onclick="state.onboarding.notifReady=!state.onboarding.notifReady;renderOnboarding()">
+              <span>꺼진 화면 빠른 답장 (알림)</span>
+              <span>${ob.notifReady ? '✓ 켜짐' : '켜기'}</span>
+            </button>
+            <button type="button" class="bubble-item" onclick="state.onboarding.showRestrictedTip=!state.onboarding.showRestrictedTip;renderOnboarding()">
+              <span style="font-weight:700;">${ob.showRestrictedTip ? '▾' : '▸'} 접근성 스위치가 회색으로 안 눌리나요? (안드로이드 13+)</span>
+            </button>
+            ${ob.showRestrictedTip ? `<div style="font-size:11.5px;color:var(--ink-secondary);line-height:1.5;padding:4px 6px;">앱 정보 → 오른쪽 위 ⋮ → <strong>제한된 설정 허용</strong>을 누른 뒤 돌아오면 바로 켜집니다.</div>` : ""}
+            <div class="cta-row" style="margin-top:6px;">
+              <button type="button" class="btn-secondary" onclick="setOnboardingStep(1)">이전</button>
+              <button type="button" id="onboarding-finish-btn" class="btn-primary" onclick="finishOnboarding()">${ob.a11yReady ? '완료 · 바로 체험 시작' : '건너뛰고 바로 시작'}</button>
+            </div>
           </div>
         `;
       }

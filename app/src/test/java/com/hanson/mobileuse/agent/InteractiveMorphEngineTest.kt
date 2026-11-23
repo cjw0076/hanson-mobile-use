@@ -84,4 +84,22 @@ class InteractiveMorphEngineTest {
         assertTrue(html.contains("40,000원"))
         assertFalse(html.contains("#FF00"))
     }
+
+    @Test
+    fun shouldAutoInterceptChatPrompt_alwaysReturnsFalseSoGeneralChatReachesRealAi() {
+        val prompts = listOf(
+            "배민에서 오늘 저녁 메뉴 추천해줘",
+            "4명 148,000원 더치페이 정산해줘",
+            "soxs 가격 알려 줘",
+            "성수동 산책 동선 스토리보드 만들어줘",
+            "오늘 저녁 약속 일정 맞춰줘",
+            ""
+        )
+        for (p in prompts) {
+            assertFalse(
+                "InteractiveMorphEngine must stay opt-in and never auto-intercept chat prompt '$p'",
+                InteractiveMorphEngine.shouldAutoInterceptChatPrompt(p)
+            )
+        }
+    }
 }

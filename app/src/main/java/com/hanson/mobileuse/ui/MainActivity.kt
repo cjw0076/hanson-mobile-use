@@ -1,11 +1,14 @@
 package com.hanson.mobileuse.ui
 
+import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
+import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -54,11 +57,15 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import com.hanson.mobileuse.accessibility.GestureController
 import com.hanson.mobileuse.accessibility.HansonAccessibilityService
+import com.hanson.mobileuse.agent.ChatSender
 import com.hanson.mobileuse.agent.ClipboardQuickSuggestion
+import com.hanson.mobileuse.agent.GeminiMultimodalClient
 import com.hanson.mobileuse.agent.HansonRuntimeHolder
+import com.hanson.mobileuse.agent.LiveVoiceSessionManager
 import com.hanson.mobileuse.agent.MobileUseAgentEngine
 import com.hanson.mobileuse.agent.PermissionHubManager
 import com.hanson.mobileuse.agent.QuickIntentKind
@@ -132,6 +139,25 @@ class MainActivity : ComponentActivity() {
         permissionHub.refreshStatus()
     }
 
+    private var pendingStartVoiceAfterPermission = false
+
+    private val requestRecordAudioLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        permissionHub.refreshStatus()
+        val shouldStart = pendingStartVoiceAfterPermission
+        pendingStartVoiceAfterPermission = false
+        if (granted && shouldStart) {
+            LiveVoiceSessionManager.configureGeminiLiveCredentials(agentEngine.config.value.apiKey)
+            LiveVoiceSessionManager.startLiveSession(
+                context = applicationContext,
+                apiKey = agentEngine.config.value.apiKey
+            )
+        } else if (!granted && shouldStart) {
+            Toast.makeText(this, "음성 대화를 사용하려면 마이크 권한이 필요해요.", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         WindowCompat.setDecorFitsSystemWindows(window, false)
@@ -182,7 +208,11 @@ class MainActivity : ComponentActivity() {
                 val workspaceState by workspaceEngine.state.collectAsState()
                 val sessionStoreState by sessionStore.state.collectAsState()
                 val workMode by agentEngine.workMode.collectAsState()
-                val vaultHandles by agentEngine.resolvedVault.handles.collectAsState()
+                val vaultHandlesFlow = remember(agentEngine) {
+                    runCatching { agentEngine.resolvedVault.handles }
+                        .getOrElse { MutableStateFlow(emptyList()) }
+                }
+                val vaultHandles by vaultHandlesFlow.collectAsState()
                 val watcherRules by agentEngine.resolvedWatcherEngine.rules.collectAsState()
                 val scratchpadEntries by agentEngine.resolvedScratchpad.entries.collectAsState()
                 val uxMode by agentEngine.uxMode.collectAsState()
@@ -192,12 +222,32 @@ class MainActivity : ComponentActivity() {
                 val recordedSteps by UserDemonstrationRecorder.recordedSteps.collectAsState()
                 val clipboardSuggestions by clipboardSuggestionsFlow.collectAsState()
                 val cloudSyncState by agentEngine.resolvedCloudSync.state.collectAsState()
+                val lastCloudApiError by agentEngine.lastCloudApiError.collectAsState()
                 val latestReversibleReceipt = remember(allReceipts) {
                     allReceipts.firstOrNull { it.canOneTapUndo }
                 }
 
                 LaunchedEffect(Unit) {
                     refreshClipboardSuggestions()
+                }
+                LaunchedEffect(agentEngine) {
+                    var lastDispatchedText = ""
+                    var lastDispatchedAtMs = 0L
+                    LiveVoiceSessionManager.userTranscriptFlow.collect { spoken ->
+                        val clean = spoken.trim()
+                        if (clean.isEmpty()) return@collect
+                        val now = System.currentTimeMillis()
+                        val alreadySentByEngine = agentEngine.chatMessages.value.lastOrNull {
+                            it.sender == ChatSender.USER
+                        }?.let { lastUser ->
+                            lastUser.text.trim() == clean && (now - lastUser.timestampMs) < 1_200L
+                        } == true
+                        if (!alreadySentByEngine && (clean != lastDispatchedText || now - lastDispatchedAtMs > 1_200L)) {
+                            lastDispatchedText = clean
+                            lastDispatchedAtMs = now
+                            agentEngine.sendChatMessage(clean)
+                        }
+                    }
                 }
                 LaunchedEffect(isRecordingDemo, recordedSteps.size) {
                     FloatingHudService.updateRecordingBadge(isRecordingDemo, recordedSteps.size)
@@ -326,7 +376,9 @@ class MainActivity : ComponentActivity() {
                                                     FloatingHudService.stop(this@MainActivity)
                                                 } else {
                                                     if (!FloatingHudService.startIfPermitted(this@MainActivity, forceEvenInApp = true)) {
-                                                        triggerOneTouchSetup()
+                                                        if (!openOverlayPermissionSettings()) {
+                                                            triggerOneTouchSetup()
+                                                        }
                                                     }
                                                 }
                                             },
@@ -386,10 +438,26 @@ class MainActivity : ComponentActivity() {
                                             watcherRules = watcherRules,
                                             scratchpadEntries = scratchpadEntries,
                                             onPutVaultSecret = { key, label, plaintext, category ->
-                                                agentEngine.resolvedVault.putSecret(key, label, plaintext, category)
+                                                runCatching {
+                                                    agentEngine.resolvedVault.putSecret(key, label, plaintext, category)
+                                                }.onFailure { err ->
+                                                    Toast.makeText(
+                                                        this@MainActivity,
+                                                        "보안 금고 저장에 실패했어요: ${err.message ?: "키스토어를 사용할 수 없습니다"}",
+                                                        Toast.LENGTH_SHORT
+                                                    ).show()
+                                                }
                                             },
                                             onDeleteVaultSecret = { key ->
-                                                agentEngine.resolvedVault.deleteSecret(key)
+                                                runCatching {
+                                                    agentEngine.resolvedVault.deleteSecret(key)
+                                                }.onFailure { err ->
+                                                    Toast.makeText(
+                                                        this@MainActivity,
+                                                        "보안 금고 삭제에 실패했어요: ${err.message ?: "키스토어를 사용할 수 없습니다"}",
+                                                        Toast.LENGTH_SHORT
+                                                    ).show()
+                                                }
                                             },
                                             onAddWatcherRule = { title, target, keywords, mode ->
                                                 agentEngine.resolvedWatcherEngine.addRule(
@@ -470,6 +538,17 @@ class MainActivity : ComponentActivity() {
                                                     watcherEngine = agentEngine.resolvedWatcherEngine,
                                                     receipts = allReceipts
                                                 )
+                                            },
+                                            showOnboardingInitially = !isOnboardingCompleted() && chatMessages.none { it.sender == ChatSender.USER },
+                                            onCompleteOnboarding = {
+                                                markOnboardingCompleted()
+                                            },
+                                            lastCloudApiError = lastCloudApiError,
+                                            onSaveAiConnection = { newKey, newUrl, selectedModel ->
+                                                handleSaveAiConnection(newKey, newUrl, selectedModel)
+                                            },
+                                            onToggleVoice = {
+                                                toggleVoiceSession()
                                             }
                                         )
                                     }
@@ -594,6 +673,7 @@ class MainActivity : ComponentActivity() {
                                                     maxIterations = maxIter,
                                                     autoShowFloatingHud = autoHud
                                                 )
+                                                LiveVoiceSessionManager.configureGeminiLiveCredentials(key)
                                                 Toast.makeText(this@MainActivity, "엔진 설정이 저장되었습니다.", Toast.LENGTH_SHORT).show()
                                             },
                                             onToggleDaemon = { run ->
@@ -704,19 +784,121 @@ class MainActivity : ComponentActivity() {
         if (clipText == dismissedClipboardText) {
             return
         }
+        val safeVault = runCatching { agentEngine.resolvedVault }.getOrNull()
         clipboardSuggestionsFlow.value = SmartClipboardAndShareIntentDetector.analyzeText(
             rawText = clipText,
-            vault = agentEngine.resolvedVault
+            vault = safeVault
         )
     }
 
+    private fun isOnboardingCompleted(): Boolean {
+        val prefs = getSharedPreferences("hanson_onboarding_prefs", Context.MODE_PRIVATE)
+        return prefs.getBoolean("completed_v6_2", false)
+    }
+
+    private fun markOnboardingCompleted() {
+        val prefs = getSharedPreferences("hanson_onboarding_prefs", Context.MODE_PRIVATE)
+        prefs.edit().putBoolean("completed_v6_2", true).apply()
+    }
+
+    private fun handleSaveAiConnection(
+        apiKey: String?,
+        customBaseUrl: String?,
+        selectedModel: String?
+    ) {
+        val trimmedKey = apiKey?.trim()
+        val trimmedUrl = customBaseUrl?.trim()
+        val isBridgeUrl = !trimmedUrl.isNullOrBlank() && trimmedUrl.contains("18889")
+        val resolvedModel = when {
+            !selectedModel.isNullOrBlank() -> selectedModel.trim()
+            isBridgeUrl -> "cli-subscription-bridge"
+            trimmedUrl == "" && agentEngine.config.value.modelName == "cli-subscription-bridge" ->
+                GeminiMultimodalClient.DEFAULT_MODEL
+            else -> null
+        }
+        runCatching {
+            agentEngine.updateConfig(
+                apiKey = trimmedKey?.takeIf { it.isNotEmpty() },
+                modelName = resolvedModel,
+                customBaseUrl = trimmedUrl
+            )
+        }.onFailure { err ->
+            Toast.makeText(
+                this,
+                "AI 연결 설정 저장에 실패했어요: ${err.message ?: "키스토어 오류"}",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+        val effectiveKey = trimmedKey?.takeIf { it.isNotEmpty() } ?: agentEngine.config.value.apiKey
+        LiveVoiceSessionManager.configureGeminiLiveCredentials(effectiveKey)
+    }
+
+    private fun toggleVoiceSession() {
+        if (LiveVoiceSessionManager.state.value.isActive) {
+            LiveVoiceSessionManager.stopLiveSession()
+            return
+        }
+        if (!LiveVoiceSessionManager.hasRecordAudioPermission(this)) {
+            pendingStartVoiceAfterPermission = true
+            requestRecordAudioLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            return
+        }
+        LiveVoiceSessionManager.configureGeminiLiveCredentials(agentEngine.config.value.apiKey)
+        LiveVoiceSessionManager.startLiveSession(
+            context = applicationContext,
+            apiKey = agentEngine.config.value.apiKey
+        )
+    }
+
+    private fun openOverlayPermissionSettings(): Boolean {
+        return runCatching {
+            startActivity(
+                Intent(
+                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:$packageName")
+                )
+            )
+            true
+        }.getOrDefault(false)
+    }
+
+    private fun openAccessibilitySettings(): Boolean {
+        return runCatching {
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            true
+        }.getOrDefault(false)
+    }
+
     private fun triggerOneTouchSetup() {
-        val perms = permissionHub.getAllRuntimePermissionsToRequest()
-        if (perms.isNotEmpty()) {
-            requestPermissionsLauncher.launch(perms)
+        val missingPerms = permissionHub.getAllRuntimePermissionsToRequest().filter { perm ->
+            ContextCompat.checkSelfPermission(this, perm) != PackageManager.PERMISSION_GRANTED
+        }.toTypedArray()
+        if (missingPerms.isNotEmpty()) {
+            requestPermissionsLauncher.launch(missingPerms)
         }
         agentEngine.runOneTouchAutoSetup()
-        Toast.makeText(this, "원터치 환경 자동 구성을 실행했습니다.", Toast.LENGTH_SHORT).show()
+        val overlayGranted = runCatching { Settings.canDrawOverlays(this) }.getOrDefault(false)
+        val a11yConnected = HansonAccessibilityService.instance != null &&
+            HansonAccessibilityService.engineState.value.isConnected
+        when {
+            !overlayGranted -> {
+                if (openOverlayPermissionSettings()) {
+                    Toast.makeText(this, "다른 앱 위에 표시 권한을 허용해 주세요.", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(this, "원터치 환경 자동 구성을 실행했습니다.", Toast.LENGTH_SHORT).show()
+                }
+            }
+            !a11yConnected -> {
+                if (openAccessibilitySettings()) {
+                    Toast.makeText(this, "접근성 설정에서 Hanson 서비스를 켜주세요.", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(this, "원터치 환경 자동 구성을 실행했습니다.", Toast.LENGTH_SHORT).show()
+                }
+            }
+            else -> {
+                Toast.makeText(this, "원터치 환경 자동 구성을 실행했습니다.", Toast.LENGTH_SHORT).show()
+            }
+        }
     }
 }
 

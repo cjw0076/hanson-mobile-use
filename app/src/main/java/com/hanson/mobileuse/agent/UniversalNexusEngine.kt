@@ -6,10 +6,10 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.net.Uri
 import android.provider.Settings
-import android.util.Base64
 import com.hanson.mobileuse.accessibility.AtomicSnapshot
 import com.hanson.mobileuse.accessibility.HansonAccessibilityService
 import com.hanson.mobileuse.notification.InterceptedNotification
@@ -24,7 +24,6 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
-import java.net.URLDecoder
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 
@@ -79,8 +78,10 @@ data class NexusExecutionResult(
  *    Teleports into YouTube, Naver/Google, Maps, and 12+ Android Settings panels in 20ms, and pipes live screen/chat/clipboard context into Notes, Calendar, Clipboard, Quick-Reply, or System Share Sheet.
  * 2. **Cross-Device Mesh & Peripheral / IoT Control (`executeCrossDeviceOrPeripheralControl`)**:
  *    Connects Phone <-> PC/Laptop CLI Bridge (`:18889`), Peer A2A Agents (`/a2a`), Bluetooth/BLE peripherals, Audio routing (`speakerphone`/`bluetooth_sco`), and REST/HTTP IoT & Smart-Home Edge nodes.
- * 3. **Headless & Interactive Mobile Browser-Use Engine (`executeMobileBrowserUse`)**:
- *    Fetches, cleans, and extracts structured DOM text/links/tables from any URL or web search in the background (`BG` lane) without hijacking the foreground screen, or mounts an interactive DOM-instrumented WebView in the Board.
+ * 3. **2026 LLM Native Web Grounding Engine (`executeHeadlessBrowserUse`, `executeMobileBrowserUse`)**:
+ *    Delegates web research & URL summarization to `GeminiMultimodalClient.answerTextOrGroundedWebQuery`
+ *    (Gemini native `google_search`/`url_context`, Anthropic web search, or Laptop CLI Bridge `:18889`)
+ *    and emits verified markdown citations (`- [Title](https://...)`) for native clickable citation cards.
  * 4. **Live Code Drawing & AI Image Synthesis (`executeDrawWithCode`, `executeGenerateVisualMedia`)**:
  *    Synthesizes live interactive SVG / HTML5 Canvas / Charts / Calculators / Mini-Apps (`draw_with_code`) and generates AI / Procedural Vector-Canvas Images (`generate_visual_media`) rendered inline in the Command Center!
  */
@@ -183,7 +184,10 @@ class UniversalNexusEngine(
     fun tryExecuteUniversalNexus(
         prompt: String,
         latestSnapshot: AtomicSnapshot?,
-        apiKey: String = ""
+        apiKey: String = "",
+        modelName: String = GeminiMultimodalClient.DEFAULT_MODEL,
+        customBaseUrl: String = "",
+        bridgeToken: String = ""
     ): NexusExecutionResult? {
         val p = prompt.trim()
         val pLower = p.lowercase(Locale.ROOT)
@@ -395,32 +399,25 @@ class UniversalNexusEngine(
             )
         }
 
-        // Pillar 3: Headless / Interactive Mobile Browser-Use ("브라우저로", "웹페이지 요약", "사이트 크롤링", "해커뉴스", "https://...")
+        // Pillar 3: 2026 LLM Native Web Grounding ("브라우저로", "웹페이지 요약", "해커뉴스", "https://...")
         val urlMatch = Regex("(https?://[^\\s]+)").find(p)?.value
-        if (pLower.contains("브라우저로") || pLower.contains("웹에서 긁어") || pLower.contains("웹페이지") ||
+        if (pLower.contains("브라우저로") || pLower.contains("웹페이지") ||
             pLower.contains("사이트 읽어") || pLower.contains("해커뉴스") || pLower.contains("hacker news") ||
             (urlMatch != null && (pLower.contains("읽어") || pLower.contains("요약") || pLower.contains("추출") || pLower.contains("분석") || pLower.contains("열어") || pLower.contains("보여")))
         ) {
-            val targetUrl = urlMatch ?: when {
-                pLower.contains("해커뉴스") || pLower.contains("hacker news") -> "https://news.ycombinator.com"
-                pLower.contains("깃허브") || pLower.contains("github") -> "https://github.com/trending"
-                else -> {
-                    val q = extractSearchQuery(p, listOf("브라우저로", "웹페이지", "웹에서"))
-                    "https://html.duckduckgo.com/html/?q=${Uri.encode(q.ifBlank { p })}"
-                }
-            }
-            val renderInBoard = pLower.contains("띄워") || pLower.contains("보여") || pLower.contains("열어")
-            val outcome = executeMobileBrowserUse(
-                JSONObject()
-                    .put("action", if (renderInBoard) "open_interactive_board" else "fetch_clean_dom")
-                    .put("url", targetUrl)
-                    .put("goal", p)
+            val outcome = executeHeadlessBrowserUse(
+                queryOrUrl = p,
+                apiKey = apiKey,
+                modelName = modelName,
+                customBaseUrl = customBaseUrl,
+                bridgeToken = bridgeToken
             )
             return NexusExecutionResult(
                 handled = true,
                 summaryKo = outcome.outputText,
-                badge = "NEXUS-BROWSER-USE",
-                renderedVisualBoard = renderInBoard
+                badge = if (outcome.succeeded) "NEXUS-WEB-GROUNDING" else "NEXUS-WEB-ERROR",
+                renderedVisualBoard = false,
+                hasError = !outcome.succeeded
             )
         }
 
@@ -449,7 +446,8 @@ class UniversalNexusEngine(
             return NexusExecutionResult(
                 handled = true,
                 summaryKo = outcome.outputText,
-                badge = "NEXUS-CROSS-DEVICE"
+                badge = "NEXUS-CROSS-DEVICE",
+                hasError = !outcome.succeeded
             )
         }
 
@@ -503,8 +501,17 @@ class UniversalNexusEngine(
                 }.getOrDefault(emptyList())
 
                 val am = appContext.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
-                val btAudioActive = am?.isBluetoothA2dpOn == true || am?.isBluetoothScoOn == true
-                val speakerOn = am?.isSpeakerphoneOn == true
+                val commDevice = am?.communicationDevice
+                val outputDevices = am?.getDevices(AudioManager.GET_DEVICES_OUTPUTS).orEmpty()
+                val btTypes = setOf(
+                    AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+                    AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
+                    AudioDeviceInfo.TYPE_BLE_HEADSET,
+                    AudioDeviceInfo.TYPE_BLE_SPEAKER,
+                    AudioDeviceInfo.TYPE_HEARING_AID
+                )
+                val btAudioActive = (commDevice?.type in btTypes) || outputDevices.any { it.type in btTypes }
+                val speakerOn = commDevice?.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
 
                 val summary = buildString {
                     append("주변 기기 및 블루투스 허브 상태: Bluetooth=${if (isEnabled) "ON" else "OFF"}")
@@ -532,17 +539,60 @@ class UniversalNexusEngine(
                     ?: return ToolExecutionOutcome(false, "AudioManager를 사용할 수 없습니다.")
                 val turnOff = rawPrompt.contains("꺼") || rawPrompt.contains("해제") || payload.equals("off", ignoreCase = true)
                 val useBt = rawPrompt.contains("블루투스") || payload.contains("bluetooth", ignoreCase = true)
-                @Suppress("DEPRECATION")
-                if (useBt) {
-                    am.startBluetoothSco()
-                    am.isBluetoothScoOn = !turnOff
-                } else {
-                    am.isSpeakerphoneOn = !turnOff
+
+                if (turnOff) {
+                    am.clearCommunicationDevice()
+                    val routeDesc = if (useBt) {
+                        "블루투스 오디오 라우팅을 해제하고 기본 오디오 경로로 되돌렸어요."
+                    } else {
+                        "스피커폰(Speakerphone) 출력을 끄고 기본 오디오 경로로 되돌렸어요."
+                    }
+                    return ToolExecutionOutcome(
+                        succeeded = true,
+                        outputText = routeDesc,
+                        receipt = ActionReceipt(
+                            toolName = "cross_device_control",
+                            summaryKo = "오디오 주변기기 라우팅 해제",
+                            detailKo = routeDesc,
+                            undoHintKo = "다시 명령하여 오디오 출력을 전환할 수 있습니다."
+                        )
+                    )
                 }
-                val routeDesc = if (useBt) {
-                    "블루투스 오디오 라우팅을 ${if (!turnOff) "활성화" else "해제"}했어요."
+
+                val available = am.availableCommunicationDevices
+                val targetDevice = if (useBt) {
+                    available.firstOrNull {
+                        it.type == AudioDeviceInfo.TYPE_BLE_HEADSET ||
+                            it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
+                            it.type == AudioDeviceInfo.TYPE_HEARING_AID
+                    }
                 } else {
-                    "스피커폰(Speakerphone) 출력을 ${if (!turnOff) "켰어요" else "껐어요"}."
+                    available.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+                }
+
+                if (targetDevice == null) {
+                    val missingDesc = if (useBt) {
+                        "연결된 블루투스 통신 오디오 기기를 찾을 수 없어 라우팅을 전환하지 못했습니다."
+                    } else {
+                        "내장 스피커폰 오디오 장치를 찾을 수 없어 라우팅을 전환하지 못했습니다."
+                    }
+                    return ToolExecutionOutcome(succeeded = false, outputText = missingDesc)
+                }
+
+                val switched = runCatching { am.setCommunicationDevice(targetDevice) }.getOrDefault(false)
+                if (!switched) {
+                    val failDesc = if (useBt) {
+                        "블루투스 오디오(${targetDevice.productName})로 라우팅 전환에 실패했습니다."
+                    } else {
+                        "스피커폰 출력 전환에 실패했습니다."
+                    }
+                    return ToolExecutionOutcome(succeeded = false, outputText = failDesc)
+                }
+
+                val routeDesc = if (useBt) {
+                    "블루투스 오디오(${targetDevice.productName}) 라우팅을 활성화했어요."
+                } else {
+                    "스피커폰(Speakerphone) 출력을 켰어요."
                 }
                 ToolExecutionOutcome(
                     succeeded = true,
@@ -569,11 +619,13 @@ class UniversalNexusEngine(
                     eventTitle = "CROSS_DEVICE_SYNC",
                     payloadText = textToSync
                 )
-                val msg = if (sentOk) {
-                    "크로스 디바이스 브리지($endpoint)를 통해 노트북/PC로 데이터를 즉시 전송하고 동기화했어요: \"${textToSync.take(70)}\""
-                } else {
-                    "시스템 클립보드에 데이터를 동기화 준비했으며, 로컬 A2A/MCP 포트(:18888) 및 노트북 브리지(:18889) 큐에 게시했어요: \"${textToSync.take(70)}\""
+                if (!sentOk) {
+                    return ToolExecutionOutcome(
+                        succeeded = false,
+                        outputText = "노트북/PC 브리지($endpoint)로의 HTTP POST 전송에 실패했습니다. 기기 클립보드에는 복사해 두었지만 원격 PC에는 전달되지 않았으므로 브리지 서버 실행 및 연결 상태를 확인해 주세요."
+                    )
                 }
+                val msg = "크로스 디바이스 브리지($endpoint)를 통해 노트북/PC로 데이터를 전송하고 응답을 확인했어요: \"${textToSync.take(70)}\""
                 ToolExecutionOutcome(
                     succeeded = true,
                     outputText = msg,
@@ -581,7 +633,7 @@ class UniversalNexusEngine(
                         toolName = "cross_device_control",
                         summaryKo = "PC/노트북 크로스 디바이스 브리지 전송",
                         detailKo = "Target=$endpoint · Payload=${textToSync.take(60)}",
-                        undoHintKo = "연결된 PC/노트북에서 즉시 수신됩니다."
+                        undoHintKo = "연결된 PC/노트북에서 수신 완료되었습니다."
                     )
                 )
             }
@@ -596,11 +648,13 @@ class UniversalNexusEngine(
                     eventTitle = if (action == "iot_robot_command") "ROBOT_PERIPHERAL_CMD" else "A2A_TASK_DELEGATE",
                     payloadText = payload.ifBlank { rawPrompt }
                 )
-                val msg = if (sentOk) {
-                    "외부 기기/에이전트 노드($endpoint)로 명령을 전송하고 응답을 확인했어요: \"${payload.take(80)}\""
-                } else {
-                    "외부 기기/로봇/A2A 제어 패킷을 생성하여 로컬 브리지($endpoint)에 발행했어요: \"${payload.take(80)}\""
+                if (!sentOk) {
+                    return ToolExecutionOutcome(
+                        succeeded = false,
+                        outputText = "외부 기기/에이전트 노드($endpoint)로의 HTTP POST 전송에 실패했습니다. 대상 서버가 실행 중인지와 네트워크 연결을 확인해 주세요."
+                    )
                 }
+                val msg = "외부 기기/에이전트 노드($endpoint)로 명령을 전송하고 응답을 확인했어요: \"${payload.take(80)}\""
                 ToolExecutionOutcome(
                     succeeded = true,
                     outputText = msg,
@@ -618,215 +672,124 @@ class UniversalNexusEngine(
     }
 
     // =========================================================================
-    // PILLAR 3: Headless & Interactive Mobile Browser-Use Engine (`browser_use`)
+    // PILLAR 3: 2026 LLM Native Web Grounding (`executeHeadlessBrowserUse`)
     // =========================================================================
 
-    fun executeMobileBrowserUse(args: JSONObject): ToolExecutionOutcome {
+    fun executeHeadlessBrowserUse(
+        queryOrUrl: String,
+        apiKey: String = "",
+        modelName: String = GeminiMultimodalClient.DEFAULT_MODEL,
+        customBaseUrl: String = "",
+        bridgeToken: String = ""
+    ): ToolExecutionOutcome {
         totalBrowserUseOps++
-        val action = args.optString("action", "fetch_clean_dom").lowercase(Locale.ROOT).trim()
-        val rawUrl = args.optString("url", "").trim()
-        val queryOrGoal = args.optString("goal", args.optString("query", "")).trim()
-
-        val targetUrl = when {
-            rawUrl.startsWith("http://") || rawUrl.startsWith("https://") -> rawUrl
-            rawUrl.isNotBlank() && rawUrl.contains(".") && !rawUrl.contains(" ") -> "https://$rawUrl"
-            else -> {
-                val q = rawUrl.ifBlank { queryOrGoal }.ifBlank { "AI Agent News" }
-                "https://html.duckduckgo.com/html/?q=${Uri.encode(q)}"
-            }
-        }
-
-        // Fetch HTML in background via OkHttp (works in both FG and BG lanes without hijacking screen!)
-        val fetched = runCatching {
-            val req = Request.Builder()
-                .url(targetUrl)
-                .header(
-                    "User-Agent",
-                    "Mozilla/5.0 (Linux; Android 15; SM-S938N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Mobile Safari/537.36"
-                )
-                .header("Accept-Language", "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7")
-                .build()
-            httpClient.newCall(req).execute().use { resp ->
-                val bodyStr = resp.body?.string().orEmpty()
-                Triple(resp.code, resp.request.url.toString(), bodyStr)
-            }
-        }.getOrElse { e ->
-            Triple(-1, targetUrl, "오류: ${e.message}")
-        }
-
-        val (statusCode, finalUrl, rawHtml) = fetched
-        if (statusCode == -1 || rawHtml.isBlank()) {
+        val cleanQuery = queryOrUrl.trim()
+        if (cleanQuery.isEmpty()) {
             return ToolExecutionOutcome(
                 succeeded = false,
-                outputText = "모바일 브라우저 엔진이 '$targetUrl' 페이지를 가져오지 못했습니다 ($rawHtml)."
+                outputText = "웹 조사할 질문이나 URL을 입력해 주세요."
             )
         }
 
-        val parsedDom = parseHtmlToCleanDomSummary(finalUrl, rawHtml)
+        val grounded = GeminiMultimodalClient().answerTextOrGroundedWebQuery(
+            userGoal = cleanQuery,
+            apiKey = apiKey,
+            modelName = modelName,
+            customBaseUrl = customBaseUrl,
+            enableWebSearch = true,
+            bridgeToken = bridgeToken
+        )
 
-        if (action == "open_interactive_board" || action == "render_board") {
-            val browserCardHtml = buildInteractiveBrowserBoardHtml(finalUrl, parsedDom)
-            GenerativeUiStateHolder.publishSpec(
-                GenerativeUiSpec(
-                    title = "모바일 브라우저 보드 · ${parsedDom.title.take(22)}",
-                    subtitle = finalUrl.take(48),
-                    htmlContent = browserCardHtml,
-                    heightDp = 280
-                )
+        if (!grounded.succeeded || grounded.answerKo.isBlank()) {
+            val detailReason = grounded.errorReason?.takeIf { it.isNotBlank() }?.let { " ($it)" }.orEmpty()
+            return ToolExecutionOutcome(
+                succeeded = false,
+                outputText = "웹 리서치를 실행하려면 AI API 키(Gemini google_search) 또는 노트북 CLI 브리지(:18889) 연결이 필요합니다$detailReason. 설정에서 API 키를 입력하거나 브리지를 연결해 주세요."
             )
         }
 
-        val summaryText = buildString {
-            appendLine("[모바일 Browser-Use 추출 완료] 제목: ${parsedDom.title}")
-            appendLine("URL: $finalUrl")
-            if (parsedDom.textSnippet.isNotBlank()) {
-                appendLine("핵심 본문 요약: ${parsedDom.textSnippet.take(360)}")
-            }
-            if (parsedDom.links.isNotEmpty()) {
-                appendLine("주요 링크 (${parsedDom.links.size}개):")
-                parsedDom.links.take(6).forEachIndexed { idx, (label, href) ->
-                    appendLine("  [${idx + 1}] $label -> $href")
+        val verifiedCitations = grounded.citations
+            .filter { (_, uri) -> uri.trim().startsWith("https://", ignoreCase = true) }
+            .distinctBy { (_, uri) -> uri.trim() }
+            .take(8)
+
+        val formattedOutput = buildString {
+            append(grounded.answerKo.trim())
+            if (verifiedCitations.isNotEmpty()) {
+                appendLine()
+                appendLine()
+                appendLine("출처:")
+                verifiedCitations.forEach { (title, uri) ->
+                    val safeTitle = title
+                        .replace("[", "(")
+                        .replace("]", ")")
+                        .replace("\n", " ")
+                        .trim()
+                        .ifBlank { uri.trim() }
+                    appendLine("- [$safeTitle](${uri.trim()})")
                 }
             }
         }.trim()
 
-        return ToolExecutionOutcome(
-            succeeded = true,
-            outputText = summaryText,
-            receipt = ActionReceipt(
-                toolName = "browser_use",
-                summaryKo = "모바일 Browser-Use: ${parsedDom.title.take(28)}",
-                detailKo = finalUrl,
-                undoHintKo = "추출된 링크 번호를 지시하거나 보드에서 바로 열 수 있습니다."
+        val citationItems = HumanSummaryAndCardBuilder.extractVerifiedHttpsCitations(formattedOutput)
+        val citationCard = if (citationItems.isNotEmpty()) {
+            val primaryHost = citationItems.first().subtitle
+            StructuredUiCard(
+                templateType = StructuredUiTemplateType.CURATED_LIST,
+                headerTitle = "웹 검색 출처 · ${citationItems.size}건",
+                headerSubtitle = if (citationItems.size == 1) primaryHost else "$primaryHost 외 ${citationItems.size - 1}곳",
+                items = citationItems,
+                footerHint = "출처 항목을 탭하면 확인된 HTTPS 원문을 바로 열 수 있습니다 ↗"
             )
-        )
-    }
-
-    private data class ParsedDomPage(
-        val title: String,
-        val textSnippet: String,
-        val links: List<Pair<String, String>>
-    )
-
-    private fun parseHtmlToCleanDomSummary(baseUrl: String, html: String): ParsedDomPage {
-        val title = Regex("<title[^>]*>(.*?)</title>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
-            .find(html)?.groupValues?.getOrNull(1)
-            ?.replace(Regex("\\s+"), " ")
-            ?.let { decodeHtmlEntities(it) }
-            ?.trim()
-            ?.takeIf { it.isNotBlank() }
-            ?: baseUrl.substringAfter("://").substringBefore("/")
-
-        // Extract top clean content links (skipping generic nav bar items)
-        val navSkipSet = setOf(
-            "hacker news", "new", "past", "comments", "ask", "show", "jobs", "submit", "login", "hide", "more"
-        )
-        val linkRegex = Regex("<a\\s+[^>]*href=[\"']([^\"'#]+)[\"'][^>]*>(.*?)</a>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
-        val extractedLinks = mutableListOf<Pair<String, String>>()
-        for (m in linkRegex.findAll(html)) {
-            if (extractedLinks.size >= 10) break
-            var rawHref = m.groupValues[1].trim()
-            val rawAnchor = m.groupValues[2]
-                .replace(Regex("<[^>]+>"), " ")
-                .replace(Regex("\\s+"), " ")
-                .let { decodeHtmlEntities(it) }
-                .trim()
-            if (rawAnchor.length < 4 || rawAnchor.lowercase(Locale.ROOT) in navSkipSet || rawHref.startsWith("javascript:")) continue
-            if (rawHref.startsWith("vote?") || rawHref.startsWith("hide?") || rawHref.startsWith("from?site=")) continue
-            if (rawHref.contains("uddg=")) {
-                val encoded = rawHref.substringAfter("uddg=").substringBefore("&")
-                rawHref = runCatching { URLDecoder.decode(encoded, "UTF-8") }.getOrDefault(rawHref)
-            } else if (rawHref.startsWith("//")) {
-                rawHref = "https:$rawHref"
-            } else if (rawHref.startsWith("/")) {
-                val origin = Regex("^(https?://[^/]+)").find(baseUrl)?.value ?: ""
-                rawHref = "$origin$rawHref"
-            }
-            if (extractedLinks.none { it.first == rawAnchor }) {
-                extractedLinks.add(rawAnchor.take(72) to rawHref)
-            }
+        } else {
+            null
         }
 
-        // Strip script/style/tags for clean text
-        val stripped = html
-            .replace(Regex("<script[^>]*>.*?</script>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)), " ")
-            .replace(Regex("<style[^>]*>.*?</style>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)), " ")
-            .replace(Regex("<noscript[^>]*>.*?</noscript>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)), " ")
-            .replace(Regex("<[^>]+>"), " ")
-            .let { decodeHtmlEntities(it) }
-            .replace(Regex("\\s+"), " ")
-            .trim()
-
-        return ParsedDomPage(
-            title = title,
-            textSnippet = stripped.take(800),
-            links = extractedLinks
+        val badgeLabel = grounded.providerBadge.ifBlank { "LLM-WEB-GROUNDING" }
+        return ToolExecutionOutcome(
+            succeeded = true,
+            outputText = formattedOutput,
+            receipt = ActionReceipt(
+                toolName = "browser_use",
+                summaryKo = "웹 그라운딩 조사 완료 ($badgeLabel)",
+                detailKo = cleanQuery.take(90),
+                undoHintKo = "출처 카드를 탭하면 확인된 HTTPS 원문을 바로 열 수 있습니다."
+            ),
+            structuredCard = citationCard
         )
     }
 
-    private fun decodeHtmlEntities(input: String): String =
-        HumanSummaryAndCardBuilder.decodeAllHtmlEntities(input)
+    fun executeMobileBrowserUse(
+        args: JSONObject,
+        apiKey: String = "",
+        modelName: String = GeminiMultimodalClient.DEFAULT_MODEL,
+        customBaseUrl: String = "",
+        bridgeToken: String = ""
+    ): ToolExecutionOutcome {
+        val rawUrl = args.optString("url", "").trim()
+        val goal = args.optString("goal", args.optString("query", "")).trim()
+        val combinedQuery = when {
+            goal.isNotBlank() && rawUrl.isNotBlank() && !goal.contains(rawUrl) -> "$goal ($rawUrl)"
+            goal.isNotBlank() -> goal
+            rawUrl.isNotBlank() -> rawUrl
+            else -> ""
+        }
+        val resolvedApiKey = apiKey.ifBlank { args.optString("api_key", "").trim() }
+        val resolvedModel = if (modelName != GeminiMultimodalClient.DEFAULT_MODEL) {
+            modelName
+        } else {
+            args.optString("model_name", "").trim().ifBlank { modelName }
+        }
+        val resolvedBaseUrl = customBaseUrl.ifBlank { args.optString("custom_base_url", "").trim() }
+        val resolvedBridgeToken = bridgeToken.ifBlank { args.optString("bridge_token", "").trim() }
 
-    private fun buildInteractiveBrowserBoardHtml(url: String, dom: ParsedDomPage): String {
-        val safeTitle = dom.title.replace("\"", "&quot;").replace("<", "&lt;")
-        val safeSnippet = dom.textSnippet.take(280).replace("\"", "&quot;").replace("<", "&lt;")
-        val linksHtml = dom.links.take(6).mapIndexed { i, (label, href) ->
-            val safeLabel = label.replace("<", "&lt;").replace("'", "")
-            val safeHref = href.replace("'", "")
-            """<div class="link-item" onclick="window.HansonOS && window.HansonOS.openDeepLink('$safeHref')">
-                <span class="idx">[${i + 1}]</span>
-                <span class="lbl">$safeLabel</span>
-              </div>"""
-        }.joinToString("\n")
-
-        return """
-<!DOCTYPE html>
-<html lang="ko">
-<head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<style>
-  :root { --bg: #FFFFFF; --sub: #F4F4F5; --line: #E4E4E7; --ink: #09090B; --muted: #71717A; }
-  @media (prefers-color-scheme: dark) {
-    :root { --bg: #121214; --sub: #18181B; --line: #27272A; --ink: #FAFAFA; --muted: #A1A1AA; }
-  }
-  * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
-  html, body {
-    filter: grayscale(100%) !important;
-    -webkit-filter: grayscale(100%) !important;
-  }
-  body { background: transparent; color: var(--ink); padding: 4px; }
-  .card { background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 10px; }
-  .hdr { font-size: 12.5px; font-weight: 800; margin-bottom: 4px; }
-  .snip { font-size: 11px; color: var(--muted); line-height: 1.45; margin-bottom: 8px; }
-  .links { display: flex; flex-direction: column; gap: 5px; max-height: 140px; overflow-y: auto; }
-  .link-item { background: var(--sub); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; font-size: 11px; display: flex; gap: 6px; align-items: center; cursor: pointer; }
-  .link-item:active { border-color: var(--ink); }
-  .idx { font-family: monospace; font-weight: 700; color: var(--ink); }
-  .lbl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-</style>
-<script>
-window.onerror = function(msg, url, line, col, error) {
-    if (window.HansonOS && window.HansonOS.reportError) {
-        window.HansonOS.reportError(JSON.stringify({ type: 'runtime_error', message: String(msg), line: line, column: col }));
-    }
-};
-window.addEventListener('unhandledrejection', function(event) {
-    if (window.HansonOS && window.HansonOS.reportError) {
-        window.HansonOS.reportError(JSON.stringify({ type: 'unhandled_rejection', reason: String(event.reason) }));
-    }
-});
-</script>
-</head>
-<body>
-  <div class="card">
-    <div class="hdr">$safeTitle</div>
-    <div class="snip">$safeSnippet</div>
-    <div class="links">$linksHtml</div>
-  </div>
-</body>
-</html>
-        """.trimIndent()
+        return executeHeadlessBrowserUse(
+            queryOrUrl = combinedQuery,
+            apiKey = resolvedApiKey,
+            modelName = resolvedModel,
+            customBaseUrl = resolvedBaseUrl,
+            bridgeToken = resolvedBridgeToken
+        )
     }
 
     // =========================================================================
@@ -1169,12 +1132,25 @@ window.addEventListener('unhandledrejection', function(event) {
                     prompt = prompt,
                     mediaUrlOrPath = mediaUrl
                 )
+                val hasRealLocalVideo = (mp4File.name.endsWith(".mp4", true) || mp4File.name.endsWith(".webm", true)) &&
+                    mp4File.isFile && mp4File.length() > 256L
+                val hasRealRemoteVideo = (mediaUrl.startsWith("https://", true) || mediaUrl.startsWith("http://", true)) &&
+                    (mediaUrl.endsWith(".mp4", true) || mediaUrl.endsWith(".webm", true))
+
+                if (!hasRealLocalVideo && !hasRealRemoteVideo) {
+                    return ToolExecutionOutcome(
+                        succeeded = false,
+                        outputText = "실제 MP4 비디오 렌더링이 생성되지 않았습니다. 직접 .mp4/.webm URL 또는 로컬 비디오 파일 경로를 지정해 주세요."
+                    )
+                }
+
                 val title = "비디오 · ${prompt.take(24)}"
-                val htmlContent = buildInteractiveMp4VideoPlayerHtml(prompt, mediaUrl)
+                val playableUrl = if (hasRealRemoteVideo) mediaUrl else ""
+                val htmlContent = buildInteractiveMp4VideoPlayerHtml(prompt, playableUrl)
                 GenerativeUiStateHolder.publishSpec(
                     GenerativeUiSpec(
                         title = title,
-                        subtitle = "시네마 비디오 플레이어",
+                        subtitle = mp4SourceLabel,
                         htmlContent = htmlContent,
                         heightDp = 280
                     )
@@ -1182,41 +1158,43 @@ window.addEventListener('unhandledrejection', function(event) {
                 val block = MultimodalMediaBlock(
                     format = MediaFormatType.MP4,
                     title = title,
-                    subtitle = "시네마 비디오 플레이어",
-                    mediaUrlOrUri = mediaUrl,
+                    subtitle = mp4SourceLabel,
+                    mediaUrlOrUri = playableUrl,
                     inlineHtmlContent = htmlContent,
                     recommendedHeightDp = 230,
-                    interactiveHintKo = "재생/일시정지(▶/❚❚), 타임라인 탐색, 배속 및 음소거 제어 ↗",
-                    localFilePath = mp4File.absolutePath,
-                    fileSizeBytes = mp4File.length(),
+                    interactiveHintKo = "재생/일시정지(▶/❚❚), 타임라인 탐색 및 배속 제어 ↗",
+                    localFilePath = if (hasRealLocalVideo) mp4File.absolutePath else "",
+                    fileSizeBytes = if (hasRealLocalVideo) mp4File.length() else 0L,
                     sourceLabel = mp4SourceLabel,
                     generatedSourceCode = mp4Code
                 )
                 ToolExecutionOutcome(
                     succeeded = true,
-                    outputText = "'${prompt.take(24)}' 비디오를 인라인 플레이어로 준비했어요!",
+                    outputText = "'${prompt.take(24)}' 실제 비디오(${mp4File.name})를 인라인 플레이어로 열었어요.",
                     receipt = ActionReceipt(
                         toolName = "generate_visual_media",
-                        summaryKo = "비디오 생성 및 재생: ${mp4File.name}",
+                        summaryKo = "실제 비디오 재생: ${mp4File.name}",
                         detailKo = mp4File.absolutePath,
-                        undoHintKo = "플레이어 하단 컨트롤러에서 일시정지하거나 구간을 이동할 수 있습니다."
+                        undoHintKo = "플레이어 컨트롤러에서 일시정지하거나 구간을 이동할 수 있습니다."
                     ),
                     mediaBlock = block
                 )
             }
 
             MediaFormatType.GIF -> {
+                val hasRealRemoteGif = mediaUrl.startsWith("https://", true) && mediaUrl.endsWith(".gif", true)
+                if (!hasRealRemoteGif) {
+                    return ToolExecutionOutcome(
+                        succeeded = false,
+                        outputText = "실제 GIF 파일 인코딩은 온디바이스에서 지원하지 않습니다. 직접 .gif HTTPS URL을 제공하거나 인터랙티브 코드 캔버스(draw_with_code)를 요청해 주세요."
+                    )
+                }
                 val htmlContent = buildInteractiveGifLoopHtml(prompt, mediaUrl)
-                val (gifFile, gifSourceLabel, _) = AgentMediaFileEngine.synthesizeAndSaveCodeCanvasFile(
-                    context = appContext,
-                    prompt = "gif_$prompt",
-                    fallbackHtmlContent = htmlContent
-                )
-                val title = "애니메이션 루프 · ${prompt.take(18)}"
+                val title = "GIF · ${prompt.take(20)}"
                 GenerativeUiStateHolder.publishSpec(
                     GenerativeUiSpec(
                         title = title,
-                        subtitle = "감성 무한 루프 모션",
+                        subtitle = mediaUrl.take(48),
                         htmlContent = htmlContent,
                         heightDp = 270
                     )
@@ -1224,24 +1202,21 @@ window.addEventListener('unhandledrejection', function(event) {
                 val block = MultimodalMediaBlock(
                     format = MediaFormatType.GIF,
                     title = title,
-                    subtitle = "감성 무한 루프 모션",
+                    subtitle = "외부 GIF 이미지",
                     mediaUrlOrUri = mediaUrl,
                     inlineHtmlContent = htmlContent,
                     recommendedHeightDp = 220,
-                    interactiveHintKo = "화면을 탭하여 일시정지하거나 다시 재생할 수 있습니다 ↗",
-                    localFilePath = gifFile.absolutePath,
-                    fileSizeBytes = gifFile.length(),
-                    sourceLabel = gifSourceLabel,
-                    generatedSourceCode = htmlContent
+                    interactiveHintKo = "외부 GIF 원문을 인라인으로 재생 중입니다 ↗",
+                    sourceLabel = "EXTERNAL GIF URL"
                 )
                 ToolExecutionOutcome(
                     succeeded = true,
-                    outputText = "'${prompt.take(24)}' 무한 루프 애니메이션을 준비했어요!",
+                    outputText = "'${prompt.take(24)}' GIF 이미지를 불러왔어요.",
                     receipt = ActionReceipt(
                         toolName = "generate_visual_media",
-                        summaryKo = "GIF 루프 모션 생성: ${gifFile.name}",
-                        detailKo = gifFile.absolutePath,
-                        undoHintKo = "GIF 영역을 탭하면 일시정지되거나 다시 재생됩니다."
+                        summaryKo = "외부 GIF 로드",
+                        detailKo = mediaUrl,
+                        undoHintKo = "카드에서 GIF 원본 URL을 확인할 수 있습니다."
                     ),
                     mediaBlock = block
                 )
@@ -1265,17 +1240,22 @@ window.addEventListener('unhandledrejection', function(event) {
                     base64Data = base64Image
                 )
 
-                val title = "고화질 이미지 · ${prompt.take(20)}"
+                val title = "이미지 · ${prompt.take(20)}"
                 val htmlContent = when {
                     !base64Image.isNullOrBlank() -> buildBase64ImageViewerHtml(prompt, base64Image, mimeType)
                     mediaUrl.isNotBlank() -> buildExternalImageViewerHtml(prompt, mediaUrl)
                     else -> buildProceduralGenerativeArtworkHtml(prompt, style)
                 }
+                val subtitleKo = when {
+                    !base64Image.isNullOrBlank() -> "Gemini 이미지 생성 (gemini-nano-banana-2.1)"
+                    mediaUrl.isNotBlank() -> "외부 이미지 뷰어"
+                    else -> "로컬 절차적 PNG 아트워크 (API 미응답 폴백)"
+                }
 
                 GenerativeUiStateHolder.publishSpec(
                     GenerativeUiSpec(
                         title = title,
-                        subtitle = "감성 포토그래피",
+                        subtitle = subtitleKo,
                         htmlContent = htmlContent,
                         heightDp = 285
                     )
@@ -1284,7 +1264,7 @@ window.addEventListener('unhandledrejection', function(event) {
                 val block = MultimodalMediaBlock(
                     format = MediaFormatType.IMAGE,
                     title = title,
-                    subtitle = "감성 포토그래피",
+                    subtitle = subtitleKo,
                     mediaUrlOrUri = mediaUrl,
                     inlineHtmlContent = htmlContent,
                     recommendedHeightDp = 225,
@@ -1294,12 +1274,17 @@ window.addEventListener('unhandledrejection', function(event) {
                     sourceLabel = imgSourceLabel,
                     generatedSourceCode = imgGenCode
                 )
+                val outputMsg = when {
+                    !base64Image.isNullOrBlank() -> "'$prompt' 이미지를 Gemini(gemini-nano-banana-2.1)로 생성해 준비했어요."
+                    mediaUrl.isNotBlank() -> "'$prompt' 외부 이미지를 불러와 준비했어요."
+                    else -> "AI 이미지 API 응답을 받지 못해 로컬 절차적 PNG 파일(${imgFile.name})로 대체 표시했어요."
+                }
                 ToolExecutionOutcome(
                     succeeded = true,
-                    outputText = "'$prompt' 고화질 이미지를 채팅 카드에 준비했어요!",
+                    outputText = outputMsg,
                     receipt = ActionReceipt(
                         toolName = "generate_visual_media",
-                        summaryKo = "실제 이미지 파일 생성 및 로드: ${imgFile.name}",
+                        summaryKo = "이미지 파일 준비: ${imgFile.name}",
                         detailKo = imgFile.absolutePath,
                         undoHintKo = "카드를 탭하면 라이트박스에서 원본을 확대해 볼 수 있습니다."
                     ),
@@ -1312,8 +1297,12 @@ window.addEventListener('unhandledrejection', function(event) {
     }
 
     private fun tryFetchGeminiGeneratedImage(prompt: String, apiKey: String): Pair<String, String>? {
+        val resolvedGeminiKey = GeminiMultimodalClient.Companion.MultiProviderApiKeySet.parse(apiKey).geminiKey
+            ?.trim()
+            .orEmpty()
+        if (resolvedGeminiKey.isEmpty()) return null
         return runCatching {
-            val url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp-image-generation:generateContent?key=$apiKey"
+            val url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-nano-banana-2.1:generateContent"
             val reqJson = JSONObject().apply {
                 put(
                     "contents",
@@ -1331,6 +1320,7 @@ window.addEventListener('unhandledrejection', function(event) {
             }
             val req = Request.Builder()
                 .url(url)
+                .addHeader("x-goog-api-key", resolvedGeminiKey)
                 .post(reqJson.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
                 .build()
             httpClient.newCall(req).execute().use { resp ->
@@ -1534,16 +1524,16 @@ window.addEventListener('unhandledrejection', function(event) {
         <text class="sub-lbl" x="182" y="60">Cross-App · Intent</text>
       </g>
 
-      <g onclick="window.HansonOS && window.HansonOS.speak('System 2 고차원 추론 및 교사 계층입니다.')">
+      <g onclick="window.HansonOS && window.HansonOS.speak('System 2 고차원 추론 및 멀티모달 계층입니다.')">
         <rect class="node" x="242" y="24" width="104" height="52"/>
-        <text class="lbl" x="294" y="44">SYSTEM 2 NPU</text>
-        <text class="sub-lbl" x="294" y="60">S25 Nano · Gemini</text>
+        <text class="lbl" x="294" y="44">SYSTEM 2 VLM</text>
+        <text class="sub-lbl" x="294" y="60">Cloud · CLI Bridge</text>
       </g>
 
-      <g onclick="window.HansonOS && window.HansonOS.speak('모바일 브라우저 및 주변기기 제어 레인입니다.')">
+      <g onclick="window.HansonOS && window.HansonOS.speak('웹 그라운딩 및 주변기기 제어 레인입니다.')">
         <rect class="node" x="15" y="120" width="155" height="54"/>
-        <text class="lbl" x="92" y="141">BROWSER &amp; IOT MESH</text>
-        <text class="sub-lbl" x="92" y="158">Headless DOM · BLE · A2A</text>
+        <text class="lbl" x="92" y="141">WEB &amp; IOT MESH</text>
+        <text class="sub-lbl" x="92" y="158">Web Grounding · BLE · A2A</text>
       </g>
 
       <g onclick="window.HansonOS && window.HansonOS.speak('실시간 코드 캔버스 및 이미지 합성 엔진입니다.')">
@@ -1558,7 +1548,7 @@ window.addEventListener('unhandledrejection', function(event) {
             """.trimIndent()
         }
 
-        // Case 2: Interactive Chart / Metrics / Graph
+        // Case 2: User-Editable Bar Comparison Canvas (Zero fabricated random benchmarks)
         if (pLower.contains("차트") || pLower.contains("그래프") || pLower.contains("성능") || pLower.contains("속도") || pLower.contains("통계") || pLower.contains("비교")) {
             return """
 <!DOCTYPE html>
@@ -1577,10 +1567,9 @@ window.addEventListener('unhandledrejection', function(event) {
   body { background: transparent; color: var(--ink); padding: 4px; }
   .card { background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
   .title { font-size: 12px; font-weight: 800; margin-bottom: 10px; display: flex; justify-content: space-between; }
-  .bar-row { margin-bottom: 9px; cursor: pointer; }
+  .bar-row { margin-bottom: 9px; }
   .bar-lbl { display: flex; justify-content: space-between; font-size: 10.5px; margin-bottom: 3px; font-weight: 700; }
-  .track { width: 100%; height: 14px; background: var(--sub); border: 1px solid var(--line); border-radius: 999px; overflow: hidden; }
-  .fill { height: 100%; background: var(--ink); border-radius: 999px; transition: width 0.4s cubic-bezier(.2,.8,.2,1); }
+  input[type=range] { width: 100%; accent-color: var(--ink); }
   .foot { font-size: 10px; color: var(--muted); margin-top: 8px; text-align: right; }
 </style>
 <script>
@@ -1597,37 +1586,22 @@ window.addEventListener('unhandledrejection', function(event) {
 </script>
 </head>
 <body>
-  <div class="card" onclick="randomizeBars()">
-    <div class="title"><span>LIVE METRIC CANVAS · $safeTitle</span><span>[TAP TO SIMULATE]</span></div>
+  <div class="card">
+    <div class="title"><span>INTERACTIVE CHART · $safeTitle</span><span>EDITABLE</span></div>
     <div class="bar-row">
-      <div class="bar-lbl"><span>System 1 JIT Macro / Teleport</span><span id="v1">12 ms (98%)</span></div>
-      <div class="track"><div class="fill" id="b1" style="width:96%"></div></div>
+      <div class="bar-lbl"><span>항목 A</span><span id="v1">50</span></div>
+      <input type="range" min="0" max="100" value="50" oninput="document.getElementById('v1').innerText=this.value"/>
     </div>
     <div class="bar-row">
-      <div class="bar-lbl"><span>Verified Action Shortcut Replay</span><span id="v2">18 ms (92%)</span></div>
-      <div class="track"><div class="fill" id="b2" style="width:88%"></div></div>
+      <div class="bar-lbl"><span>항목 B</span><span id="v2">75</span></div>
+      <input type="range" min="0" max="100" value="75" oninput="document.getElementById('v2').innerText=this.value"/>
     </div>
     <div class="bar-row">
-      <div class="bar-lbl"><span>Headless Browser-Use DOM Pipe</span><span id="v3">140 ms (84%)</span></div>
-      <div class="track"><div class="fill" id="b3" style="width:76%"></div></div>
+      <div class="bar-lbl"><span>항목 C</span><span id="v3">35</span></div>
+      <input type="range" min="0" max="100" value="35" oninput="document.getElementById('v3').innerText=this.value"/>
     </div>
-    <div class="bar-row">
-      <div class="bar-lbl"><span>System 2 Cloud VLM Teacher</span><span id="v4">620 ms (Baseline)</span></div>
-      <div class="track"><div class="fill" id="b4" style="width:38%"></div></div>
-    </div>
-    <div class="foot">터치하면 실시간 샘플링 시뮬레이션이 갱신됩니다</div>
+    <div class="foot">슬라이더를 조절해 항목별 수치를 직접 비교할 수 있습니다</div>
   </div>
-  <script>
-    function randomizeBars() {
-      const p1 = 92 + Math.floor(Math.random()*7);
-      const p2 = 82 + Math.floor(Math.random()*12);
-      const p3 = 68 + Math.floor(Math.random()*18);
-      document.getElementById('b1').style.width = p1 + '%';
-      document.getElementById('b2').style.width = p2 + '%';
-      document.getElementById('b3').style.width = p3 + '%';
-      document.getElementById('v1').innerText = (8 + Math.floor(Math.random()*8)) + ' ms (' + p1 + '%)';
-    }
-  </script>
 </body>
 </html>
             """.trimIndent()
@@ -1973,14 +1947,11 @@ renderLoop();
     }
 
     /**
-     * Ahaboard Interactive MP4 Motion-Graphic Video Player (`MP4`).
-     * Supports external `.mp4`/`.webm` video streams AND a built-in 60fps Procedural Motion-Graphic
-     * Cinema Player with Play/Pause (`▶/❚❚`), interactive timeline scrubber bar, and `1x`/`2x` speed toggle.
+     * Native HTML5 MP4/WebM Video Player for verified video streams (`MP4`).
      */
     private fun buildInteractiveMp4VideoPlayerHtml(prompt: String, mp4Url: String = ""): String {
         val safeTitle = prompt.take(34).replace("\"", "&quot;").replace("<", "&lt;").replace("'", "")
         val safeUrl = mp4Url.replace("\"", "").replace("'", "")
-        val hasExternalVideo = safeUrl.endsWith(".mp4", true) || safeUrl.endsWith(".webm", true)
         return """
 <!DOCTYPE html>
 <html lang="ko">
@@ -1988,133 +1959,30 @@ renderLoop();
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <style>
-  :root { --bg: #09090B; --bar: rgba(24,24,27,0.92); --ink: #FAFAFA; --muted: #A1A1AA; --line: #27272A; }
-  * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, monospace; user-select: none; }
+  :root { --bg: #09090B; --ink: #FAFAFA; --muted: #A1A1AA; }
+  * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, monospace; }
   html, body { width: 100%; height: 100%; background: var(--bg); color: var(--ink); overflow: hidden; }
-  .player { position: relative; width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: space-between; }
-  canvas, video { width: 100%; height: 100%; object-fit: cover; display: block; }
-  .top-pill { position: absolute; top: 8px; left: 8px; right: 8px; display: flex; justify-content: space-between; pointer-events: none; }
-  .tag { background: var(--bar); border: 1px solid var(--line); border-radius: 6px; padding: 3px 7px; font-size: 9.5px; font-weight: 800; }
-  .controls { position: absolute; bottom: 0; left: 0; right: 0; background: var(--bar); border-top: 1px solid var(--line); padding: 6px 10px; display: flex; align-items: center; gap: 8px; }
-  .ctrl-btn { background: var(--ink); color: #09090B; border-radius: 6px; padding: 3px 8px; font-size: 10px; font-weight: 800; cursor: pointer; }
-  .track { flex: 1; height: 7px; background: #27272A; border-radius: 999px; overflow: hidden; cursor: pointer; position: relative; }
-  .fill { height: 100%; background: var(--ink); width: 0%; }
-  .time { font-size: 9.5px; color: var(--muted); font-weight: 700; min-width: 68px; text-align: right; }
+  .player { position: relative; width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center; }
+  video { width: 100%; height: 100%; object-fit: contain; display: block; background: #000; }
+  .caption { position: absolute; top: 8px; left: 8px; background: rgba(24,24,27,0.85); border-radius: 6px; padding: 3px 7px; font-size: 10px; font-weight: 700; pointer-events: none; }
 </style>
 </head>
 <body>
 <div class="player">
-  ${if (hasExternalVideo) """<video id="vid" src="$safeUrl" autoplay loop muted playsinline></video>""" else """<canvas id="mp4Canvas" width="680" height="400"></canvas>"""}
-  <div class="top-pill">
-    <span class="tag">MP4 · 60FPS MOTION CINEMA</span>
-    <span class="tag" id="sceneBadge">ACT 01 · SWARM ENGINE</span>
-  </div>
-  <div class="controls">
-    <div class="ctrl-btn" id="playBtn" onclick="togglePlay()">❚❚</div>
-    <div class="track" id="scrubTrack" onclick="scrubVideo(event)">
-      <div class="fill" id="scrubFill"></div>
-    </div>
-    <span class="time" id="timeCode">00:00 / 00:12</span>
-    <div class="ctrl-btn" id="spdBtn" onclick="toggleSpeed()">1x</div>
-  </div>
+  <video id="vid" src="$safeUrl" controls autoplay loop muted playsinline></video>
+  <span class="caption">$safeTitle</span>
 </div>
-<script>
-let playing = true;
-let speed = 1.0;
-let currentSec = 0.0;
-const durationSec = 12.0;
-const canvas = document.getElementById('mp4Canvas');
-const ctx = canvas ? canvas.getContext('2d') : null;
-
-function togglePlay() {
-  playing = !playing;
-  document.getElementById('playBtn').innerText = playing ? '❚❚' : '▶';
-  const v = document.getElementById('vid');
-  if (v) { if (playing) v.play(); else v.pause(); }
-}
-
-function toggleSpeed() {
-  speed = (speed === 1.0) ? 2.0 : 1.0;
-  document.getElementById('spdBtn').innerText = speed + 'x';
-  const v = document.getElementById('vid');
-  if (v) v.playbackRate = speed;
-}
-
-function scrubVideo(e) {
-  const rect = document.getElementById('scrubTrack').getBoundingClientRect();
-  const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-  currentSec = ratio * durationSec;
-  const v = document.getElementById('vid');
-  if (v && v.duration) v.currentTime = ratio * v.duration;
-}
-
-function fmtSec(s) {
-  const sec = Math.floor(s);
-  const ms = Math.floor((s - sec) * 10);
-  return '00:' + (sec < 10 ? '0' + sec : sec) + '.' + ms;
-}
-
-function tick() {
-  if (playing) {
-    currentSec = (currentSec + 0.016 * speed) % durationSec;
-  }
-  const pct = (currentSec / durationSec) * 100;
-  document.getElementById('scrubFill').style.width = pct + '%';
-  document.getElementById('timeCode').innerText = fmtSec(currentSec) + ' / 00:12';
-
-  const act = currentSec < 4 ? 'ACT 01 · MOBILE-USE SWARM' : (currentSec < 8 ? 'ACT 02 · MULTI-MODEL ROUTER' : 'ACT 03 · FAST UI REFLEX');
-  document.getElementById('sceneBadge').innerText = act;
-
-  if (ctx) {
-    const w = canvas.width, h = canvas.height;
-    ctx.fillStyle = '#09090B';
-    ctx.fillRect(0, 0, w, h);
-
-    // Dynamic grid scanline
-    ctx.strokeStyle = 'rgba(255,255,255,0.06)';
-    for (let x = 0; x < w; x += 34) {
-      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
-    }
-    const scanY = (currentSec * 90) % h;
-    ctx.strokeStyle = 'rgba(255,255,255,0.22)';
-    ctx.beginPath(); ctx.moveTo(0, scanY); ctx.lineTo(w, scanY); ctx.stroke();
-
-    // Kinetic geometric rings & data streams
-    const cx = w / 2, cy = h / 2 - 12;
-    for (let r = 0; r < 4; r++) {
-      const rad = 36 + r * 26 + Math.sin(currentSec * 3 + r) * 6;
-      ctx.strokeStyle = r === 0 ? '#FAFAFA' : 'rgba(250,250,250,0.35)';
-      ctx.lineWidth = r === 0 ? 2.4 : 1.3;
-      ctx.beginPath();
-      ctx.arc(cx, cy, rad, currentSec * (r % 2 === 0 ? 1.4 : -1.1), currentSec * (r % 2 === 0 ? 1.4 : -1.1) + Math.PI * 1.35);
-      ctx.stroke();
-    }
-
-    // Center headline typography
-    ctx.fillStyle = '#FAFAFA';
-    ctx.font = '800 18px monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText('$safeTitle', cx, cy + 5);
-    ctx.fillStyle = '#A1A1AA';
-    ctx.font = '700 11px monospace';
-    ctx.fillText(act + ' · FRAME #' + Math.floor(currentSec * 60), cx, cy + 26);
-  }
-  requestAnimationFrame(tick);
-}
-tick();
-</script>
 </body>
 </html>
         """.trimIndent()
     }
 
     /**
-     * Ahaboard Seamless Looping GIF Motion Synthesizer (`GIF`).
+     * Native HTML5 GIF Image Viewer for verified `.gif` HTTPS URLs (`GIF`).
      */
     private fun buildInteractiveGifLoopHtml(prompt: String, gifUrl: String = ""): String {
         val safeTitle = prompt.take(32).replace("\"", "&quot;").replace("<", "&lt;").replace("'", "")
         val safeUrl = gifUrl.replace("\"", "").replace("'", "")
-        val hasExternalGif = safeUrl.endsWith(".gif", true)
         return """
 <!DOCTYPE html>
 <html lang="ko">
@@ -2122,76 +1990,15 @@ tick();
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <style>
-  :root { --bg: #FAFAFA; --ink: #09090B; --muted: #71717A; --line: #E4E4E7; }
-  @media (prefers-color-scheme: dark) { :root { --bg: #121214; --ink: #FAFAFA; --muted: #A1A1AA; --line: #27272A; } }
-  * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, monospace; user-select: none; }
+  :root { --bg: #FAFAFA; --ink: #09090B; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #121214; --ink: #FAFAFA; } }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { width: 100%; height: 100%; background: var(--bg); color: var(--ink); overflow: hidden; }
-  .stage { position: relative; width: 100%; height: 100%; cursor: pointer; }
-  canvas, img { width: 100%; height: 100%; object-fit: contain; display: block; }
-  .pill-bar { position: absolute; bottom: 8px; left: 8px; right: 8px; display: flex; justify-content: space-between; align-items: center; }
-  .pill { background: var(--bg); border: 1px solid var(--line); border-radius: 999px; padding: 3px 8px; font-size: 9.5px; font-weight: 800; }
+  img { width: 100%; height: 100%; object-fit: contain; display: block; }
 </style>
 </head>
 <body>
-<div class="stage" onclick="remixGif()">
-  ${if (hasExternalGif) """<img src="$safeUrl" alt="$safeTitle"/>""" else """<canvas id="gifCanvas" width="640" height="380"></canvas>"""}
-  <div class="pill-bar">
-    <span class="pill" id="gifInfo">GIF · ∞ SEAMLESS LOOP</span>
-    <span class="pill" id="framePill">FRAME 01/60 · TAP TO REMIX</span>
-  </div>
-</div>
-<script>
-let frame = 0;
-let pattern = 0;
-const canvas = document.getElementById('gifCanvas');
-const ctx = canvas ? canvas.getContext('2d') : null;
-const isDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-
-function remixGif() {
-  pattern = (pattern + 1) % 3;
-  document.getElementById('gifInfo').innerText = 'GIF · LOOP PATTERN #' + (pattern + 1);
-}
-
-function drawGif() {
-  frame = (frame + 1) % 60;
-  const phase = (frame / 60) * Math.PI * 2;
-  document.getElementById('framePill').innerText = 'FRAME ' + (frame < 9 ? '0'+(frame+1) : (frame+1)) + '/60 · TAP REMIX';
-
-  if (ctx) {
-    const w = canvas.width, h = canvas.height;
-    const bg = isDark ? '#121214' : '#FAFAFA';
-    const ink = isDark ? '#FAFAFA' : '#09090B';
-    ctx.fillStyle = bg;
-    ctx.fillRect(0, 0, w, h);
-
-    const cx = w / 2, cy = h / 2 - 8;
-    const count = 12;
-    for (let i = 0; i < count; i++) {
-      const a = (i / count) * Math.PI * 2 + phase * (pattern === 1 ? -1 : 1);
-      const dist = 48 + Math.sin(phase * 2 + i) * (pattern === 2 ? 36 : 22);
-      const x = cx + Math.cos(a) * dist * 1.4;
-      const y = cy + Math.sin(a) * dist;
-      const r = 8 + Math.cos(phase + i) * 4;
-      ctx.strokeStyle = ink;
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.arc(x, y, Math.max(2, r), 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.moveTo(cx, cy);
-      ctx.lineTo(x, y);
-      ctx.strokeStyle = isDark ? 'rgba(255,255,255,0.18)' : 'rgba(0,0,0,0.18)';
-      ctx.stroke();
-    }
-    ctx.fillStyle = ink;
-    ctx.font = '800 14px monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText('$safeTitle', cx, h - 42);
-  }
-  requestAnimationFrame(drawGif);
-}
-drawGif();
-</script>
+  <img src="$safeUrl" alt="$safeTitle"/>
 </body>
 </html>
         """.trimIndent()
@@ -2248,13 +2055,8 @@ window.addEventListener('unhandledrejection', function(event) {
     const ctx = canvas.getContext('2d');
     const isDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
 
-    function rand() {
-      seed = (seed * 1664525 + 1013904223) % 4294967296;
-      return seed / 4294967296;
-    }
-
     function nextSeed() {
-      seed = Math.floor(Math.random() * 99999) + 1;
+      seed = (seed + 7919) % 99999 + 1;
       document.getElementById('seedBadge').innerText = 'SEED #' + seed + ' · REMIXED';
     }
 

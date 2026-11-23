@@ -50,13 +50,25 @@ data class InteractiveMorphSurface(
 }
 
 /**
- * Natural-Language -> Interactive UI + Motion Storyboard Synthesizer.
+ * Explicit Opt-In Natural-Language -> Interactive UI + Motion Storyboard Synthesizer.
  *
- * Transforms flat natural language requests + active [HumanMemoryBubble]s into
- * direct-manipulation widgets (steppers, toggles, selectable cards, and animated
+ * Transforms explicit showcase / structured-UI widget requests + active [HumanMemoryBubble]s into
+ * direct-manipulation widgets (Split-Bill calculator, selectable cards, and animated
  * route storyboards) without sacrificing pure achromatic clarity.
+ *
+ * IMPORTANT (P0-4 / B6):
+ * Callers MUST NOT auto-intercept general chat prompts with this engine. Always check
+ * [shouldAutoInterceptChatPrompt] (which returns `false`) so normal chat messages always flow
+ * directly to the real AI model, and only invoke [synthesizeFromPrompt] for explicit opt-in
+ * showcase chips or structured UI rendering.
  */
 object InteractiveMorphEngine {
+
+    /**
+     * Always returns `false`: ordinary chat messages must NEVER be auto-intercepted by template
+     * morph cards and must always go to the real AI backend.
+     */
+    fun shouldAutoInterceptChatPrompt(prompt: String = ""): Boolean = false
 
     private val commaNumberRegex = Regex("""(\d[\d,]{2,})\s*원?""")
     private val manCheonWonRegex = Regex("""(\d+(?:\.\d+)?)\s*만(?:\s*(\d+)\s*천)?\s*원?""")
@@ -213,7 +225,7 @@ object InteractiveMorphEngine {
             badgeKo = "취향 반영 인터랙티브 메뉴 보드",
             titleKo = "내 취향을 자동 반영해 3가지로 추렸어요",
             subtitleKo = "원하는 카드를 탭해 선택하면 결제 직전까지만 자동으로 담아드려요.",
-            appliedBubbleLabels = foodBubbles.ifEmpty { listOf("🍗 음식은 덜 맵게 반영") },
+            appliedBubbleLabels = foodBubbles,
             selectableItems = items,
             primaryActionLabelKo = "선택한 메뉴 장바구니 담기",
             secondaryActionLabelKo = "다른 메뉴 더 찾기"

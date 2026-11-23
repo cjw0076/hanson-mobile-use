@@ -142,74 +142,33 @@ class AgentMemoryManager(context: Context) {
     }
 
     /**
-     * Automatically learns user intents, frequent apps, chat rooms, or explicit memory requests
-     * from a user utterance and task summary.
+     * Records explicit user memory requests ("기억해" / "외워" / "잊지 마") into the persistent
+     * semantic vault. Does not speculatively scrape rooms, news sites, or per-turn noise.
      */
     fun observeAndLearnFromTurn(userPrompt: String, assistantSummary: String) {
         val p = userPrompt.trim()
         val pLower = p.lowercase(Locale.ROOT)
         if (p.length < 3) return
 
+        val hasExplicitCue = pLower.contains("기억해") || pLower.contains("외워") || pLower.contains("잊지 마")
+        if (!hasExplicitCue) return
+
+        val fact = p.replace(
+            Regex("(꼭\\s*)?(기억해\\s*줘|기억해\\s*둬|기억해|외워\\s*둬|외워\\s*줘|잊지\\s*마)"),
+            ""
+        ).trim()
+        if (fact.length < 2) return
+
         val currentEntries = _state.value.semanticEntries.toMutableList()
-
-        // 1. Explicit "기억해" / "외워둬" / "메모해"
-        if (pLower.contains("기억해") || pLower.contains("외워") || pLower.contains("잊지 마")) {
-            val fact = p.replace(Regex("(꼭\\s*)?(기억해\\s*줘|기억해\\s*둬|기억해|외워\\s*둬|외워\\s*줘)"), "").trim()
-            if (fact.isNotBlank()) {
-                upsertEntry(
-                    currentEntries,
-                    SemanticMemoryEntry(
-                        id = "pref_${fact.hashCode()}",
-                        category = "PREFERENCE",
-                        titleKo = "사용자 지정 기억",
-                        contentKo = fact.take(120)
-                    )
-                )
-            }
-        }
-
-        // 2. Frequent KakaoTalk room / contact learning
-        if (pLower.contains("카톡") || pLower.contains("단톡방") || pLower.contains("대화방")) {
-            val roomMatch = Regex("([가-힣a-zA-Z0-9_]{2,15})\\s*(카톡방|단톡방|대화방|채팅방)").find(p)?.groupValues?.getOrNull(1)
-            if (!roomMatch.isNullOrBlank()) {
-                upsertEntry(
-                    currentEntries,
-                    SemanticMemoryEntry(
-                        id = "room_$roomMatch",
-                        category = "CONTACT_ROOM",
-                        titleKo = "자주 찾는 대화방",
-                        contentKo = "$roomMatch 대화방"
-                    )
-                )
-            }
-        }
-
-        // 3. Frequent Web / News source learning
-        if (pLower.contains("해커뉴스") || pLower.contains("hacker news")) {
-            upsertEntry(
-                currentEntries,
-                SemanticMemoryEntry(
-                    id = "interest_hn",
-                    category = "PREFERENCE",
-                    titleKo = "관심 뉴스 소스",
-                    contentKo = "Hacker News (news.ycombinator.com) 기술 트렌드 요약"
-                )
+        upsertEntry(
+            currentEntries,
+            SemanticMemoryEntry(
+                id = "pref_${fact.hashCode()}",
+                category = "PREFERENCE",
+                titleKo = "사용자 지정 기억",
+                contentKo = fact.take(120)
             )
-        }
-
-        // 4. Record recent completed episode summary (keep compact)
-        val cleanSummary = assistantSummary.lines().firstOrNull { it.isNotBlank() }?.take(90).orEmpty()
-        if (cleanSummary.isNotBlank() && !pLower.contains("메모리")) {
-            upsertEntry(
-                currentEntries,
-                SemanticMemoryEntry(
-                    id = "ep_latest",
-                    category = "EPISODE",
-                    titleKo = "최근 완료 작업",
-                    contentKo = "${p.take(32)} → $cleanSummary"
-                )
-            )
-        }
+        )
 
         val bounded = currentEntries.sortedByDescending { it.updatedAtMs }.take(MAX_SEMANTIC_ENTRIES)
         _state.update { it.copy(semanticEntries = bounded) }
@@ -281,7 +240,7 @@ class AgentMemoryManager(context: Context) {
     }
 
     /**
-     * Performs an immediate 3-Tier Memory Optimization (Working Context Compaction + Temp Cache Sweep + JVM GC).
+     * Performs an immediate 3-Tier Memory Optimization (Working Context Compaction + Temp Cache Sweep).
      */
     fun optimizeMemoryNow(
         currentMessages: List<LiveChatMessage>,
@@ -301,15 +260,15 @@ class AgentMemoryManager(context: Context) {
             }
         }
 
-        System.gc()
         refreshRuntimeMemoryMetrics(activeChatCount = compacted.size)
         val afterUsedMb = _state.value.jvmUsedMb.coerceAtLeast(1)
         val now = System.currentTimeMillis()
         _state.update { it.copy(lastOptimizedAtMs = now) }
 
+        val cacheNote = if (freedFiles > 0) " · 임시 캐시 ${freedFiles}건 정리" else ""
         return buildMemoryDashboardCard(
             headerTitle = "3-Tier 메모리 최적화 완료",
-            headerSubtitle = "JVM 힙 ${beforeUsedMb}MB → ${afterUsedMb}MB · 장기 기억 ${_state.value.semanticEntries.size}건 유지"
+            headerSubtitle = "JVM 힙 ${beforeUsedMb}MB → ${afterUsedMb}MB$cacheNote · 장기 기억 ${_state.value.semanticEntries.size}건 유지"
         )
     }
 

@@ -1,6 +1,7 @@
 package com.hanson.mobileuse.service
 
 import android.annotation.SuppressLint
+import android.app.ForegroundServiceStartNotAllowedException
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -13,6 +14,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.provider.Settings
+import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
@@ -23,6 +25,7 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import com.hanson.mobileuse.accessibility.HierarchyDumper
 import com.hanson.mobileuse.agent.ChatSender
 import com.hanson.mobileuse.agent.HansonRuntimeHolder
 import com.hanson.mobileuse.agent.LiveChatMessage
@@ -31,6 +34,9 @@ import com.hanson.mobileuse.ui.MainActivity
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.abs
 
 /**
@@ -63,6 +69,9 @@ class FloatingHudService : Service() {
         @Volatile
         private var cachedRecordingStepCount: Int = 0
 
+        private const val TAG = "FloatingHudService"
+        private val tempPassThroughDepth = AtomicInteger(0)
+
         fun setMainActivityForeground(context: Context, inForeground: Boolean) {
             isMainActivityInForeground = inForeground
             if (inForeground) {
@@ -73,12 +82,31 @@ class FloatingHudService : Service() {
         fun startIfPermitted(context: Context, forceEvenInApp: Boolean = false): Boolean {
             if (isMainActivityInForeground && !forceEvenInApp) return false
             if (!Settings.canDrawOverlays(context)) return false
-            context.startService(Intent(context, FloatingHudService::class.java))
-            return true
+            return try {
+                context.startService(Intent(context, FloatingHudService::class.java))
+                true
+            } catch (e: IllegalStateException) {
+                // Covers Android 12+ ForegroundServiceStartNotAllowedException / BackgroundServiceStartNotAllowedException
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && e is ForegroundServiceStartNotAllowedException) {
+                    Log.w(TAG, "ForegroundServiceStartNotAllowedException starting FloatingHudService: ${e.message}")
+                } else {
+                    Log.w(TAG, "IllegalStateException starting FloatingHudService from background: ${e.message}")
+                }
+                false
+            } catch (e: SecurityException) {
+                Log.w(TAG, "SecurityException starting FloatingHudService: ${e.message}")
+                false
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to start FloatingHudService: ${e.message}")
+                false
+            }
         }
 
         fun stop(context: Context) {
-            context.stopService(Intent(context, FloatingHudService::class.java))
+            try {
+                context.stopService(Intent(context, FloatingHudService::class.java))
+            } catch (_: Exception) {
+            }
         }
 
         fun updateHudStatus(title: String, subtitle: String, isRunning: Boolean) {
@@ -109,8 +137,31 @@ class FloatingHudService : Service() {
             instance?.postChatMessagesUpdate(messages)
         }
 
+        /**
+         * Temporarily makes the Floating HUD touch-passthrough ONLY around actual gesture dispatch,
+         * then restores full touchability in `finally` so the emergency "중지" button stays usable
+         * throughout agent runs.
+         */
+        fun setPassThroughTemporarily(enabled: Boolean) {
+            val shouldPassThrough = if (enabled) {
+                tempPassThroughDepth.incrementAndGet() > 0
+            } else {
+                tempPassThroughDepth.updateAndGet { (it - 1).coerceAtLeast(0) } > 0
+            }
+            instance?.applyTouchPassthroughSync(shouldPassThrough)
+        }
+
+        /**
+         * Legacy API retained for binary/source compatibility.
+         * Passing `false` clears any temporary passthrough; passing `true` intentionally does NOT
+         * disable HUD touchability for the whole agent run so the emergency "중지" button remains touchable.
+         * Use [setPassThroughTemporarily] strictly around individual gesture dispatches.
+         */
         fun setTouchPassthrough(passthrough: Boolean) {
-            instance?.applyTouchPassthrough(passthrough)
+            if (!passthrough) {
+                tempPassThroughDepth.set(0)
+                instance?.applyTouchPassthrough(false)
+            }
         }
     }
 
@@ -142,11 +193,18 @@ class FloatingHudService : Service() {
     override fun onCreate() {
         super.onCreate()
         instance = this
+        tempPassThroughDepth.set(0)
         if (!Settings.canDrawOverlays(this)) {
+            _isShowing.value = false
             stopSelf()
             return
         }
-        createOverlayView()
+        val added = createOverlayView()
+        if (!added) {
+            _isShowing.value = false
+            stopSelf()
+            return
+        }
         _isShowing.value = true
 
         val engine = HansonRuntimeHolder.getAgentEngine(applicationContext)
@@ -160,6 +218,7 @@ class FloatingHudService : Service() {
     }
 
     override fun onDestroy() {
+        tempPassThroughDepth.set(0)
         removeOverlayView()
         if (instance === this) instance = null
         _isShowing.value = false
@@ -180,20 +239,51 @@ class FloatingHudService : Service() {
 
     fun applyTouchPassthrough(passthrough: Boolean) {
         mainHandler.post {
-            val wm = windowManager ?: return@post
-            val lp = layoutParams ?: return@post
-            val rv = rootView ?: return@post
-            if ((isChatExpanded || isApprovalVisible) && passthrough) return@post
-            val nextFlags = if (passthrough) {
-                lp.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-            } else {
-                lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+            applyTouchPassthroughOnMain(passthrough)
+        }
+    }
+
+    fun applyTouchPassthroughSync(passthrough: Boolean) {
+        val isMain = try {
+            Looper.myLooper() != null && Looper.myLooper() == Looper.getMainLooper()
+        } catch (_: Throwable) {
+            false
+        }
+        if (isMain) {
+            applyTouchPassthroughOnMain(passthrough)
+            return
+        }
+        val latch = CountDownLatch(1)
+        val posted = mainHandler.post {
+            try {
+                applyTouchPassthroughOnMain(passthrough)
+            } finally {
+                latch.countDown()
             }
-            if (lp.flags != nextFlags) {
-                lp.flags = nextFlags
-                rv.alpha = if (passthrough) 0.45f else 1.0f
-                runCatching { wm.updateViewLayout(rv, lp) }
+        }
+        if (posted) {
+            try {
+                latch.await(120L, TimeUnit.MILLISECONDS)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
             }
+        }
+    }
+
+    private fun applyTouchPassthroughOnMain(passthrough: Boolean) {
+        val wm = windowManager ?: return
+        val lp = layoutParams ?: return
+        val rv = rootView ?: return
+        if ((isChatExpanded || isApprovalVisible) && passthrough) return
+        val nextFlags = if (passthrough) {
+            lp.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        } else {
+            lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+        }
+        if (lp.flags != nextFlags) {
+            lp.flags = nextFlags
+            rv.alpha = if (passthrough) 0.45f else 1.0f
+            runCatching { wm.updateViewLayout(rv, lp) }
         }
     }
 
@@ -336,8 +426,8 @@ class FloatingHudService : Service() {
     }
 
     @SuppressLint("ClickableViewAccessibility")
-    private fun createOverlayView() {
-        val wm = getSystemService(Context.WINDOW_SERVICE) as? WindowManager ?: return
+    private fun createOverlayView(): Boolean {
+        val wm = getSystemService(Context.WINDOW_SERVICE) as? WindowManager ?: return false
         windowManager = wm
 
         val density = resources.displayMetrics.density
@@ -749,6 +839,7 @@ class FloatingHudService : Service() {
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT
         ).apply {
+            title = HierarchyDumper.FLOATING_HUD_WINDOW_TITLE
             gravity = Gravity.TOP or Gravity.START
             x = dp(16)
             y = dp(92)
@@ -786,10 +877,14 @@ class FloatingHudService : Service() {
             }
         }
 
-        try {
+        return try {
             wm.addView(outerCard, params)
             rootView = outerCard
-        } catch (_: Exception) {
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to attach FloatingHudService overlay view: ${e.message}")
+            rootView = null
+            false
         }
     }
 

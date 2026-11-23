@@ -2,6 +2,8 @@ package com.hanson.mobileuse.agent
 
 import org.json.JSONArray
 import org.json.JSONObject
+import java.net.URI
+import java.util.Locale
 
 enum class SubGoalStatus(val marker: String) {
     PENDING("[ ]"),
@@ -314,7 +316,7 @@ object HumanSummaryAndCardBuilder {
         val cleanedRaw = decodeAllHtmlEntities(msg.text).trim()
 
         // If already enriched with a structuredCard and clean text, just ensure detailPayload is present
-        if (msg.structuredCard != null && !cleanedRaw.startsWith("[모바일 Browser-Use")) {
+        if (msg.structuredCard != null) {
             val detail = msg.detailPayload ?: ChatDetailPayload(
                 humanSummary = cleanedRaw,
                 modelBadge = msg.toolBadge.orEmpty(),
@@ -325,9 +327,16 @@ object HumanSummaryAndCardBuilder {
             return msg.copy(text = cleanedRaw, detailPayload = detail)
         }
 
-        // Case 1: Mobile Browser-Use raw dump (e.g., Hacker News, GitHub, Web Extraction)
-        if (cleanedRaw.contains("[모바일 Browser-Use") || (msg.toolBadge?.contains("BROWSER") == true && cleanedRaw.contains("URL:"))) {
-            return transformBrowserUseDump(msg, cleanedRaw, specialistRoleKo, turnLedger)
+        // Case 1: LLM Native Web Grounding / Citation-bearing responses
+        val badgeUpper = msg.toolBadge.orEmpty().uppercase(Locale.ROOT)
+        val looksLikeWebGrounded = badgeUpper.contains("BROWSER") ||
+            badgeUpper.contains("GROUND") ||
+            badgeUpper.contains("WEB") ||
+            cleanedRaw.contains("[웹 그라운딩") ||
+            cleanedRaw.contains("[모바일 Browser-Use") ||
+            extractVerifiedHttpsCitations(cleanedRaw).isNotEmpty()
+        if (looksLikeWebGrounded) {
+            return transformGroundedWebResponse(msg, cleanedRaw, specialistRoleKo, turnLedger)
         }
 
         // Case 2: Bluetooth / Peripheral / Cross-Device status dump
@@ -432,107 +441,171 @@ object HumanSummaryAndCardBuilder {
         )
     }
 
-    private fun transformBrowserUseDump(
+    private val MARKDOWN_CITATION_REGEX = Regex(
+        """\[([^\]\r\n]{1,140})\]\((https://[^\s)\r\n<>"]+)\)""",
+        RegexOption.IGNORE_CASE
+    )
+    private val PIPE_CITATION_REGEX = Regex(
+        """(?m)^\s*(?:[-*•]|\d+[.)]|\[\d+\])?\s*([^|\r\n]{2,140}?)\s*\|\s*(https://[^\s\r\n<>"]+)\s*$""",
+        RegexOption.IGNORE_CASE
+    )
+    private val ARROW_CITATION_REGEX = Regex(
+        """(?m)^\s*(?:[-*•]|\d+[.)]|\[\d+\])?\s*([^\r\n]{2,140}?)\s*->\s*(https://[^\s\r\n<>"]+)\s*$""",
+        RegexOption.IGNORE_CASE
+    )
+    private val CITATION_LINE_REGEX = Regex(
+        """(?i)^\s*(?:[-*•]|\d+[.)]|\[\d+\])?\s*(?:\[[^\]]+\]\(https://[^)]+\)|[^|\r\n]+\|\s*https://\S+|[^\r\n]+->\s*https://\S+)\s*$"""
+    )
+    private val CITATION_SECTION_HEADER_REGEX = Regex(
+        """(?i)^\s*(?:#{1,4}\s*)?(?:출처|참고\s*링크|주요\s*링크|관련\s*링크|sources?|references?|citations?)\s*(?:\(\d+개?\))?\s*[:：]?\s*$"""
+    )
+
+    /**
+     * Parses verified `https://` citations (`- [Title](https://...)`, `Title | https://...`,
+     * or `[1] Title -> https://...`) into clickable [StructuredUiItem] cards.
+     * NEVER strips `주요 링크` and NEVER emits items with empty or non-HTTPS `actionUrlOrCmd`.
+     */
+    fun extractVerifiedHttpsCitations(rawText: String): List<StructuredUiItem> {
+        if (rawText.isBlank()) return emptyList()
+        val seenUrls = LinkedHashSet<String>()
+        val items = mutableListOf<StructuredUiItem>()
+
+        fun tryAdd(rawTitle: String, rawUrl: String) {
+            if (items.size >= 8) return
+            val verifiedUrl = sanitizeVerifiedHttpsUrl(rawUrl) ?: return
+            val host = extractVerifiedHost(verifiedUrl) ?: return
+            if (!seenUrls.add(verifiedUrl)) return
+
+            val cleanTitle = decodeAllHtmlEntities(rawTitle)
+                .replace(Regex("[*_`]+"), "")
+                .replace(Regex("\\s+"), " ")
+                .trim()
+                .take(90)
+                .ifBlank { host }
+
+            val idx = items.size + 1
+            val displaySubtitle = RichAnswerBoardFormatter.friendlySourceHost(host, cleanTitle)
+            items.add(
+                StructuredUiItem(
+                    badge = if (idx < 10) "0$idx" else "$idx",
+                    title = cleanTitle,
+                    subtitle = displaySubtitle,
+                    meta = "출처 ↗",
+                    actionUrlOrCmd = verifiedUrl
+                )
+            )
+        }
+
+        for (m in MARKDOWN_CITATION_REGEX.findAll(rawText)) {
+            tryAdd(m.groupValues[1], m.groupValues[2])
+        }
+        for (m in PIPE_CITATION_REGEX.findAll(rawText)) {
+            tryAdd(m.groupValues[1], m.groupValues[2])
+        }
+        for (m in ARROW_CITATION_REGEX.findAll(rawText)) {
+            tryAdd(m.groupValues[1], m.groupValues[2])
+        }
+        return items
+    }
+
+    private fun sanitizeVerifiedHttpsUrl(rawUrl: String): String? {
+        val trimmed = rawUrl.trim().trimEnd('.', ',', ';', ':', '!', '?', ')', ']', '}')
+        if (!trimmed.startsWith("https://", ignoreCase = true)) return null
+        if (trimmed.any { it.isWhitespace() || it.code < 32 }) return null
+        val normalized = "https://" + trimmed.substring(8)
+        return runCatching {
+            val uri = URI(normalized)
+            val host = uri.host?.trim().orEmpty()
+            if (!uri.scheme.equals("https", ignoreCase = true)) return@runCatching null
+            if (host.isBlank() || !host.contains('.') || uri.userInfo != null) return@runCatching null
+            normalized
+        }.getOrNull()
+    }
+
+    private fun extractVerifiedHost(httpsUrl: String): String? {
+        return runCatching {
+            URI(httpsUrl).host
+                ?.trim()
+                ?.lowercase(Locale.ROOT)
+                ?.removePrefix("www.")
+                ?.takeIf { it.isNotBlank() && it.contains('.') }
+        }.getOrNull()
+    }
+
+    /**
+     * Converts a grounded web response into a clean human summary + clickable `https://` citation card
+     * (`StructuredUiCard`) + deep [ChatDetailPayload].
+     */
+    fun transformGroundedWebResponse(
         msg: LiveChatMessage,
-        cleanedRaw: String,
-        specialistRoleKo: String,
-        turnLedger: List<String>
+        cleanedRaw: String = decodeAllHtmlEntities(msg.text).trim(),
+        specialistRoleKo: String = "",
+        turnLedger: List<String> = emptyList()
     ): LiveChatMessage {
-        val pageTitle = Regex("제목:\\s*(.+)").find(cleanedRaw)?.groupValues?.getOrNull(1)?.trim()
-            ?: "웹 페이지 브리핑"
-        val url = Regex("URL:\\s*(\\S+)").find(cleanedRaw)?.groupValues?.getOrNull(1)?.trim()
-            ?: ""
-        val bodySection = cleanedRaw.substringAfter("핵심 본문 요약:", "")
-            .substringBefore("주요 링크")
-            .trim()
+        val citations = extractVerifiedHttpsCitations(cleanedRaw)
 
-        // Parse numbered items like "1. Title ( domain.com ) 149 points by user 2 hours ago | hide | 25 comments 2. ..."
-        val numberedRegex = Regex("(\\d{1,2})\\.\\s+([^0-9][^\\n]+?)(?=\\s+\\d{1,2}\\.\\s+|$)")
-        val parsedItems = mutableListOf<StructuredUiItem>()
-
-        for (m in numberedRegex.findAll(bodySection)) {
-            if (parsedItems.size >= 5) break
-            val rank = m.groupValues[1]
-            val rawChunk = m.groupValues[2].trim()
-            val domainMatch = Regex("\\(\\s*([a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})\\s*\\)").find(rawChunk)
-            val domain = domainMatch?.groupValues?.getOrNull(1) ?: ""
-            val pointsMatch = Regex("(\\d+)\\s*points").find(rawChunk)?.groupValues?.getOrNull(1)
-            val commentsMatch = Regex("(\\d+)\\s*comments").find(rawChunk)?.groupValues?.getOrNull(1)
-
-            val cleanHeadline = rawChunk
-                .substringBefore(" ( ")
-                .substringBefore(" (")
-                .replace(Regex("\\d+\\s*points.*$"), "")
-                .trim()
-                .take(85)
-
-            if (cleanHeadline.length >= 4) {
-                val metaParts = mutableListOf<String>()
-                if (domain.isNotBlank()) metaParts.add(domain)
-                if (pointsMatch != null) metaParts.add("▲ ${pointsMatch}점")
-                if (commentsMatch != null) metaParts.add("댓글 ${commentsMatch}개")
-
-                parsedItems.add(
-                    StructuredUiItem(
-                        badge = "#$rank",
-                        title = cleanHeadline,
-                        subtitle = metaParts.joinToString(" · ").ifBlank { pageTitle },
-                        meta = if (pointsMatch != null) "${pointsMatch}pt" else "NEW",
-                        actionUrlOrCmd = url
-                    )
-                )
+        val proseLines = cleanedRaw.lines()
+            .map { it.trim() }
+            .filterNot { line ->
+                line.isEmpty() ||
+                    CITATION_LINE_REGEX.matches(line) ||
+                    CITATION_SECTION_HEADER_REGEX.matches(line)
+            }
+        val cleanProse = proseLines.joinToString("\n").trim()
+        val humanSummary = cleanProse.ifBlank {
+            if (citations.isNotEmpty()) {
+                "웹 검색 결과를 바탕으로 확인된 출처 ${citations.size}건을 정리했어요."
+            } else {
+                cleanedRaw
             }
         }
 
-        // Fallback if not a numbered list page
-        if (parsedItems.isEmpty()) {
-            val cleanBody = bodySection
-                .replace(Regex("(?i)Hacker News\\s+new\\s*\\|\\s*past\\s*\\|\\s*comments\\s*\\|\\s*ask\\s*\\|\\s*show\\s*\\|\\s*jobs\\s*\\|\\s*submit\\s*login"), "")
-                .trim()
-            val sentences = cleanBody.split(Regex("(?<=[.!?다요])\\s+")).filter { it.length > 10 }.take(3)
-            sentences.forEachIndexed { idx, s ->
-                parsedItems.add(
-                    StructuredUiItem(
-                        badge = "0${idx + 1}",
-                        title = s.take(80),
-                        subtitle = url.substringAfter("://").substringBefore("/"),
-                        meta = "핵심"
-                    )
-                )
-            }
-        }
-
-        val humanHeadline = if (pageTitle.contains("Hacker News", ignoreCase = true) && parsedItems.isNotEmpty()) {
-            "해커뉴스(Hacker News) 현재 인기 글 상위 ${parsedItems.size}건을 보기 편하게 정리했어요. 가장 주목받는 토픽은 '${parsedItems.first().title.take(38)}'입니다."
+        val card = if (citations.isNotEmpty()) {
+            val primaryLabel = citations.first().title.ifBlank { citations.first().subtitle }
+            StructuredUiCard(
+                templateType = StructuredUiTemplateType.CURATED_LIST,
+                headerTitle = "웹 검색 출처 · ${citations.size}건",
+                headerSubtitle = if (citations.size == 1) primaryLabel else "$primaryLabel 외 ${citations.size - 1}곳",
+                items = citations,
+                footerHint = "출처 항목을 탭하면 확인된 HTTPS 원문을 바로 열 수 있습니다 ↗"
+            )
         } else {
-            "'$pageTitle' 페이지의 핵심 내용을 추출해 한눈에 보기 쉽게 정리했어요."
+            null
         }
 
-        val card = StructuredUiCard(
-            templateType = StructuredUiTemplateType.CURATED_LIST,
-            headerTitle = "$pageTitle · 핵심 브리핑",
-            headerSubtitle = url.ifBlank { "모바일 브라우저 클린 추출" },
-            items = parsedItems,
-            footerHint = "카드를 탭하면 전체 원문·링크 및 AI 실행 상세를 볼 수 있습니다 ↗"
-        )
-
+        val primaryUrl = citations.firstOrNull()?.actionUrlOrCmd.orEmpty()
         val detail = ChatDetailPayload(
-            humanSummary = humanHeadline,
-            modelBadge = msg.toolBadge ?: "NEXUS-BROWSER-USE",
-            specialistRoleKo = specialistRoleKo.ifBlank { "모바일 헤드리스 브라우저 & 핵심 요약 큐레이터" },
+            humanSummary = humanSummary,
+            modelBadge = msg.toolBadge ?: "WEB-GROUNDING",
+            specialistRoleKo = specialistRoleKo.ifBlank { "LLM 네이티브 웹 그라운딩 & 출처 큐레이터" },
             executedToolName = "browser_use",
-            executedToolArgs = """{"url":"$url"}""",
+            executedToolArgs = if (primaryUrl.isNotBlank()) """{"url":"$primaryUrl"}""" else "",
             rawTechnicalOutput = cleanedRaw,
-            sourceUrl = url,
+            sourceUrl = primaryUrl,
             turnLedger = turnLedger
         )
 
         return msg.copy(
-            text = humanHeadline,
+            text = humanSummary,
             structuredCard = card,
             detailPayload = detail
         )
     }
+
+    /**
+     * Backward-compatible wrapper delegating to [transformGroundedWebResponse].
+     */
+    fun transformBrowserUseDump(
+        msg: LiveChatMessage,
+        cleanedRaw: String = decodeAllHtmlEntities(msg.text).trim(),
+        specialistRoleKo: String = "",
+        turnLedger: List<String> = emptyList()
+    ): LiveChatMessage = transformGroundedWebResponse(
+        msg = msg,
+        cleanedRaw = cleanedRaw,
+        specialistRoleKo = specialistRoleKo,
+        turnLedger = turnLedger
+    )
 }
 
 /**

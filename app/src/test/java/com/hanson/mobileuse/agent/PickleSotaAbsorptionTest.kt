@@ -753,18 +753,21 @@ class PickleSotaAbsorptionTest {
     }
 
     @Test
-    fun toolSpecRegistry_andSlashCommandsExpose42Tools13CommandsAndTakeoverState() {
+    fun toolSpecRegistry_andSlashCommandsExpose45Tools13CommandsAndTakeoverState() {
         val specNames = ToolSpecRegistry.allSpecs.map { it.name }
-        assertEquals(42, specNames.size)
+        assertEquals(45, specNames.size)
         assertTrue(specNames.containsAll(listOf(
+            "observe_screen",
+            "set_timer",
+            "execute_lifestyle_routine",
             "vault_blind_inject",
             "vault_list_handles",
             "watcher_manage",
             "a2a_negotiate_schedule",
             "scratchpad_note"
         )))
-        assertEquals(42, ToolSpecRegistry.toGeminiToolsJson().getJSONObject(0).getJSONArray("functionDeclarations").length())
-        assertEquals(42, ToolSpecRegistry.toGeminiInteractionsToolsJson().length())
+        assertEquals(45, ToolSpecRegistry.toGeminiToolsJson().getJSONObject(0).getJSONArray("functionDeclarations").length())
+        assertEquals(45, ToolSpecRegistry.toGeminiInteractionsToolsJson().length())
         assertEquals(13, ComposerCommandParser.defaultSlashCommands.size)
         assertEquals("AWAITING_TAKEOVER", AgentRunStatus.AWAITING_TAKEOVER.name)
         assertTrue(HighStakesKind.values().any { it == HighStakesKind.SECURE_SURFACE_BLOCKED })

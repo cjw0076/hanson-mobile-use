@@ -29,7 +29,7 @@ enum class MobileAiRouteTier(val badge: String, val labelKo: String) {
     S25_AICORE_NANO("S25-NPU-NANO", "Galaxy S25 내장 Gemini Nano NPU (Google AICore)"),
     ON_DEVICE_MEDIAPIPE("ON-DEVICE-LLM", "모바일 다운로드 모델 (MediaPipe / LiteRT-LM)"),
     LOCAL_EDGE_SERVER("LOCAL-LLM", "로컬 온디바이스 서버 (Ollama / Llama.cpp :11434)"),
-    CLOUD_GEMINI_VLM("GEMINI-CLOUD", "Google Gemini 3.8 / Argon 클라우드 VLM")
+    CLOUD_GEMINI_VLM("GEMINI-CLOUD", "Google Gemini 2.5 / 3.8 클라우드 VLM")
 }
 
 enum class TaskComplexity {
@@ -96,14 +96,15 @@ fun checkCircuitBreaker(latencyMs: Long, maxAcceptableLatencyMs: Long = 5000L): 
  *
  * Instead of binding an entire multi-step task to a single static model,
  * the Multi-Model Router dynamically switches the underlying API model on EVERY turn (`iteration`)
- * and active sub-goal (`SubGoalItem`):
- * - Turn 1 Complex Planning / Self-Healing after Failure -> `MASTER_PLANNER_HEALER` (`gemini-4-argon` / `claude-opus-4-6`)
- * - Turn 2..N Routine UI Step Execution -> `FAST_REFLEX` (`gemini-3.5-flash-lite` / S25 NPU Nano)
- * - Standard App Search / Form Input / Messaging -> `INTERACTIVE_OPERATOR` (`gemini-3.8-flash` / `claude-sonnet-4-6`)
- * - Drag-and-Drop / Slider / Map / Spatial Coordinate Grounding -> `SPATIAL_GROUNDING` (`gemini-robotics-er-2-preview`)
- * - Live HTML5 / SVG / Chart / Widget Code Synthesis & Repair -> `CODE_CANVAS_SYNTHESIS` (`claude-opus-4-6` / `gemini-4-argon`)
- * - Visual Image / Poster / Icon Generation -> `VISUAL_MEDIA_GEN` (`gemini-nano-banana-2.1`)
- * - Deep Multi-App Research / UARP Reverse Engineering -> `DEEP_RESEARCH_UARP` (`gemini-4-argon` / `deep-research-preview-04-2026`)
+ * and active sub-goal (`SubGoalItem`), defaulting free/standard accounts to live
+ * `gemini-2.5-flash` / `gemini-3.8-flash` / `gemini-3.5-flash-lite` (never paid-only `gemini-4-argon` by default):
+ * - Turn 1 Complex Planning / Self-Healing after Failure -> `MASTER_PLANNER_HEALER` (`gemini-3.8-flash` / `gemini-2.5-flash`)
+ * - Turn 2..N Routine UI Step Execution -> `FAST_REFLEX` (`gemini-3.5-flash-lite` / `gemini-2.5-flash-lite`)
+ * - Standard App Search / Form Input / Messaging -> `INTERACTIVE_OPERATOR` (`gemini-2.5-flash` / `gemini-3.8-flash`)
+ * - Drag-and-Drop / Slider / Map / Spatial Coordinate Grounding -> `SPATIAL_GROUNDING` (`gemini-3.8-flash` / `gemini-2.5-flash`)
+ * - Live HTML5 / SVG / Chart / Widget Code Synthesis & Repair -> `CODE_CANVAS_SYNTHESIS` (`gemini-3.8-flash` / `claude-sonnet-4-6`)
+ * - Visual Image / Poster / Icon Generation -> `VISUAL_MEDIA_GEN` (`gemini-nano-banana-2.1` / `gemini-2.5-flash`)
+ * - Deep Multi-App Research / UARP Reverse Engineering -> `DEEP_RESEARCH_UARP` (`gemini-3.8-flash` / `gemini-2.5-flash`)
  */
 enum class SpecialistModelRole(
     val badge: String,
@@ -114,54 +115,54 @@ enum class SpecialistModelRole(
     FAST_REFLEX(
         badge = "GEMINI-3.5-FLASH-LITE",
         primaryModel = "gemini-3.5-flash-lite",
-        fallbackModel = "gemini-2.5-flash-lite",
+        fallbackModel = "gemini-2.5-flash",
         roleKo = "초저지연 반사신경 실행 (단순 탭·스크롤·후속 스텝 고속 처리)"
     ),
     INTERACTIVE_OPERATOR(
-        badge = "GEMINI-3.8-FLASH",
-        primaryModel = "gemini-3.8-flash",
-        fallbackModel = "gemini-3.5-flash-lite",
+        badge = "GEMINI-2.5-FLASH",
+        primaryModel = "gemini-2.5-flash",
+        fallbackModel = "gemini-3.8-flash",
         roleKo = "범용 멀티모달 UI 오퍼레이터 (앱 탐색·폼 입력·메시징)"
     ),
     MASTER_PLANNER_HEALER(
-        badge = "GEMINI-4-ARGON",
-        primaryModel = "gemini-4-argon",
-        fallbackModel = "gemini-3.8-flash",
-        roleKo = "플래그십 마스터 플래너 & 자가 치유(Self-Healing) 추론"
+        badge = "GEMINI-3.8-FLASH",
+        primaryModel = "gemini-3.8-flash",
+        fallbackModel = "gemini-2.5-flash",
+        roleKo = "마스터 플래너 & 자가 치유(Self-Healing) 추론"
     ),
     SPATIAL_GROUNDING(
-        badge = "ROBOTICS-ER-2",
-        primaryModel = "gemini-robotics-er-2-preview",
-        fallbackModel = "gemini-3.8-flash",
-        roleKo = "공간 좌표·드래그·물리 궤적 추론 VLM (Embodied Reasoning 2)"
+        badge = "GEMINI-3.8-SPATIAL",
+        primaryModel = "gemini-3.8-flash",
+        fallbackModel = "gemini-2.5-flash",
+        roleKo = "공간 좌표·드래그·물리 궤적 추론 VLM"
     ),
     CODE_CANVAS_SYNTHESIS(
-        badge = "ARGON-OPUS-CODE",
-        primaryModel = "claude-opus-4-6",
-        fallbackModel = "gemini-4-argon",
-        roleKo = "코드 캔버스·SVG·인터랙티브 위젯 합성 (Opus / Argon Code)"
+        badge = "GEMINI-3.8-CODE",
+        primaryModel = "gemini-3.8-flash",
+        fallbackModel = "gemini-2.5-flash",
+        roleKo = "코드 캔버스·SVG·인터랙티브 위젯 합성"
     ),
     VISUAL_MEDIA_GEN(
         badge = "NANO-BANANA-2.1",
         primaryModel = "gemini-nano-banana-2.1",
-        fallbackModel = "gemini-3.8-flash",
+        fallbackModel = "gemini-2.5-flash",
         roleKo = "비주얼 이미지 생성·합성 오케스트레이터 (Nano Banana 2.1)"
     ),
     DEEP_RESEARCH_UARP(
-        badge = "DEEP-RESEARCH-ARGON",
-        primaryModel = "gemini-4-argon",
-        fallbackModel = "deep-research-preview-04-2026",
+        badge = "GEMINI-3.8-RESEARCH",
+        primaryModel = "gemini-3.8-flash",
+        fallbackModel = "gemini-2.5-flash",
         roleKo = "심층 리서치·다중 앱 비교·UARP 분석"
     );
 
     fun candidateModels(): List<String> = when (this) {
-        FAST_REFLEX -> listOf("gemini-3.5-flash-lite", "gemini-2.5-flash-lite", "gemini-3.8-flash")
-        INTERACTIVE_OPERATOR -> listOf("gemini-3.8-flash", "claude-sonnet-4-6", "gemini-3.5-flash-lite")
-        MASTER_PLANNER_HEALER -> listOf("gemini-4-argon", "claude-opus-4-6", "gemini-3.8-flash", "gemini-3.5-flash-lite")
-        SPATIAL_GROUNDING -> listOf("gemini-robotics-er-2-preview", "gemini-3.8-flash", "gemini-3.5-flash-lite")
-        CODE_CANVAS_SYNTHESIS -> listOf("claude-opus-4-6", "gemini-4-argon", "gemini-3.8-flash", "gemini-3.5-flash-lite")
-        VISUAL_MEDIA_GEN -> listOf("gemini-nano-banana-2.1", "gemini-3.8-flash", "gemini-3.5-flash-lite")
-        DEEP_RESEARCH_UARP -> listOf("gemini-4-argon", "deep-research-preview-04-2026", "gemini-3.8-flash")
+        FAST_REFLEX -> listOf("gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-2.5-flash-lite", "gemini-2.5-flash")
+        INTERACTIVE_OPERATOR -> listOf("gemini-3.8-flash", "gemini-3.5-flash-lite", "claude-sonnet-4-6", "gemini-2.5-flash")
+        MASTER_PLANNER_HEALER -> listOf("gemini-3.8-flash", "gemini-3.1-pro-preview", "claude-sonnet-4-6", "gemini-2.5-flash")
+        SPATIAL_GROUNDING -> listOf("gemini-3.8-flash", "gemini-robotics-er-2-preview", "gemini-3.5-flash-lite", "gemini-2.5-flash")
+        CODE_CANVAS_SYNTHESIS -> listOf("gemini-3.8-flash", "claude-sonnet-4-6", "gemini-3.5-flash-lite", "gemini-2.5-flash")
+        VISUAL_MEDIA_GEN -> listOf("gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash")
+        DEEP_RESEARCH_UARP -> listOf("gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash")
     }
 }
 
@@ -178,12 +179,14 @@ data class MobileAiInfrastructureState(
     val isDownloadingModel: Boolean = false,
     val downloadProgressPercent: Int = 0,
     val downloadStatusText: String = "",
-    val lastUsedBackendBadge: String = "S25-NPU-NANO",
+    val lastUsedBackendBadge: String = "GEMINI-2.5-FLASH",
     val lastSpecialistRole: String = SpecialistModelRole.FAST_REFLEX.name,
     val lastSpecialistReason: String = SpecialistModelRole.FAST_REFLEX.roleKo,
     val turnModelLedger: List<String> = emptyList(),
     val lastRoutingTelemetry: ModelRoutingTelemetry? = null,
-    val isCircuitBreakerTripped: Boolean = false
+    val isCircuitBreakerTripped: Boolean = false,
+    val lastCloudApiError: String? = null,
+    val lastDecisionSucceeded: Boolean = true
 )
 
 /**
@@ -255,6 +258,42 @@ class MobileAiInfrastructureRouter(
 
     fun setPreferredTier(tier: MobileAiRouteTier) {
         _state.update { it.copy(activeTier = tier) }
+    }
+
+    fun clearLastCloudApiError() {
+        _state.update {
+            it.copy(
+                lastCloudApiError = null,
+                lastDecisionSucceeded = true
+            )
+        }
+    }
+
+    fun recordCloudApiError(errorReason: String?, badge: String = "AI 연결 오류") {
+        val clean = errorReason?.trim()?.takeIf { it.isNotEmpty() }
+        _state.update {
+            it.copy(
+                lastCloudApiError = clean,
+                lastDecisionSucceeded = false,
+                lastUsedBackendBadge = badge
+            )
+        }
+    }
+
+    private fun isExplicitCraftAnythingRequest(gLower: String): Boolean {
+        if (gLower.contains("마인크래프트") || gLower.contains("스타크래프트") || gLower.contains("워크래프트") ||
+            gLower.contains("minecraft") || gLower.contains("starcraft") || gLower.contains("warcraft")
+        ) {
+            return false
+        }
+        return gLower.contains("craft-anything") ||
+            gLower.contains("craft anything") ||
+            gLower.contains("크래프트 애니씽") ||
+            gLower.contains("클린룸") ||
+            gLower.contains("리버스 엔지니어링") ||
+            gLower.contains("apk 구조 분석") ||
+            gLower.contains("앱 구조 분석") ||
+            gLower.contains("보드로 만들어")
     }
 
     private fun scanOnDeviceModelFiles(): List<File> {
@@ -541,54 +580,60 @@ class MobileAiInfrastructureRouter(
     }
 
     /**
-     * Routes a user goal/utterance across the best available AI infrastructure tier:
-     * 1. Infrastructure / Assistant Delegation intents (e.g. Perplexity, ChatGPT, Bixby, AICore status)
-     * 2. Per-Turn & Role-Specialized Multi-Model Orchestrator (`SpecialistModelRole` cascade)
+     * Routes a pure [userGoal] (strictly separated from [systemContext]) across the best available AI infrastructure tier:
+     * 1. Explicit Clean-Room / Installed Assistant Launch intents (never hijacking general Q&A mentioning app/game names)
+     * 2. Per-Turn & Role-Specialized Multi-Model Orchestrator (`SpecialistModelRole` cascade using live 2.5/3.8/3.5-lite models)
      * 3. On-Device MediaPipe `LlmInference` (if a `.task` / `.bin` / `.litertlm` model is on device)
      * 4. Local Edge OpenAI-compatible Server (`127.0.0.1:11434` Ollama / `:8080` llama.cpp)
      * 5. Galaxy S25 Built-In `com.google.ai.edge.aicore.GenerativeModel` (Gemini Nano NPU)
-     * 6. Context-Aware Conversational Screen Partner (guaranteed sub-50ms fallback)
+     * 6. Honest Offline Guidance fallback (propagates exact cloud error & marks `lastDecisionSucceeded = false`)
      */
     suspend fun routeAndDecide(
         apiKey: String,
         modelName: String,
-        goal: String,
+        userGoal: String,
         iteration: Int,
         snapshot: AtomicSnapshot,
         historySteps: List<AgentStepLog>,
         previousPlan: List<SubGoalItem>,
         chatHistory: List<LiveChatMessage>,
-        customBaseUrl: String = ""
+        customBaseUrl: String = "",
+        systemContext: String = "",
+        bridgeToken: String = ""
     ): ModelTurnDecision = withContext(Dispatchers.IO) {
-        val g = goal.trim()
+        val g = userGoal.trim()
         val gLower = g.lowercase()
 
-        // 0-A. Craft-Anything Clean-Room Engine (`storytold/craft-anything`: Study -> Build -> Check -> Ready)
-        if (iteration == 1 && (gLower.contains("크래프트") || gLower.contains("craft") || gLower.contains("클린룸") || gLower.contains("구조 분석") || gLower.contains("보드로 만들어") || gLower.contains("리버스 엔지니어링"))) {
-            _state.update { it.copy(lastUsedBackendBadge = "CRAFT-ANYTHING") }
+        // 0-A. Explicit Craft-Anything Clean-Room Engine ONLY (never hijack "마인크래프트 공략", "craft beer", etc.)
+        if (iteration == 1 && isExplicitCraftAnythingRequest(gLower)) {
+            _state.update {
+                it.copy(
+                    lastUsedBackendBadge = "CRAFT-ANYTHING",
+                    lastDecisionSucceeded = true
+                )
+            }
             return@withContext craftAnythingEngine.runCraftAnythingWorkflow(g, snapshot)
         }
 
-        // 0-B. Check if user explicitly wants to delegate to an installed AI app (Perplexity / ChatGPT / Bixby / Voice Access)
+        // 0-B. Delegate to an installed AI app ONLY on explicit launch/open verbs (never on "챗지피티 요금제", etc.)
         if (iteration == 1) {
             val delegated = tryDelegateToInstalledMobileAiApp(g, gLower)
-            if (delegated != null) return@withContext delegated
+            if (delegated != null) {
+                _state.update { it.copy(lastDecisionSucceeded = true) }
+                return@withContext delegated
+            }
         }
 
         val tier = _state.value.activeTier
         val hasApiKey = apiKey.trim().isNotEmpty()
         val hasCustomUrl = customBaseUrl.trim().isNotEmpty()
-        val isCliBridgeModel = modelName == "cli-subscription-bridge"
+        val normalizedModelName = GeminiMultimodalClient.normalize2026ModelName(modelName)
+        val isCliBridgeModel = normalizedModelName == "cli-subscription-bridge"
         val canCallRemoteOrBridge = hasApiKey || hasCustomUrl || isCliBridgeModel
 
-        // Feature 12: Lifestyle Task Modality routing and model resolution
-        val inferredModality = inferModalityFromPrompt(goal)
-        val resolvedLifestyleModel = resolveLifestyleModel(inferredModality)
-        val fallbackModel = resolveFallbackModel(resolvedLifestyleModel)
-        val offlineRoute = resolveOfflineRoute(canCallRemoteOrBridge, resolvedLifestyleModel)
-
+        // Run complexity & specialist role selection STRICTLY on pure userGoal (never polluted by systemContext/bubbles!)
         val specialistRole = selectSpecialistRoleForTurn(
-            goal = goal,
+            goal = g,
             iteration = iteration,
             snapshot = snapshot,
             historySteps = historySteps,
@@ -597,32 +642,38 @@ class MobileAiInfrastructureRouter(
 
         // 0-C. Explicit Custom OpenAI-Compatible Endpoint or CLI Subscription Bridge takes priority when configured
         if (hasCustomUrl || isCliBridgeModel) {
-            val directCandidates = listOf(modelName)
+            val directCandidates = listOf(normalizedModelName)
             val cascaded = cloudClient.decideNextActionWithCascade(
                 apiKey = apiKey,
                 candidateModels = directCandidates,
-                goal = goal,
+                goal = g,
                 iteration = iteration,
                 snapshot = snapshot,
                 historySteps = historySteps,
                 previousPlan = previousPlan,
                 chatHistory = chatHistory,
-                customBaseUrl = customBaseUrl
+                customBaseUrl = customBaseUrl,
+                systemContext = systemContext,
+                bridgeToken = bridgeToken
             )
             if (cascaded != null) {
                 val (resolvedModelBadge, cloudDecision) = cascaded
                 recordSpecialistTurn(
                     badge = resolvedModelBadge,
                     role = specialistRole,
-                    iteration = iteration
+                    iteration = iteration,
+                    cloudError = null,
+                    succeeded = true
                 )
                 return@withContext cloudDecision
+            } else {
+                propagateCloudErrorToState()
             }
         }
 
         // 1. Per-Turn Specialist Multi-Model Routing (`AUTO_SMART` or `auto-multi-model`)
         val useDynamicSpecialistMatrix = tier == MobileAiRouteTier.AUTO_SMART ||
-            (tier == MobileAiRouteTier.CLOUD_GEMINI_VLM && modelName == GeminiMultimodalClient.AUTO_MULTI_MODEL)
+            (tier == MobileAiRouteTier.CLOUD_GEMINI_VLM && normalizedModelName == GeminiMultimodalClient.AUTO_MULTI_MODEL)
 
         if (useDynamicSpecialistMatrix) {
             // For FAST_REFLEX on simple single-step navigation, try on-device S25 AICore Nano NPU first if available
@@ -632,47 +683,51 @@ class MobileAiInfrastructureRouter(
                 _state.value.googleAiCoreInstalled
             ) {
                 val nanoDecision = inferWithAiCoreGeminiNano(
-                    goal = goal,
+                    goal = g,
                     iteration = iteration,
                     snapshot = snapshot,
                     historySteps = historySteps,
                     previousPlan = previousPlan,
-                    chatHistory = chatHistory
+                    chatHistory = chatHistory,
+                    systemContext = systemContext
                 )
                 if (nanoDecision != null) {
                     recordSpecialistTurn(
                         badge = "S25-NPU-NANO",
                         role = specialistRole,
-                        iteration = iteration
+                        iteration = iteration,
+                        cloudError = _state.value.lastCloudApiError,
+                        succeeded = true
                     )
                     return@withContext nanoDecision
                 }
             }
 
             if (hasApiKey) {
-                val explicitUserModel = if (modelName != GeminiMultimodalClient.AUTO_MULTI_MODEL && modelName.isNotBlank()) {
-                    listOf(modelName)
+                // Only include a user-selected model if explicitly chosen; NEVER route free/standard
+                // users to paid-only gemini-4-argon by default (use live 2.5-flash / 3.8-flash / 3.5-flash-lite).
+                val explicitUserModel = if (normalizedModelName != GeminiMultimodalClient.AUTO_MULTI_MODEL && normalizedModelName.isNotBlank()) {
+                    listOf(normalizedModelName)
                 } else {
                     emptyList()
                 }
-                val toolCallingRoleModels = if (inferredModality == LifestyleTaskModality.LIFESTYLE_FAST_CONVERSATION ||
-                    inferredModality == LifestyleTaskModality.LIFESTYLE_MULTIMODAL_REASONING
-                ) {
-                    explicitUserModel + listOf(resolvedLifestyleModel) + specialistRole.candidateModels() + listOf(fallbackModel)
-                } else {
-                    explicitUserModel + specialistRole.candidateModels() + listOf("gemini-3.8-flash", "gemini-3.5-flash-lite")
-                }
-                val candidateModels = toolCallingRoleModels.distinct()
+                val candidateModels = (
+                    explicitUserModel +
+                        specialistRole.candidateModels() +
+                        listOf(GeminiMultimodalClient.DEFAULT_MODEL, "gemini-3.8-flash", "gemini-3.5-flash-lite")
+                    ).distinct()
                 val cascaded = cloudClient.decideNextActionWithCascade(
                     apiKey = apiKey,
                     candidateModels = candidateModels,
-                    goal = goal,
+                    goal = g,
                     iteration = iteration,
                     snapshot = snapshot,
                     historySteps = historySteps,
                     previousPlan = previousPlan,
                     chatHistory = chatHistory,
-                    customBaseUrl = customBaseUrl
+                    customBaseUrl = customBaseUrl,
+                    systemContext = systemContext,
+                    bridgeToken = bridgeToken
                 )
                 if (cascaded != null) {
                     val (resolvedModelBadge, cloudDecision) = cascaded
@@ -684,31 +739,46 @@ class MobileAiInfrastructureRouter(
                     recordSpecialistTurn(
                         badge = displayBadge,
                         role = specialistRole,
-                        iteration = iteration
+                        iteration = iteration,
+                        cloudError = null,
+                        succeeded = true
                     )
                     return@withContext cloudDecision
+                } else {
+                    propagateCloudErrorToState()
                 }
             }
         } else if (hasApiKey && tier == MobileAiRouteTier.CLOUD_GEMINI_VLM) {
             val cascaded = cloudClient.decideNextActionWithCascade(
                 apiKey = apiKey,
-                candidateModels = listOf(modelName, "gemini-3.8-flash", "gemini-3.5-flash-lite").distinct(),
-                goal = goal,
+                candidateModels = listOf(
+                    normalizedModelName,
+                    GeminiMultimodalClient.DEFAULT_MODEL,
+                    "gemini-3.8-flash",
+                    "gemini-3.5-flash-lite"
+                ).distinct(),
+                goal = g,
                 iteration = iteration,
                 snapshot = snapshot,
                 historySteps = historySteps,
                 previousPlan = previousPlan,
                 chatHistory = chatHistory,
-                customBaseUrl = customBaseUrl
+                customBaseUrl = customBaseUrl,
+                systemContext = systemContext,
+                bridgeToken = bridgeToken
             )
             if (cascaded != null) {
                 val (resolvedBadge, cloudDecision) = cascaded
                 recordSpecialistTurn(
                     badge = if (resolvedBadge == "FAST-PATH-10MS") "GEMINI-CLOUD" else resolvedBadge,
                     role = specialistRole,
-                    iteration = iteration
+                    iteration = iteration,
+                    cloudError = null,
+                    succeeded = true
                 )
                 return@withContext cloudDecision
+            } else {
+                propagateCloudErrorToState()
             }
         }
 
@@ -717,15 +787,16 @@ class MobileAiInfrastructureRouter(
         if (modelPath != null && (tier == MobileAiRouteTier.AUTO_SMART || tier == MobileAiRouteTier.ON_DEVICE_MEDIAPIPE)) {
             val mpDecision = inferWithMediaPipeLlm(
                 modelPath = modelPath,
-                goal = goal,
+                goal = g,
                 iteration = iteration,
                 snapshot = snapshot,
                 historySteps = historySteps,
                 previousPlan = previousPlan,
-                chatHistory = chatHistory
+                chatHistory = chatHistory,
+                systemContext = systemContext
             )
             if (mpDecision != null) {
-                _state.update { it.copy(lastUsedBackendBadge = "MEDIAPIPE-NPU") }
+                _state.update { it.copy(lastUsedBackendBadge = "MEDIAPIPE-NPU", lastDecisionSucceeded = true) }
                 return@withContext mpDecision
             }
         }
@@ -733,15 +804,16 @@ class MobileAiInfrastructureRouter(
         // 3. Local Edge LLM Server (Ollama `:11434` or llama.cpp `:8080` on phone/Termux)
         if (tier == MobileAiRouteTier.AUTO_SMART || tier == MobileAiRouteTier.LOCAL_EDGE_SERVER) {
             val localServerDecision = inferWithLocalEdgeServer(
-                goal = goal,
+                goal = g,
                 iteration = iteration,
                 snapshot = snapshot,
                 historySteps = historySteps,
                 previousPlan = previousPlan,
-                chatHistory = chatHistory
+                chatHistory = chatHistory,
+                systemContext = systemContext
             )
             if (localServerDecision != null) {
-                _state.update { it.copy(lastUsedBackendBadge = "LOCAL-LLM") }
+                _state.update { it.copy(lastUsedBackendBadge = "LOCAL-LLM", lastDecisionSucceeded = true) }
                 return@withContext localServerDecision
             }
         }
@@ -749,47 +821,66 @@ class MobileAiInfrastructureRouter(
         // 4. Galaxy S25 Built-In NPU: Google AICore (`com.google.ai.edge.aicore.GenerativeModel` — Gemini Nano)
         if (_state.value.googleAiCoreInstalled && (tier == MobileAiRouteTier.AUTO_SMART || tier == MobileAiRouteTier.S25_AICORE_NANO)) {
             val nanoDecision = inferWithAiCoreGeminiNano(
-                goal = goal,
+                goal = g,
                 iteration = iteration,
                 snapshot = snapshot,
                 historySteps = historySteps,
                 previousPlan = previousPlan,
-                chatHistory = chatHistory
+                chatHistory = chatHistory,
+                systemContext = systemContext
             )
             if (nanoDecision != null) {
-                _state.update { it.copy(lastUsedBackendBadge = "S25-NPU-NANO") }
+                _state.update { it.copy(lastUsedBackendBadge = "S25-NPU-NANO", lastDecisionSucceeded = true) }
                 return@withContext nanoDecision
             }
         }
 
-        // 5. Fast Screen-Aware Conversational Partner (guaranteed zero-latency control + natural Korean speech)
-        val cloudErr = GeminiMultimodalClient.lastCloudApiErrorReason
-        val fallbackBadge = when {
-            !cloudErr.isNullOrBlank() && cloudErr.contains("402") -> "ONDEVICE-CORE (API크레딧소진)"
-            !cloudErr.isNullOrBlank() && (cloudErr.contains("401") || cloudErr.contains("403")) -> "ONDEVICE-CORE (API키오류)"
-            offlineRoute == "on-device-nano" && _state.value.googleAiCoreInstalled -> "S25-ONDEVICE"
-            else -> "ONDEVICE-CORE"
+        // 5. Honest Offline Failure Guidance (surface exact cloud error & errorBadge; NEVER mask behind "대화 확인")
+        val cloudErr = GeminiMultimodalClient.lastCloudApiErrorReason?.trim()?.takeIf { it.isNotEmpty() }
+        val effectiveError = cloudErr ?: "AI API 키 또는 노트북 CLI 브리지(:18889)가 연결되지 않았습니다."
+        val errorBadge = when {
+            !cloudErr.isNullOrBlank() && cloudErr.contains("402") -> "AI 연결 오류 (크레딧 소진)"
+            !cloudErr.isNullOrBlank() && (cloudErr.contains("401") || cloudErr.contains("403")) -> "AI 연결 오류 (API 키/권한)"
+            !cloudErr.isNullOrBlank() && cloudErr.contains("429") -> "AI 연결 오류 (요청 한도)"
+            !cloudErr.isNullOrBlank() && cloudErr.contains("404") -> "AI 연결 오류 (모델 미지원)"
+            !canCallRemoteOrBridge && cloudErr.isNullOrBlank() -> "AI 미연결 (키/브리지 필요)"
+            else -> "AI 연결 오류"
         }
         recordSpecialistTurn(
-            badge = fallbackBadge,
+            badge = errorBadge,
             role = specialistRole,
-            iteration = iteration
+            iteration = iteration,
+            cloudError = effectiveError,
+            succeeded = false
         )
-        cloudClient.inferLocalOnDeviceAction(
-            goal = goal,
+        val offlineDecision = cloudClient.inferLocalOnDeviceAction(
+            goal = g,
             iteration = iteration,
             snapshot = snapshot,
             historySteps = historySteps,
             previousPlan = previousPlan,
             chatHistory = chatHistory
         )
+        offlineDecision.toolArgs.put("is_cloud_error", true)
+        offlineDecision.toolArgs.put("error_reason", effectiveError)
+        offlineDecision.toolArgs.put("error_badge", errorBadge)
+        offlineDecision
+    }
+
+    private fun propagateCloudErrorToState() {
+        val cloudErr = GeminiMultimodalClient.lastCloudApiErrorReason?.trim()?.takeIf { it.isNotEmpty() }
+        if (cloudErr != null) {
+            _state.update { it.copy(lastCloudApiError = cloudErr) }
+        }
     }
 
     private fun recordSpecialistTurn(
         badge: String,
         role: SpecialistModelRole,
         iteration: Int,
-        latencyMs: Long = 0L
+        latencyMs: Long = 0L,
+        cloudError: String? = null,
+        succeeded: Boolean = true
     ) {
         val shortRole = role.roleKo.substringBefore(" (")
         val entry = "T$iteration:$badge ($shortRole)"
@@ -812,26 +903,45 @@ class MobileAiInfrastructureRouter(
                 lastSpecialistReason = role.roleKo,
                 turnModelLedger = updatedLedger,
                 lastRoutingTelemetry = telemetry,
-                isCircuitBreakerTripped = tripped
+                isCircuitBreakerTripped = tripped,
+                lastCloudApiError = cloudError,
+                lastDecisionSucceeded = succeeded
             )
         }
     }
 
     /**
-     * Delegates to already-installed AI apps on the Galaxy S25 (`Perplexity`, `ChatGPT`, `Voice Access`, `Bixby`)
-     * ONLY when the user's primary target app IS that assistant (never when mentioned as background context like
-     * "이건 체지피티에 넣은 거고 배달의 민족 앱을 열어서...").
+     * Delegates to already-installed AI apps (`Perplexity`, `ChatGPT`, `Voice Access`, `Bixby`)
+     * STRICTLY when the user issues an explicit app-launch / app-switch imperative (e.g. "챗지피티 앱 열어줘").
+     * NEVER hijacks general questions mentioning app names (e.g. "챗지피티 요금제", "퍼플렉시티 비교", "빅스비란").
      */
     private fun tryDelegateToInstalledMobileAiApp(goal: String, gLower: String): ModelTurnDecision? {
         val resolvedTarget = IntentDecomposerAndRouter.resolveTargetAppFromPrompt(goal)
         val isContextualPastReference = gLower.contains("넣은 거고") || gLower.contains("말고") || gLower.contains("아니라")
+        if (isContextualPastReference) return null
+
+        val informationalQuestionCues = listOf(
+            "요금", "가격", "비용", "구독", "차이", "비교", "뭐야", "무엇", "어때", "추천",
+            "공략", "방법", "알려", "설명", "뉴스", "리뷰", "장단점", "기능", "업데이트", "?"
+        )
+        if (informationalQuestionCues.any { gLower.contains(it) }) {
+            return null
+        }
+
+        val explicitLaunchVerbs = listOf(
+            "열어", "실행", "켜줘", "켜 줘", "켜서", "띄워", "앱으로", "앱 열", "로 가",
+            "open ", "launch ", "start "
+        )
+        val hasExplicitLaunchIntent = resolvedTarget != null || explicitLaunchVerbs.any { gLower.contains(it) }
+        if (!hasExplicitLaunchIntent) {
+            return null
+        }
 
         if ((gLower.contains("퍼플렉시티") || gLower.contains("perplexity")) &&
-            !isContextualPastReference &&
             (resolvedTarget == null || resolvedTarget.second == "ai.perplexity.app.android") &&
             _state.value.perplexityInstalled
         ) {
-            val query = goal.replace(Regex("(?i)퍼플렉시티(에서|로)?|perplexity"), "").trim()
+            val query = goal.replace(Regex("(?i)퍼플렉시티(에서|로|앱)?|perplexity|열어줘|열어|실행해줘|실행"), "").trim()
             return ModelTurnDecision(
                 observation = "기기에 설치된 Perplexity AI 앱으로 연결",
                 subGoals = listOf(
@@ -845,7 +955,6 @@ class MobileAiInfrastructureRouter(
         }
 
         if ((gLower.contains("챗지피티") || gLower.contains("chatgpt") || gLower.contains("지피티")) &&
-            !isContextualPastReference &&
             (resolvedTarget == null || resolvedTarget.second == "com.openai.chatgpt") &&
             _state.value.chatGptInstalled
         ) {
@@ -858,7 +967,7 @@ class MobileAiInfrastructureRouter(
             )
         }
 
-        if ((gLower.contains("보이스 액세스") || gLower.contains("voice access")) && !isContextualPastReference) {
+        if (gLower.contains("보이스 액세스") || gLower.contains("voice access")) {
             if (_state.value.voiceAccessInstalled) {
                 return ModelTurnDecision(
                     observation = "Google Voice Access 실행",
@@ -870,7 +979,7 @@ class MobileAiInfrastructureRouter(
             }
         }
 
-        if ((gLower.contains("빅스비") || gLower.contains("bixby")) && !isContextualPastReference) {
+        if (gLower.contains("빅스비") || gLower.contains("bixby")) {
             if (_state.value.bixbyOnDeviceInstalled) {
                 return ModelTurnDecision(
                     observation = "Samsung 온디바이스 빅스비 호출",
@@ -894,7 +1003,8 @@ class MobileAiInfrastructureRouter(
         snapshot: AtomicSnapshot,
         historySteps: List<AgentStepLog>,
         previousPlan: List<SubGoalItem>,
-        chatHistory: List<LiveChatMessage>
+        chatHistory: List<LiveChatMessage>,
+        systemContext: String = ""
     ): ModelTurnDecision? {
         return withTimeoutOrNull(4500L) {
             try {
@@ -907,7 +1017,7 @@ class MobileAiInfrastructureRouter(
                     }
                 ).also { aiCoreNanoModel = it }
 
-                val prompt = buildCompactOnDevicePrompt(goal, iteration, snapshot, historySteps, chatHistory)
+                val prompt = buildCompactOnDevicePrompt(goal, iteration, snapshot, historySteps, chatHistory, systemContext)
                 val response = model.generateContent(prompt)
                 val rawText = response.text?.trim().orEmpty()
                 if (rawText.isBlank()) return@withTimeoutOrNull null
@@ -929,7 +1039,8 @@ class MobileAiInfrastructureRouter(
         snapshot: AtomicSnapshot,
         historySteps: List<AgentStepLog>,
         previousPlan: List<SubGoalItem>,
-        chatHistory: List<LiveChatMessage>
+        chatHistory: List<LiveChatMessage>,
+        systemContext: String = ""
     ): ModelTurnDecision? {
         return try {
             val engine = if (mediaPipeLlm != null && loadedMediaPipePath == modelPath) {
@@ -946,7 +1057,7 @@ class MobileAiInfrastructureRouter(
                 }
             }
 
-            val prompt = buildCompactOnDevicePrompt(goal, iteration, snapshot, historySteps, chatHistory)
+            val prompt = buildCompactOnDevicePrompt(goal, iteration, snapshot, historySteps, chatHistory, systemContext)
             val rawOut = engine.generateResponse(prompt)?.trim().orEmpty()
             if (rawOut.isBlank()) return null
 
@@ -965,7 +1076,8 @@ class MobileAiInfrastructureRouter(
         snapshot: AtomicSnapshot,
         historySteps: List<AgentStepLog>,
         previousPlan: List<SubGoalItem>,
-        chatHistory: List<LiveChatMessage>
+        chatHistory: List<LiveChatMessage>,
+        systemContext: String = ""
     ): ModelTurnDecision? {
         val endpoints = listOf(
             "http://127.0.0.1:11434/v1/chat/completions" to "qwen2.5:3b",
@@ -976,7 +1088,7 @@ class MobileAiInfrastructureRouter(
             .readTimeout(6, TimeUnit.SECONDS)
             .build()
 
-        val prompt = buildCompactOnDevicePrompt(goal, iteration, snapshot, historySteps, chatHistory)
+        val prompt = buildCompactOnDevicePrompt(goal, iteration, snapshot, historySteps, chatHistory, systemContext)
         for ((url, defaultModel) in endpoints) {
             try {
                 val body = JSONObject().apply {
@@ -1021,7 +1133,8 @@ class MobileAiInfrastructureRouter(
         iteration: Int,
         snapshot: AtomicSnapshot,
         historySteps: List<AgentStepLog>,
-        chatHistory: List<LiveChatMessage>
+        chatHistory: List<LiveChatMessage>,
+        systemContext: String = ""
     ): String {
         val recentChat = chatHistory.takeLast(5).joinToString("\n") { m ->
             "${if (m.sender == ChatSender.USER) "사용자" else "한슨"}: ${m.text.take(90)}"
@@ -1037,6 +1150,11 @@ class MobileAiInfrastructureRouter(
             }.joinToString(",")
             "[${el.index}] '$label' ($flags)"
         }
+        val systemSection = if (systemContext.isNotBlank()) {
+            "\n\n[보조 시스템 컨텍스트]\n${systemContext.trim().take(400)}"
+        } else {
+            ""
+        }
 
         return """
 당신은 스마트폰 화면을 함께 보며 자연스럽게 대화하고 완벽하게 제어하는 한국어 AI 파트너 '한슨(Hanson)'입니다.
@@ -1050,7 +1168,7 @@ ACTION: <다음 중 하나만 출력:
 - KEY <BACK|HOME|RECENTS>
 - SETTING <brightness|volume_media> <숫자>
 - ASK <사용자에게 되물을 질문>
-- DONE>
+- DONE>$systemSection
 
 [최근 대화]
 $recentChat
@@ -1126,7 +1244,7 @@ $topElements
                         toolArgs = JSONObject().apply {
                             if (idx != null) put("element_index", idx)
                             put("text", text)
-                            put("submit_enter", true)
+                            put("press_enter", true)
                         },
                         spokenReply = spoken.ifBlank { "네, '$text'라고 입력할게요." }
                     )

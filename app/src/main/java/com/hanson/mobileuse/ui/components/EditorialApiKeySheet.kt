@@ -89,6 +89,17 @@ fun EditorialApiKeySheet(
         (trimmed.isNotEmpty() && (GeminiMultimodalClient.isValidGeminiKey(trimmed) || trimmed.startsWith("sk-") || trimmed.length >= 16)) ||
             trimmedUrl.startsWith("http://") || trimmedUrl.startsWith("https://")
     }
+    val saveAndDismiss: () -> Unit = {
+        focusManager.clearFocus()
+        if (trimmed.isNotEmpty() || trimmedUrl.isNotEmpty()) {
+            onSaveCustomBaseUrl(trimmedUrl)
+            // Preserve existing vaulted API key when user updates ONLY customBaseUrl.
+            if (trimmed.isNotEmpty()) {
+                onSaveKey(trimmed)
+            }
+            onDismiss()
+        }
+    }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -187,13 +198,7 @@ fun EditorialApiKeySheet(
                 singleLine = true,
                 visualTransformation = if (isPasswordVisible) VisualTransformation.None else PasswordVisualTransformation(),
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                keyboardActions = KeyboardActions(onDone = {
-                    focusManager.clearFocus()
-                    if (trimmed.isNotEmpty()) {
-                        onSaveKey(trimmed)
-                        onDismiss()
-                    }
-                }),
+                keyboardActions = KeyboardActions(onDone = { saveAndDismiss() }),
                 shape = RoundedCornerShape(18.dp),
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedBorderColor = ObsidianColors.TextPrimary,
@@ -238,12 +243,14 @@ fun EditorialApiKeySheet(
                 modifier = Modifier.fillMaxWidth(),
                 placeholder = {
                     Text(
-                        text = "(선택) OpenAI 호환 URL · 예: http://192.168.0.10:11434/v1",
+                        text = "(선택) 로컬 브리지·호환 URL · 예: http://127.0.0.1:18889/v1 또는 https://openrouter.ai/api/v1",
                         color = ObsidianColors.TextMuted,
                         fontSize = 12.5.sp
                     )
                 },
                 singleLine = true,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { saveAndDismiss() }),
                 shape = RoundedCornerShape(18.dp),
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedBorderColor = ObsidianColors.TextPrimary,
@@ -305,9 +312,14 @@ fun EditorialApiKeySheet(
                                 connectionTestMsg = "확인 중..."
                                 scope.launch {
                                     val res = withContext(Dispatchers.IO) {
+                                        val effectiveModel = if (trimmedUrl.contains("18889")) {
+                                            "cli-subscription-bridge"
+                                        } else {
+                                            currentModelName
+                                        }
                                         GeminiMultimodalClient().verifyConnectionHealth(
                                             apiKey = trimmed,
-                                            modelName = currentModelName,
+                                            modelName = effectiveModel,
                                             customBaseUrl = trimmedUrl
                                         )
                                     }
@@ -350,13 +362,7 @@ fun EditorialApiKeySheet(
 
             // Save Button
             Button(
-                onClick = {
-                    if (trimmed.isNotEmpty() || trimmedUrl.isNotEmpty()) {
-                        onSaveCustomBaseUrl(trimmedUrl)
-                        onSaveKey(trimmed)
-                        onDismiss()
-                    }
-                },
+                onClick = saveAndDismiss,
                 enabled = trimmed.isNotEmpty() || trimmedUrl.isNotEmpty(),
                 modifier = Modifier
                     .fillMaxWidth()

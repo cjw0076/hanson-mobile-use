@@ -1,6 +1,8 @@
 package com.hanson.mobileuse.agent
 
+import android.app.SearchManager
 import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
@@ -18,7 +20,6 @@ import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
-import java.net.URLEncoder
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.Locale
@@ -45,7 +46,7 @@ data class LoadedGlb3DMesh(
 )
 
 /**
- * Resolved YouTube Video Metadata & Cached Thumbnail File.
+ * Resolved YouTube Video Metadata & Cached Thumbnail File (or honest native-search fallback).
  */
 data class ResolvedYouTubeMedia(
     val videoId: String,
@@ -54,27 +55,38 @@ data class ResolvedYouTubeMedia(
     val watchUrl: String,
     val embedUrl: String,
     val thumbnailFilePath: String,
-    val thumbnailSizeBytes: Long
+    val thumbnailSizeBytes: Long,
+    val isDirectVideo: Boolean = true,
+    val searchQuery: String = "",
+    val nativeSearchLaunched: Boolean = false,
+    val honestFallbackMessageKo: String = ""
 )
 
 /**
  * **Agent Media File & Code-Assistant Synthesis Engine (`AgentMediaFileEngine`)**
  *
- * Replaces static/packaged UI mocks with **real file-backed & URL-backed mobile rendering**:
- * 1. **YouTube Link & Search In-App Resolver**:
- *    Extracts `videoId` from any `youtube.com/watch?v=...`, `youtu.be/...`, `youtube.com/shorts/...` URL
- *    OR searches YouTube live to find the real top `videoId`, fetches official oEmbed title/channel,
- *    and downloads the real `hqdefault.jpg` thumbnail to `filesDir/agent_media/yt_<id>.jpg`.
+ * Manages file-backed and URL-backed mobile media resolution with transparent provenance:
+ * 1. **YouTube Direct URL oEmbed Resolver & Native Search Handoff**:
+ *    Extracts `videoId` from direct `youtube.com/watch?v=...`, `youtu.be/...`, `youtube.com/shorts/...` URLs,
+ *    fetches official `/oembed` title/channel metadata, and caches `hqdefault.jpg` thumbnails.
+ *    For non-URL search queries, hands off cleanly via native YouTube `Intent.ACTION_SEARCH`
+ *    (or returns an honest fallback message) without HTML scraping or hardcoded fallback videos.
  * 2. **Real `.glb` (glTF 2.0 Binary) & `.obj` Downloader, Code-Assistant 3D Compiler & Binary Parser**:
- *    Downloads real `.glb` files (e.g. Khronos `Duck.glb`, `Avocado.glb`, `CesiumMilkTruck.glb`, `BoxVertexColors.glb`, or any `.glb` URL),
- *    OR runs the Code Assistant 3D Mesh Synthesizer to compile a spec-compliant IEEE glTF 2.0 `.glb` binary file
+ *    Downloads real `.glb` files (e.g. Khronos sample models or explicit `.glb` URLs),
+ *    or runs the Code Assistant 3D Mesh Synthesizer to compile a spec-compliant IEEE glTF 2.0 `.glb` binary file
  *    (`magic = 0x46546C67` `"glTF"`, JSON chunk, BIN float32 vertex & uint16 index buffers) to disk,
  *    and parses the actual `.glb` binary file from disk for 120Hz 3D rendering.
- * 3. **Real `.mp4`, `.gif`, `.png`, `.html` File Downloader & Code-Assistant File Generator**:
- *    Every visual card in chat is backed by a real file in `filesDir/agent_media/` (or `/sdcard/...`)
- *    that can be inspected, re-parsed, or opened at any time.
+ * 3. **Real Image/Video/GIF File Loader & Honest Interactive Storyboard/Animation Previews**:
+ *    Loads genuine `.png`/`.jpg`/`.mp4`/`.gif` files when provided by local path, HTTPS URL, or live
+ *    Gemini multimodal image generation (`gemini-nano-banana-2.1` via `x-goog-api-key` header).
+ *    When no real rendered `.mp4`/`.gif` asset exists, writes honestly labeled interactive storyboard (`.json`)
+ *    or HTML5 animation preview (`.html`) files rather than claiming synthetic previews are encoded video/GIFs.
  */
 object AgentMediaFileEngine {
+
+    const val DEFAULT_CODE_ASSISTANT_GEMINI_MODEL = "gemini-2.5-flash"
+    const val FALLBACK_CODE_ASSISTANT_GEMINI_MODEL = "gemini-2.5-flash-lite"
+    const val DEFAULT_IMAGE_GENERATION_GEMINI_MODEL = "gemini-nano-banana-2.1"
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(7, TimeUnit.SECONDS)
@@ -146,15 +158,87 @@ object AgentMediaFileEngine {
         return null
     }
 
-    fun resolveYouTubeMedia(context: Context, promptOrUrl: String): ResolvedYouTubeMedia {
+    /**
+     * Builds an official Android `Intent.ACTION_SEARCH` targeting the native YouTube app.
+     */
+    fun buildNativeYouTubeSearchIntent(query: String): Intent {
+        val cleanQuery = query.trim()
+        return Intent(Intent.ACTION_SEARCH).apply {
+            setPackage("com.google.android.youtube")
+            putExtra(SearchManager.QUERY, cleanQuery)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+    }
+
+    /**
+     * Opens native YouTube app search via `Intent.ACTION_SEARCH` (with `Intent.ACTION_WEB_SEARCH`
+     * fallback if the YouTube app is unavailable). Never scrapes YouTube search HTML.
+     */
+    fun launchNativeYouTubeSearch(context: Context, query: String): Boolean {
+        val cleanQuery = query.trim()
+        if (cleanQuery.isEmpty()) return false
+        val appSearchLaunched = runCatching {
+            context.startActivity(buildNativeYouTubeSearchIntent(cleanQuery))
+            true
+        }.getOrDefault(false)
+        if (appSearchLaunched) return true
+
+        val webSearchIntent = Intent(Intent.ACTION_WEB_SEARCH).apply {
+            putExtra(SearchManager.QUERY, "YouTube $cleanQuery")
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        return runCatching {
+            context.startActivity(webSearchIntent)
+            true
+        }.getOrDefault(false)
+    }
+
+    /**
+     * Resolves official YouTube `/oembed` metadata and thumbnail for direct YouTube URLs.
+     * When no direct YouTube video URL is supplied, uses native YouTube `Intent.ACTION_SEARCH`
+     * (when [launchNativeSearchOnQuery] is true) and returns an honest fallback result with
+     * `isDirectVideo = false` and empty `videoId` rather than scraping HTML or substituting a hardcoded video.
+     */
+    @JvmOverloads
+    fun resolveYouTubeMedia(
+        context: Context,
+        promptOrUrl: String,
+        launchNativeSearchOnQuery: Boolean = true
+    ): ResolvedYouTubeMedia {
         val directId = extractYouTubeVideoIdFromUrl(promptOrUrl)
-        val videoId = directId ?: searchYouTubeTopVideoId(promptOrUrl) ?: "jfKfPfyJRdk" // Lofi Girl 24/7 stream fallback
+        if (directId == null) {
+            val cleanedQuery = IntentDecomposerAndRouter.cleanYouTubeSearchQuery(promptOrUrl)
+                .ifBlank { promptOrUrl.trim() }
+            val launched = if (launchNativeSearchOnQuery && cleanedQuery.isNotBlank()) {
+                launchNativeYouTubeSearch(context, cleanedQuery)
+            } else {
+                false
+            }
+            val fallbackMsg = if (launched) {
+                "직접 YouTube 영상 링크가 없어 YouTube 앱 검색('$cleanedQuery')을 열었습니다. 앱 내 임베드 재생은 youtube.com 또는 youtu.be 영상 URL을 입력해 주세요."
+            } else {
+                "직접 YouTube 영상 링크가 없어 임베드 영상을 자동 추측하지 않았습니다(검색어: '$cleanedQuery'). YouTube 앱에서 검색하거나 영상 URL(youtube.com/watch?v=... 또는 youtu.be/...)을 붙여 넣어 주세요."
+            }
+            return ResolvedYouTubeMedia(
+                videoId = "",
+                title = if (cleanedQuery.isNotBlank()) "YouTube 검색: $cleanedQuery" else "YouTube 링크 필요",
+                channelName = if (launched) "YouTube 앱 검색 실행됨" else "직접 YouTube URL 필요",
+                watchUrl = "",
+                embedUrl = "",
+                thumbnailFilePath = "",
+                thumbnailSizeBytes = 0L,
+                isDirectVideo = false,
+                searchQuery = cleanedQuery,
+                nativeSearchLaunched = launched,
+                honestFallbackMessageKo = fallbackMsg
+            )
+        }
 
         // Fetch official YouTube oEmbed JSON for real video title & channel name
         var realTitle = ""
         var channelName = "YouTube"
         runCatching {
-            val oembedUrl = "https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=$videoId&format=json"
+            val oembedUrl = "https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=$directId&format=json"
             val req = Request.Builder().url(oembedUrl).header("User-Agent", USER_AGENT).build()
             httpClient.newCall(req).execute().use { resp ->
                 if (resp.isSuccessful) {
@@ -166,14 +250,14 @@ object AgentMediaFileEngine {
         }
 
         if (realTitle.isBlank()) {
-            realTitle = "YouTube Video ($videoId)"
+            realTitle = "YouTube Video ($directId)"
         }
 
         // Download real YouTube thumbnail (hqdefault.jpg) into filesDir/agent_media/
-        val thumbFile = File(mediaDir(context), "yt_${videoId}.jpg")
+        val thumbFile = File(mediaDir(context), "yt_${directId}.jpg")
         if (!thumbFile.exists() || thumbFile.length() < 512L) {
             runCatching {
-                val thumbUrl = "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
+                val thumbUrl = "https://i.ytimg.com/vi/$directId/hqdefault.jpg"
                 val req = Request.Builder().url(thumbUrl).header("User-Agent", USER_AGENT).build()
                 httpClient.newCall(req).execute().use { resp ->
                     if (resp.isSuccessful) {
@@ -187,35 +271,18 @@ object AgentMediaFileEngine {
         }
 
         return ResolvedYouTubeMedia(
-            videoId = videoId,
+            videoId = directId,
             title = realTitle,
             channelName = channelName,
-            watchUrl = "https://www.youtube.com/watch?v=$videoId",
-            embedUrl = "https://www.youtube-nocookie.com/embed/$videoId?autoplay=1&playsinline=1&controls=1&rel=0",
+            watchUrl = "https://www.youtube.com/watch?v=$directId",
+            embedUrl = "https://www.youtube-nocookie.com/embed/$directId?autoplay=1&playsinline=1&controls=1&rel=0",
             thumbnailFilePath = if (thumbFile.exists()) thumbFile.absolutePath else "",
-            thumbnailSizeBytes = if (thumbFile.exists()) thumbFile.length() else 0L
+            thumbnailSizeBytes = if (thumbFile.exists()) thumbFile.length() else 0L,
+            isDirectVideo = true,
+            searchQuery = "",
+            nativeSearchLaunched = false,
+            honestFallbackMessageKo = ""
         )
-    }
-
-    private fun searchYouTubeTopVideoId(rawPrompt: String): String? {
-        val cleanedQuery = IntentDecomposerAndRouter.cleanYouTubeSearchQuery(rawPrompt)
-            .ifBlank { "lofi hip hop radio beats to relax" }
-
-        return runCatching {
-            val encoded = URLEncoder.encode(cleanedQuery, "UTF-8")
-            val searchUrl = "https://www.youtube.com/results?search_query=$encoded&sp=EgIQAQ%253D%253D" // Filter: Videos only (excludes channels/playlists/ads)
-            val req = Request.Builder()
-                .url(searchUrl)
-                .header("User-Agent", USER_AGENT)
-                .header("Accept-Language", "ko-KR,ko;q=0.9,en-US;q=0.8")
-                .build()
-            httpClient.newCall(req).execute().use { resp ->
-                val html = resp.body?.string().orEmpty()
-                // Prefer videoRenderer blocks over adSlotRenderer so we never pick an ad videoId
-                Regex("\"videoRenderer\":\\{\"videoId\":\"([a-zA-Z0-9_-]{11})\"").find(html)?.groupValues?.getOrNull(1)
-                    ?: Regex("\"videoId\":\"([a-zA-Z0-9_-]{11})\"").find(html)?.groupValues?.getOrNull(1)
-            }
-        }.getOrNull()
     }
 
     // =========================================================================
@@ -508,6 +575,107 @@ fun compileMeshToGlbBinary(): ByteArray {
         return Triple(verts, faces, codeSummary)
     }
 
+    /**
+     * Extracts visible non-thought text from Gemini `generateContent` JSON responses,
+     * filtering out any parts marked with `"thought": true` (Gemini 2.5+ thinking parts).
+     */
+    fun extractNonThoughtTextFromGeminiResponse(rawResponse: JSONObject): String {
+        val parts = rawResponse.optJSONArray("candidates")
+            ?.optJSONObject(0)
+            ?.optJSONObject("content")
+            ?.optJSONArray("parts") ?: return ""
+        val sb = StringBuilder()
+        for (i in 0 until parts.length()) {
+            val part = parts.optJSONObject(i) ?: continue
+            if (part.optBoolean("thought", false)) continue
+            if (part.isNull("text")) continue
+            val text = part.optString("text", "")
+            if (text.isNotEmpty()) {
+                sb.append(text)
+            }
+        }
+        return sb.toString().trim()
+    }
+
+    /**
+     * Extracts the first non-thought inline image payload `(base64Data, mimeType)` from a
+     * Gemini multimodal `generateContent` JSON response, skipping `"thought": true` parts.
+     */
+    fun extractNonThoughtImageFromGeminiResponse(rawResponse: JSONObject): Pair<String, String>? {
+        val parts = rawResponse.optJSONArray("candidates")
+            ?.optJSONObject(0)
+            ?.optJSONObject("content")
+            ?.optJSONArray("parts") ?: return null
+        for (i in 0 until parts.length()) {
+            val part = parts.optJSONObject(i) ?: continue
+            if (part.optBoolean("thought", false)) continue
+            val inlineData = part.optJSONObject("inlineData") ?: part.optJSONObject("inline_data") ?: continue
+            if (inlineData.isNull("data")) continue
+            val data = inlineData.optString("data", "").trim()
+            val mime = when {
+                !inlineData.isNull("mimeType") -> inlineData.optString("mimeType", "image/png").trim()
+                !inlineData.isNull("mime_type") -> inlineData.optString("mime_type", "image/png").trim()
+                else -> "image/png"
+            }
+            if (data.isNotBlank()) {
+                return data to mime.ifBlank { "image/png" }
+            }
+        }
+        return null
+    }
+
+    /**
+     * Generates a raster image via live Gemini multimodal image generation (`gemini-nano-banana-2.1`,
+     * cascading to `gemini-2.5-flash`) authenticated strictly through the `x-goog-api-key` HTTP header
+     * (never URL query-parameter keys), filtering out `thought == true` parts.
+     */
+    @JvmOverloads
+    fun generateImageBase64ViaGemini(
+        prompt: String,
+        apiKey: String,
+        style: String = ""
+    ): Pair<String, String>? {
+        val keySet = GeminiMultimodalClient.Companion.MultiProviderApiKeySet.parse(apiKey)
+        val geminiKey = keySet.geminiKey?.takeIf { it.isNotBlank() } ?: return null
+        val styledPrompt = if (style.isNotBlank()) {
+            "Generate a visual illustration in '$style' style for: $prompt"
+        } else {
+            "Generate a high-contrast illustration for: $prompt"
+        }
+        val reqJson = JSONObject().apply {
+            put(
+                "contents",
+                JSONArray().put(
+                    JSONObject().put(
+                        "parts",
+                        JSONArray().put(JSONObject().put("text", styledPrompt))
+                    )
+                )
+            )
+            put(
+                "generationConfig",
+                JSONObject().put("responseModalities", JSONArray().put("TEXT").put("IMAGE"))
+            )
+        }
+        for (model in listOf(DEFAULT_IMAGE_GENERATION_GEMINI_MODEL, DEFAULT_CODE_ASSISTANT_GEMINI_MODEL)) {
+            val result = runCatching {
+                val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent"
+                val req = Request.Builder()
+                    .url(url)
+                    .addHeader("x-goog-api-key", geminiKey)
+                    .post(reqJson.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+                    .build()
+                httpClient.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) return@use null
+                    val body = resp.body?.string() ?: return@use null
+                    extractNonThoughtImageFromGeminiResponse(JSONObject(body))
+                }
+            }.getOrNull()
+            if (result != null) return result
+        }
+        return null
+    }
+
     private fun callCloudCodeAssistantText(
         systemPrompt: String,
         userPrompt: String,
@@ -515,38 +683,42 @@ fun compileMeshToGlbBinary(): ByteArray {
     ): Pair<String, String>? {
         val keySet = GeminiMultimodalClient.Companion.MultiProviderApiKeySet.parse(apiKey)
 
-        // 1. Try Google Gemini API (gemini-2.5-flash-lite / gemini-2.0-flash)
+        // 1. Try Google Gemini API (live gemini-2.5-flash / gemini-2.5-flash-lite via x-goog-api-key header)
         val geminiKey = keySet.geminiKey
         if (!geminiKey.isNullOrBlank()) {
-            for (model in listOf("gemini-2.5-flash-lite", "gemini-2.0-flash")) {
+            for (model in listOf(DEFAULT_CODE_ASSISTANT_GEMINI_MODEL, FALLBACK_CODE_ASSISTANT_GEMINI_MODEL)) {
                 val res = runCatching {
-                    val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$geminiKey"
+                    val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent"
                     val bodyJson = JSONObject().apply {
+                        put(
+                            "systemInstruction",
+                            JSONObject().put(
+                                "parts",
+                                JSONArray().put(JSONObject().put("text", systemPrompt))
+                            )
+                        )
                         put(
                             "contents",
                             JSONArray().put(
-                                JSONObject().put(
-                                    "parts",
-                                    JSONArray().put(JSONObject().put("text", "$systemPrompt\n\nUser Request: $userPrompt"))
-                                )
+                                JSONObject().apply {
+                                    put("role", "user")
+                                    put(
+                                        "parts",
+                                        JSONArray().put(JSONObject().put("text", userPrompt))
+                                    )
+                                }
                             )
                         )
                     }
                     val req = Request.Builder()
                         .url(url)
+                        .addHeader("x-goog-api-key", geminiKey)
                         .post(bodyJson.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
                         .build()
                     httpClient.newCall(req).execute().use { resp ->
                         if (!resp.isSuccessful) return@use null
                         val raw = JSONObject(resp.body?.string() ?: return@use null)
-                        val text = raw.optJSONArray("candidates")
-                            ?.optJSONObject(0)
-                            ?.optJSONObject("content")
-                            ?.optJSONArray("parts")
-                            ?.optJSONObject(0)
-                            ?.optString("text", "")
-                            .orEmpty()
-                            .trim()
+                        val text = extractNonThoughtTextFromGeminiResponse(raw)
                         if (text.isNotBlank()) "GEMINI-CODE ($model)" to text else null
                     }
                 }.getOrNull()
@@ -554,13 +726,13 @@ fun compileMeshToGlbBinary(): ByteArray {
             }
         }
 
-        // 2. Try OpenAI API (gpt-4o-mini) if OpenAI key is configured
+        // 2. Try OpenAI API (gpt-4.1-mini) if OpenAI key is configured
         val openAiKey = keySet.openAiKey
         if (!openAiKey.isNullOrBlank()) {
             val res = runCatching {
                 val url = "https://api.openai.com/v1/chat/completions"
                 val bodyJson = JSONObject().apply {
-                    put("model", "gpt-4o-mini")
+                    put("model", "gpt-4.1-mini")
                     put(
                         "messages",
                         JSONArray()
@@ -583,7 +755,7 @@ fun compileMeshToGlbBinary(): ByteArray {
                         ?.optString("content", "")
                         .orEmpty()
                         .trim()
-                    if (text.isNotBlank()) "OPENAI-CODE (gpt-4o-mini)" to text else null
+                    if (text.isNotBlank()) "OPENAI-CODE (gpt-4.1-mini)" to text else null
                 }
             }.getOrNull()
             if (res != null) return res
@@ -1030,19 +1202,21 @@ Output ONLY raw OBJ lines (`v ...` and `f ...`, 1-based indices), no markdown fe
         bmp.recycle()
 
         val genCode = """
-// [Code Assistant PNG Artwork Synthesizer]
+// [Procedural On-Device Canvas PNG Preview (Non-AI Fallback)]
 // Output File: ${target.name}
 val bitmap = Bitmap.createBitmap(960, 560, Bitmap.Config.ARGB_8888)
 renderHarmonicField(Canvas(bitmap), prompt = "$prompt", seed = $seed)
 bitmap.compress(Bitmap.CompressFormat.PNG, 100, FileOutputStream("${target.name}"))
         """.trimIndent()
 
-        return Triple(target, "이미지 파일 (${target.name})", genCode)
+        return Triple(target, "PROCEDURAL CANVAS PNG PREVIEW (${target.name})", genCode)
     }
 
     /**
-     * Resolves or downloads a real `.mp4` video file if a URL or local path is provided,
-     * or writes a Code-Assistant motion-graphic storyboard & script specification file on disk.
+     * Resolves or downloads a genuine `.mp4` video file when a local path or HTTPS URL is provided.
+     * When no real `.mp4` asset is supplied, writes an honestly labeled interactive storyboard
+     * preview JSON (`storyboard_*.json`, `isRealRenderedMp4 = false`) rather than misrepresenting
+     * a JSON file as an encoded `.mp4` video.
      */
     fun resolveOrSynthesizeMp4File(
         context: Context,
@@ -1056,17 +1230,19 @@ bitmap.compress(Bitmap.CompressFormat.PNG, 100, FileOutputStream("${target.name}
         if (mediaUrlOrPath.startsWith("/") || mediaUrlOrPath.startsWith("file://")) {
             val f = File(mediaUrlOrPath.removePrefix("file://"))
             if (f.isFile && f.length() > 128) {
-                return Triple(f, "LOCAL MP4 FILE (${f.name})", "")
+                return Triple(f, "REAL LOCAL MP4 VIDEO (${f.name})", "")
             }
         }
 
-        // 2. Check if there is any .mp4 in /sdcard/Download matching or if a URL is provided
+        // 2. Download real remote .mp4 when an HTTPS/HTTP URL is explicitly supplied
         if (mediaUrlOrPath.startsWith("http://") || mediaUrlOrPath.startsWith("https://")) {
             val target = File(dir, "dl_${slug}_${abs(mediaUrlOrPath.hashCode()) % 10000}.mp4")
             runCatching {
                 val req = Request.Builder().url(mediaUrlOrPath).header("User-Agent", USER_AGENT).build()
                 httpClient.newCall(req).execute().use { resp ->
-                    if (resp.isSuccessful) {
+                    val contentType = resp.header("Content-Type").orEmpty().lowercase(Locale.ROOT)
+                    val looksLikeHtmlOrJson = contentType.contains("text/html") || contentType.contains("application/json")
+                    if (resp.isSuccessful && !looksLikeHtmlOrJson) {
                         resp.body?.byteStream()?.use { input ->
                             FileOutputStream(target).use { output ->
                                 input.copyTo(output)
@@ -1080,23 +1256,98 @@ bitmap.compress(Bitmap.CompressFormat.PNG, 100, FileOutputStream("${target.name}
             }
         }
 
-        // 3. Code Assistant Motion-Graphic Scene File (.json / .mp4 spec) saved on disk
-        val specFile = File(dir, "codegen_${slug}_motion.json")
+        // 3. Honest fallback: interactive storyboard preview JSON (explicitly NOT an encoded .mp4)
+        val specFile = File(dir, "storyboard_${slug}.json")
         val sceneJson = JSONObject().apply {
+            put("kind", "interactive_storyboard_preview")
+            put("isRealRenderedMp4", false)
+            put("requiresRealMediaApiForVideo", true)
+            put(
+                "honestNoticeKo",
+                "실제 인코딩된 MP4 동영상 파일이 아닌 인터랙티브 스토리보드 프리뷰(JSON)입니다. 실제 영상 렌더링에는 비디오 생성 API(예: Gemini Omni / Veo) 또는 실제 .mp4 URL/파일이 필요합니다."
+            )
             put("title", prompt.take(36))
             put("fps", 60)
             put("durationSec", 12.0)
-            put("generator", "Hanson-CodeAssistant-MotionEngine")
+            put("generator", "Hanson-Interactive-Storyboard-Preview")
             put(
                 "acts",
                 JSONArray()
-                    .put(JSONObject().put("act", 1).put("headline", prompt.take(26)).put("sub", "60FPS REALTIME MOTION"))
-                    .put(JSONObject().put("act", 2).put("headline", "CODE ASSISTANT SYNTHESIS").put("sub", "DYNAMIC SCENE GRAPH"))
-                    .put(JSONObject().put("act", 3).put("headline", "MOBILE FILE ENGINE").put("sub", specFile.name))
+                    .put(JSONObject().put("act", 1).put("headline", prompt.take(26)).put("sub", "STORYBOARD PREVIEW · ACT 1"))
+                    .put(JSONObject().put("act", 2).put("headline", "INTERACTIVE SCENE OUTLINE").put("sub", "NOT ENCODED MP4"))
+                    .put(JSONObject().put("act", 3).put("headline", "STORYBOARD JSON SPEC").put("sub", specFile.name))
             )
         }
-        specFile.writeText(sceneJson.toString(2), Charsets.UTF_8)
-        return Triple(specFile, "CODE-ASSISTANT MOTION SPEC (${specFile.name})", sceneJson.toString(2))
+        val formattedJson = sceneJson.toString(2)
+        specFile.writeText(formattedJson, Charsets.UTF_8)
+        return Triple(specFile, "INTERACTIVE STORYBOARD PREVIEW (NOT MP4 · ${specFile.name})", formattedJson)
+    }
+
+    /**
+     * Resolves a genuine animated `.gif` (verified for `GIF87a`/`GIF89a` header) from a local path
+     * or HTTPS URL, or writes an honestly labeled `.html` interactive animation preview file
+     * (never writing HTML into a `.gif` file or claiming a preview is a rendered GIF).
+     */
+    @JvmOverloads
+    fun resolveRealGifOrAnimationPreview(
+        context: Context,
+        prompt: String,
+        mediaUrlOrPath: String = "",
+        fallbackPreviewHtml: String = ""
+    ): Triple<File, String, String> {
+        val dir = mediaDir(context)
+        val slug = prompt.replace(Regex("[^가-힣a-zA-Z0-9]"), "_").take(18).ifBlank { "anim" }
+
+        if (mediaUrlOrPath.startsWith("/") || mediaUrlOrPath.startsWith("file://")) {
+            val f = File(mediaUrlOrPath.removePrefix("file://"))
+            if (f.isFile && hasValidGifHeader(f)) {
+                return Triple(f, "REAL LOCAL GIF (${f.name})", "")
+            }
+        }
+
+        if (mediaUrlOrPath.startsWith("http://") || mediaUrlOrPath.startsWith("https://")) {
+            val target = File(dir, "dl_${slug}_${abs(mediaUrlOrPath.hashCode()) % 10000}.gif")
+            runCatching {
+                val req = Request.Builder().url(mediaUrlOrPath).header("User-Agent", USER_AGENT).build()
+                httpClient.newCall(req).execute().use { resp ->
+                    if (resp.isSuccessful) {
+                        val bytes = resp.body?.bytes()
+                        if (bytes != null && hasValidGifMagicBytes(bytes)) {
+                            target.writeBytes(bytes)
+                        }
+                    }
+                }
+            }
+            if (target.isFile && hasValidGifHeader(target)) {
+                return Triple(target, "DOWNLOADED REAL GIF (${target.name})", "")
+            }
+        }
+
+        val previewFile = File(dir, "anim_preview_${slug}_${abs(prompt.hashCode()) % 10000}.html")
+        val previewHtml = fallbackPreviewHtml.ifBlank {
+            "<!DOCTYPE html><html lang='ko'><head><meta charset='utf-8'/></head>" +
+                "<body style='margin:0;padding:12px;background:#09090B;color:#FAFAFA;font-family:sans-serif;'>" +
+                "<p>인터랙티브 HTML5 애니메이션 프리뷰입니다(실제 인코딩된 .gif 파일 아님).</p></body></html>"
+        }
+        previewFile.writeText(previewHtml, Charsets.UTF_8)
+        return Triple(previewFile, "INTERACTIVE ANIMATION PREVIEW (NOT GIF · ${previewFile.name})", previewHtml)
+    }
+
+    private fun hasValidGifHeader(file: File): Boolean {
+        if (!file.isFile || file.length() < 6L) return false
+        return runCatching {
+            val header = ByteArray(6)
+            file.inputStream().use { input ->
+                if (input.read(header) < 6) return@runCatching false
+            }
+            hasValidGifMagicBytes(header)
+        }.getOrDefault(false)
+    }
+
+    private fun hasValidGifMagicBytes(bytes: ByteArray): Boolean {
+        if (bytes.size < 6) return false
+        val sig = String(bytes, 0, 6, Charsets.US_ASCII)
+        return sig == "GIF87a" || sig == "GIF89a"
     }
 
     /**
@@ -1112,11 +1363,16 @@ bitmap.compress(Bitmap.CompressFormat.PNG, 100, FileOutputStream("${target.name}
         hasCustomCode: Boolean = false
     ): Triple<File, String, String> {
         val dir = mediaDir(context)
+        val isGifPreviewRequest = prompt.startsWith("gif_", ignoreCase = true)
         val slug = prompt.replace(Regex("[^가-힣a-zA-Z0-9]"), "_").take(18).ifBlank { "ui" }
         val file = File(dir, "codegen_${slug}_${abs(prompt.hashCode()) % 10000}.html")
 
         var finalHtml = fallbackHtmlContent
-        var sourceLabel = "CODE-ASSISTANT UI FILE (${file.name})"
+        var sourceLabel = if (isGifPreviewRequest) {
+            "INTERACTIVE HTML5 ANIMATION PREVIEW (NOT GIF · ${file.name})"
+        } else {
+            "CODE-ASSISTANT UI FILE (${file.name})"
+        }
 
         if (!hasCustomCode && apiKey.isNotBlank()) {
             val sysPrompt = """
@@ -1139,7 +1395,11 @@ Output ONLY a complete valid `<!DOCTYPE html><html>...</html>` document with no 
                     } else {
                         "<!DOCTYPE html><html><head><meta charset='utf-8'/><meta name='viewport' content='width=device-width,initial-scale=1.0'/><style>body{margin:0;padding:8px;background:#09090B;color:#FAFAFA;font-family:sans-serif;}</style></head><body>$cleaned</body></html>"
                     }
-                    sourceLabel = "$badge · ${file.name}"
+                    sourceLabel = if (isGifPreviewRequest) {
+                        "$badge · INTERACTIVE ANIMATION PREVIEW (NOT GIF · ${file.name})"
+                    } else {
+                        "$badge · ${file.name}"
+                    }
                 }
             }
         }

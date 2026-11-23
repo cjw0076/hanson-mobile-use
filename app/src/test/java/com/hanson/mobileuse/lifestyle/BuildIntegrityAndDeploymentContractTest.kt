@@ -229,7 +229,8 @@ class BuildIntegrityAndDeploymentContractTest {
         )
         assertTrue(
             "UniversalNexusEngine must call synthesizeAndSaveCodeCanvasFile with fallbackHtmlContent",
-            callerSource.contains("fallbackHtmlContent = htmlContent")
+            callerSource.contains("fallbackHtmlContent = fallbackHtmlContent") ||
+                callerSource.contains("fallbackHtmlContent = htmlContent")
         )
     }
 

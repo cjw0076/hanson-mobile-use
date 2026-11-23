@@ -3,29 +3,36 @@ package com.hanson.mobileuse.accessibility
 import android.accessibilityservice.AccessibilityService
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.ColorSpace
 import android.graphics.Rect
-import android.hardware.display.DisplayManager
+import android.graphics.RectF
+import android.graphics.Region
 import android.os.Build
+import android.os.Looper
 import android.util.Base64
-import android.util.DisplayMetrics
 import android.util.Log
 import android.util.Xml
 import android.view.Display
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.StringWriter
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.min
-import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 
 typealias AtomicUiSnapshot = AtomicSnapshot
 
@@ -40,7 +47,8 @@ data class AtomicSnapshot(
     val indexedElements: List<IndexedUiElement> = emptyList(),
     val screenshotBase64Jpeg: String? = null,
     val somScreenshotBase64Jpeg: String? = null,
-    val screenshotError: String? = null
+    val screenshotError: String? = null,
+    val isSecureWindow: Boolean = false
 ) {
     /**
      * Preferred screenshot for VLM visual grounding: Set-of-Marks annotated JPEG when available,
@@ -48,12 +56,16 @@ data class AtomicSnapshot(
      */
     val visualGroundingBase64: String?
         get() = somScreenshotBase64Jpeg ?: screenshotBase64Jpeg
+
     fun toPromptContext(maxElements: Int = 100): String {
         val sb = StringBuilder()
         sb.appendLine("Screen Size: ${screenWidth}x${screenHeight} px (Normalized Grid: 0..1000 x 0..1000)")
         sb.appendLine("Active Package: ${activePackage.ifBlank { "unknown" }}")
         if (activeWindowTitle.isNotBlank()) {
             sb.appendLine("Active Window Title: $activeWindowTitle")
+        }
+        if (isSecureWindow) {
+            sb.appendLine("Security Flag: FLAG_SECURE window detected (OS blocked screenshot capture)")
         }
         sb.appendLine("Windows Scanned: $windowCount | Interactive/Informative Elements: ${indexedElements.size}")
         sb.appendLine("Visible UI Elements:")
@@ -96,42 +108,113 @@ data class AtomicSnapshot(
         if (screenshotError != null) {
             put("screenshotError", screenshotError)
         }
+        if (isSecureWindow) {
+            put("isSecureWindow", true)
+        }
     }
 }
 
 /**
  * Ported & enhanced from Google Artemis `HierarchyDumper.java`.
- * Performs multi-window Z-layer UI tree extraction with scrollable parent clipping,
- * API 33+ hybrid descendant prefetching, and synchronized hardware screenshot capture.
+ * Performs strict multi-window Z-layer UI tree extraction with Region-based top-down occlusion,
+ * recursion/node caps, API 33+ hybrid descendant prefetching, and deadlock-free hardware
+ * screenshot capture (preferring API 34+ `takeScreenshotOfWindow` to exclude HUD & SystemUI).
  */
 object HierarchyDumper {
     private const val TAG = "HierarchyDumper"
     private const val ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT = 3
+    private const val ERROR_TAKE_SCREENSHOT_INVALID_WINDOW = 5
+    private const val ERROR_TAKE_SCREENSHOT_SECURE_WINDOW = 6
+
+    const val MAX_RECURSION_DEPTH = 40
+    const val MAX_COLLECTED_NODES = 600
+    const val FLOATING_HUD_WINDOW_TITLE = "HansonFloatingHud"
+
+    private val PERMISSION_DIALOG_PACKAGES = setOf(
+        "com.google.android.permissioncontroller",
+        "com.android.permissioncontroller",
+        "com.google.android.packageinstaller",
+        "com.android.packageinstaller",
+        "com.samsung.android.packageinstaller"
+    )
+
+    private val screenshotExecutor: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "Hanson-Screenshot-Worker").apply { isDaemon = true }
+    }
 
     val perceptionMutex = Mutex()
 
+    private data class WindowCandidate(
+        val window: AccessibilityWindowInfo,
+        val root: AccessibilityNodeInfo,
+        val packageName: String,
+        val title: String,
+        val bounds: Rect,
+        val isActive: Boolean,
+        val isFocused: Boolean,
+        val layer: Int,
+        val windowId: Int
+    )
+
+    private data class ScreenshotCaptureResult(
+        val rawBase64: String? = null,
+        val somBase64: String? = null,
+        val error: String? = null,
+        val errorCode: Int = 0,
+        val isSecureWindow: Boolean = false
+    )
+
+    fun isSystemChromeOrEdgePackage(pkg: String, windowTitle: String = ""): Boolean {
+        val p = pkg.trim().lowercase()
+        val t = windowTitle.trim().lowercase()
+        if (p == "com.android.systemui") return true
+        if (p.contains("cocktailbar") || p.contains("appsedge") || p.contains("edgelighting")) return true
+        if (t.contains("edge 패널") || t.contains("edge panel") || t.contains("edge_panel")) return true
+        return false
+    }
+
+    fun isExplicitPermissionOrInstallerDialog(pkg: String): Boolean {
+        val p = pkg.trim().lowercase()
+        return p in PERMISSION_DIALOG_PACKAGES ||
+            p.contains("permissioncontroller") ||
+            p.contains("packageinstaller")
+    }
+
+    fun isHansonOwnPackage(pkg: String, servicePackageName: String = ""): Boolean {
+        val p = pkg.trim()
+        if (p.isEmpty()) return false
+        return p == "com.hanson.mobileuse" ||
+            p == "com.hanson.mobileuse.debug" ||
+            (servicePackageName.isNotBlank() && p == servicePackageName)
+    }
+
+    fun isFloatingHudTitle(windowTitle: String): Boolean {
+        val t = windowTitle.trim()
+        if (t.isEmpty()) return false
+        return t.equals(FLOATING_HUD_WINDOW_TITLE, ignoreCase = true) ||
+            t.contains("HansonFloatingHud", ignoreCase = true)
+    }
+
     fun getScreenDimensions(context: Context): Pair<Int, Int> {
         return try {
-            val dm = context.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
-            val display = dm?.getDisplay(Display.DEFAULT_DISPLAY)
-            if (display != null) {
-                val metrics = DisplayMetrics()
-                @Suppress("DEPRECATION")
-                display.getRealMetrics(metrics)
-                if (metrics.widthPixels > 0 && metrics.heightPixels > 0) {
-                    return metrics.widthPixels to metrics.heightPixels
-                }
-            }
             val wm = context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager
             if (wm != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                val bounds = wm.maximumWindowMetrics.bounds
-                if (bounds.width() > 0 && bounds.height() > 0) {
-                    return bounds.width() to bounds.height()
+                val currentBounds = wm.currentWindowMetrics.bounds
+                if (currentBounds.width() > 0 && currentBounds.height() > 0) {
+                    return currentBounds.width() to currentBounds.height()
+                }
+                val maxBounds = wm.maximumWindowMetrics.bounds
+                if (maxBounds.width() > 0 && maxBounds.height() > 0) {
+                    return maxBounds.width() to maxBounds.height()
                 }
             }
-            val res = context.resources.displayMetrics
-            res.widthPixels.coerceAtLeast(1080) to res.heightPixels.coerceAtLeast(2400)
-        } catch (e: Exception) {
+            val res = context.resources?.displayMetrics
+            if (res != null && res.widthPixels > 0 && res.heightPixels > 0) {
+                res.widthPixels to res.heightPixels
+            } else {
+                1080 to 2400
+            }
+        } catch (_: Throwable) {
             1080 to 2400
         }
     }
@@ -167,111 +250,173 @@ object HierarchyDumper {
 
         val windows = try {
             service.windows
-        } catch (e: Exception) {
+        } catch (_: Throwable) {
             null
         }
 
         val rootNodes = mutableListOf<A11yNode>()
         val indexedElements = mutableListOf<IndexedUiElement>()
         val indexCounter = AtomicInteger(0)
+        val collectedNodeCounter = AtomicInteger(0)
         var activePkg = ""
         var activeTitle = ""
         var scannedWindows = 0
+        var primaryTargetWindowId = -1
+        var primaryTargetWindowBounds: Rect? = null
+
+        val externalCandidates = mutableListOf<WindowCandidate>()
+        val hansonCandidates = mutableListOf<WindowCandidate>()
 
         if (!windows.isNullOrEmpty()) {
-            // Prioritize full-screen TYPE_APPLICATION windows first (by screen area, then layer),
-            // and filter out IME keyboard key trees, Edge panel, top status-bar icon strip, and our own Floating HUD pill.
-            val filteredAndSorted = windows.mapNotNull { win ->
-                if (win.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD ||
-                    win.type == AccessibilityWindowInfo.TYPE_SPLIT_SCREEN_DIVIDER
-                ) {
-                    return@mapNotNull null
+            for (win in windows) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && win.displayId != Display.DEFAULT_DISPLAY) {
+                    continue
                 }
-                val root = getWindowRootCompat(win) ?: return@mapNotNull null
-                val pkg = root.packageName?.toString().orEmpty()
-                val winBounds = Rect()
-                win.getBoundsInScreen(winBounds)
-                val w = winBounds.width().coerceAtLeast(0)
-                val h = winBounds.height().coerceAtLeast(0)
-                val area = w.toLong() * h.toLong()
+                val type = win.type
+                if (type == AccessibilityWindowInfo.TYPE_INPUT_METHOD ||
+                    type == AccessibilityWindowInfo.TYPE_SPLIT_SCREEN_DIVIDER ||
+                    type == AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY ||
+                    type == AccessibilityWindowInfo.TYPE_MAGNIFICATION_OVERLAY
+                ) {
+                    continue
+                }
 
-                // Skip Samsung Edge panel & tiny status-bar notification strip
-                if (pkg == "com.samsung.android.app.cocktailbarservice") return@mapNotNull null
-                if (pkg == "com.android.systemui" && h < 180 && winBounds.top <= 10) return@mapNotNull null
-                // Skip Hanson's own Floating HUD overlay pill so it never pollutes the target app's element list
-                if (pkg == service.packageName && h < (screenH * 0.65).toInt()) return@mapNotNull null
-
-                Triple(win, root, area)
-            }.sortedWith(
-                compareByDescending<Triple<AccessibilityWindowInfo, AccessibilityNodeInfo, Long>> {
-                    // Full-screen / large TYPE_APPLICATION windows come first (ignores tiny PiP overlays)
-                    if (it.first.type == AccessibilityWindowInfo.TYPE_APPLICATION && it.third > (screenW.toLong() * screenH.toLong() / 3L)) 2
-                    else if (it.first.type == AccessibilityWindowInfo.TYPE_APPLICATION) 1
-                    else 0
-                }.thenByDescending { it.third }
-                    .thenByDescending { it.first.layer }
-            )
-
-            scannedWindows = filteredAndSorted.size
-            for ((win, root, _) in filteredAndSorted) {
-                val winType = windowTypeToString(win.type)
                 val winTitle = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                     win.title?.toString().orEmpty()
                 } else ""
+                if (isFloatingHudTitle(winTitle)) continue
+
+                val root = getWindowRootCompat(win) ?: continue
                 val pkg = root.packageName?.toString().orEmpty()
-                if (activePkg.isBlank() && win.type == AccessibilityWindowInfo.TYPE_APPLICATION && pkg != service.packageName) {
-                    activePkg = pkg
-                    activeTitle = winTitle
-                } else if (activePkg.isBlank() && win.type == AccessibilityWindowInfo.TYPE_APPLICATION) {
-                    activePkg = pkg
-                    activeTitle = winTitle
+                if (isSystemChromeOrEdgePackage(pkg, winTitle)) continue
+
+                val isAllowedAppWindow = type == AccessibilityWindowInfo.TYPE_APPLICATION
+                val isAllowedPermissionDialog = type == AccessibilityWindowInfo.TYPE_SYSTEM &&
+                    isExplicitPermissionOrInstallerDialog(pkg) &&
+                    (win.isActive || win.isFocused)
+                if (!isAllowedAppWindow && !isAllowedPermissionDialog) {
+                    continue
                 }
-                val windowClip = Rect(screenBounds)
+
                 val winBounds = Rect()
                 win.getBoundsInScreen(winBounds)
-                if (!winBounds.isEmpty) {
-                    windowClip.intersect(winBounds)
+                if (winBounds.width() <= 0 || winBounds.height() <= 0) continue
+
+                val candidate = WindowCandidate(
+                    window = win,
+                    root = root,
+                    packageName = pkg,
+                    title = winTitle,
+                    bounds = winBounds,
+                    isActive = win.isActive,
+                    isFocused = win.isFocused,
+                    layer = win.layer,
+                    windowId = win.id
+                )
+
+                if (isHansonOwnPackage(pkg, service.packageName)) {
+                    // Only retain Hanson's own TYPE_APPLICATION window as fallback when no external target app is visible.
+                    if (isAllowedAppWindow) {
+                        hansonCandidates.add(candidate)
+                    }
+                } else {
+                    externalCandidates.add(candidate)
+                }
+            }
+        }
+
+        // Exclude Hanson's own packages whenever dumping external target apps.
+        val selectedWindows = (if (externalCandidates.isNotEmpty()) externalCandidates else hansonCandidates)
+            .sortedWith(
+                compareByDescending<WindowCandidate> { it.isActive || it.isFocused }
+                    .thenByDescending { it.isActive }
+                    .thenByDescending { it.isFocused }
+                    .thenByDescending { it.layer }
+            )
+
+        if (selectedWindows.isNotEmpty()) {
+            val occludedRegion = createRegionSafe()
+            for (cand in selectedWindows) {
+                if (collectedNodeCounter.get() >= MAX_COLLECTED_NODES) break
+
+                val windowClip = Rect(screenBounds)
+                if (!cand.bounds.isEmpty && !windowClip.intersect(cand.bounds)) {
+                    continue
+                }
+                if (occludedRegion != null && isRectFullyOccluded(occludedRegion, windowClip)) {
+                    continue
+                }
+
+                scannedWindows++
+                val winType = windowTypeToString(cand.window.type)
+                if (activePkg.isBlank() && cand.packageName.isNotBlank()) {
+                    activePkg = cand.packageName
+                    activeTitle = cand.title
+                }
+                if (primaryTargetWindowId <= 0 &&
+                    cand.window.type == AccessibilityWindowInfo.TYPE_APPLICATION &&
+                    cand.windowId > 0
+                ) {
+                    primaryTargetWindowId = cand.windowId
+                    primaryTargetWindowBounds = Rect(windowClip)
                 }
 
                 val dumpedRoot = dumpNodeRecursive(
-                    node = root,
+                    node = cand.root,
                     filterInvisible = filterInvisible,
                     clipBounds = windowClip,
                     screenW = screenW,
                     screenH = screenH,
-                    windowLayer = win.layer,
+                    windowLayer = cand.layer,
                     windowType = winType,
-                    windowTitle = winTitle,
+                    windowTitle = cand.title,
                     indexCounter = indexCounter,
+                    collectedNodeCounter = collectedNodeCounter,
+                    depth = 0,
+                    occludedRegion = occludedRegion,
                     indexedOut = indexedElements
                 )
                 if (dumpedRoot != null) {
                     rootNodes.add(dumpedRoot)
                 }
+
+                if (occludedRegion != null) {
+                    unionRectSafe(occludedRegion, windowClip)
+                }
             }
         } else {
+            // Fallback cleanly to rootInActiveWindow when filtered windows yield 0 app windows
             val activeRoot = try {
                 service.rootInActiveWindow
-            } catch (e: Exception) {
+            } catch (_: Throwable) {
                 null
             }
             if (activeRoot != null) {
-                scannedWindows = 1
-                activePkg = activeRoot.packageName?.toString().orEmpty()
-                val dumpedRoot = dumpNodeRecursive(
-                    node = activeRoot,
-                    filterInvisible = filterInvisible,
-                    clipBounds = screenBounds,
-                    screenW = screenW,
-                    screenH = screenH,
-                    windowLayer = 0,
-                    windowType = "APPLICATION",
-                    windowTitle = "",
-                    indexCounter = indexCounter,
-                    indexedOut = indexedElements
-                )
-                if (dumpedRoot != null) {
-                    rootNodes.add(dumpedRoot)
+                val rootPkg = activeRoot.packageName?.toString().orEmpty()
+                if (!isSystemChromeOrEdgePackage(rootPkg)) {
+                    scannedWindows = 1
+                    activePkg = rootPkg
+                    if (activeRoot.windowId > 0) {
+                        primaryTargetWindowId = activeRoot.windowId
+                    }
+                    val dumpedRoot = dumpNodeRecursive(
+                        node = activeRoot,
+                        filterInvisible = filterInvisible,
+                        clipBounds = screenBounds,
+                        screenW = screenW,
+                        screenH = screenH,
+                        windowLayer = 0,
+                        windowType = "APPLICATION",
+                        windowTitle = "",
+                        indexCounter = indexCounter,
+                        collectedNodeCounter = collectedNodeCounter,
+                        depth = 0,
+                        occludedRegion = null,
+                        indexedOut = indexedElements
+                    )
+                    if (dumpedRoot != null) {
+                        rootNodes.add(dumpedRoot)
+                    }
                 }
             }
         }
@@ -279,17 +424,21 @@ object HierarchyDumper {
         var screenshotBase64: String? = null
         var somScreenshotBase64: String? = null
         var screenshotErr: String? = null
+        var isSecureWindow = false
         if (includeScreenshot) {
-            val (rawB64, somB64, err) = captureScreenshotBase64(
+            val capture = captureScreenshotBase64(
                 service = service,
                 jpegQuality = jpegQuality,
                 elements = indexedElements,
                 screenWidth = screenW,
-                screenHeight = screenH
+                screenHeight = screenH,
+                targetWindowId = primaryTargetWindowId,
+                targetWindowBounds = primaryTargetWindowBounds
             )
-            screenshotBase64 = rawB64
-            somScreenshotBase64 = somB64
-            screenshotErr = err
+            screenshotBase64 = capture.rawBase64
+            somScreenshotBase64 = capture.somBase64
+            screenshotErr = capture.error
+            isSecureWindow = capture.isSecureWindow
         }
 
         return AtomicSnapshot(
@@ -303,8 +452,44 @@ object HierarchyDumper {
             indexedElements = indexedElements,
             screenshotBase64Jpeg = screenshotBase64,
             somScreenshotBase64Jpeg = somScreenshotBase64,
-            screenshotError = screenshotErr
+            screenshotError = screenshotErr,
+            isSecureWindow = isSecureWindow
         )
+    }
+
+    private fun createRegionSafe(): Region? = try {
+        Region()
+    } catch (_: Throwable) {
+        null
+    }
+
+    private fun unionRectSafe(region: Region, rect: Rect) {
+        try {
+            if (!rect.isEmpty) {
+                region.op(rect, Region.Op.UNION)
+            }
+        } catch (_: Throwable) {
+        }
+    }
+
+    private fun isRectFullyOccluded(occludedRegion: Region, rect: Rect): Boolean {
+        if (rect.isEmpty) return true
+        return try {
+            if (occludedRegion.isEmpty) return false
+            val remaining = Region(rect)
+            remaining.op(occludedRegion, Region.Op.DIFFERENCE)
+            remaining.isEmpty
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    private fun isPointOccluded(occludedRegion: Region, x: Int, y: Int): Boolean {
+        return try {
+            !occludedRegion.isEmpty && occludedRegion.contains(x, y)
+        } catch (_: Throwable) {
+            false
+        }
     }
 
     private fun getWindowRootCompat(win: AccessibilityWindowInfo): AccessibilityNodeInfo? {
@@ -314,7 +499,7 @@ object HierarchyDumper {
             } else {
                 win.root
             }
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             try {
                 win.root
             } catch (_: Exception) {
@@ -330,7 +515,7 @@ object HierarchyDumper {
             } else {
                 node.getChild(index)
             }
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             null
         }
     }
@@ -345,9 +530,14 @@ object HierarchyDumper {
         windowType: String,
         windowTitle: String,
         indexCounter: AtomicInteger,
+        collectedNodeCounter: AtomicInteger,
+        depth: Int,
+        occludedRegion: Region?,
         indexedOut: MutableList<IndexedUiElement>
     ): A11yNode? {
         if (node == null) return null
+        if (depth > MAX_RECURSION_DEPTH) return null
+        if (collectedNodeCounter.get() >= MAX_COLLECTED_NODES) return null
         if (filterInvisible && !node.isVisibleToUser) return null
 
         val rawBounds = Rect()
@@ -357,6 +547,14 @@ object HierarchyDumper {
         if (!visibleBounds.intersect(clipBounds)) {
             if (filterInvisible) return null
             visibleBounds.setEmpty()
+        }
+
+        if (filterInvisible && occludedRegion != null && isRectFullyOccluded(occludedRegion, visibleBounds)) {
+            return null
+        }
+
+        if (collectedNodeCounter.incrementAndGet() > MAX_COLLECTED_NODES) {
+            return null
         }
 
         val childClip = Rect(clipBounds)
@@ -400,7 +598,10 @@ object HierarchyDumper {
             actionList = actions
         )
 
-        val assignedIndex = if (candidate.isInteractiveOrInformative()) {
+        val centerOccluded = occludedRegion != null &&
+            isPointOccluded(occludedRegion, candidate.centerX, candidate.centerY)
+
+        val assignedIndex = if (!centerOccluded && candidate.isInteractiveOrInformative()) {
             val idx = indexCounter.getAndIncrement()
             val (normX, normY) = CoordinateNormalizer.pixelToNormalized(
                 candidate.centerX,
@@ -443,23 +644,29 @@ object HierarchyDumper {
         }
 
         val finalNode = candidate.copy(index = assignedIndex)
-        val childCount = node.childCount
-        for (i in 0 until childCount) {
-            val childInfo = getChildCompat(node, i) ?: continue
-            val dumpedChild = dumpNodeRecursive(
-                node = childInfo,
-                filterInvisible = filterInvisible,
-                clipBounds = childClip,
-                screenW = screenW,
-                screenH = screenH,
-                windowLayer = windowLayer,
-                windowType = windowType,
-                windowTitle = windowTitle,
-                indexCounter = indexCounter,
-                indexedOut = indexedOut
-            )
-            if (dumpedChild != null) {
-                finalNode.children.add(dumpedChild)
+        if (depth < MAX_RECURSION_DEPTH) {
+            val childCount = node.childCount
+            for (i in 0 until childCount) {
+                if (collectedNodeCounter.get() >= MAX_COLLECTED_NODES) break
+                val childInfo = getChildCompat(node, i) ?: continue
+                val dumpedChild = dumpNodeRecursive(
+                    node = childInfo,
+                    filterInvisible = filterInvisible,
+                    clipBounds = childClip,
+                    screenW = screenW,
+                    screenH = screenH,
+                    windowLayer = windowLayer,
+                    windowType = windowType,
+                    windowTitle = windowTitle,
+                    indexCounter = indexCounter,
+                    collectedNodeCounter = collectedNodeCounter,
+                    depth = depth + 1,
+                    occludedRegion = occludedRegion,
+                    indexedOut = indexedOut
+                )
+                if (dumpedChild != null) {
+                    finalNode.children.add(dumpedChild)
+                }
             }
         }
         return finalNode
@@ -470,23 +677,74 @@ object HierarchyDumper {
         jpegQuality: Int,
         elements: List<IndexedUiElement> = emptyList(),
         screenWidth: Int = 1080,
-        screenHeight: Int = 2400
-    ): Triple<String?, String?, String?> {
+        screenHeight: Int = 2400,
+        targetWindowId: Int = -1,
+        targetWindowBounds: Rect? = null
+    ): ScreenshotCaptureResult {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-            return Triple(null, null, "Requires Android 11 (API 30+)")
+            return ScreenshotCaptureResult(error = "Requires Android 11 (API 30+)")
         }
-        val firstAttempt = takeScreenshotOnce(service, jpegQuality, elements, screenWidth, screenHeight)
-        if (firstAttempt.first != null) return firstAttempt
+        if (isOnMainThread()) {
+            Log.w(TAG, "captureScreenshotBase64 invoked on main thread; skipping blocking screenshot capture to avoid deadlock")
+            return ScreenshotCaptureResult(error = "Skipped screenshot capture on main thread")
+        }
 
-        if (firstAttempt.third?.contains("code=$ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT") == true) {
+        val preferWindowCapture = Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE && targetWindowId > 0
+        val firstAttempt = takeScreenshotOnce(
+            service = service,
+            jpegQuality = jpegQuality,
+            elements = elements,
+            screenWidth = screenWidth,
+            screenHeight = screenHeight,
+            targetWindowId = if (preferWindowCapture) targetWindowId else -1,
+            targetWindowBounds = if (preferWindowCapture) targetWindowBounds else null
+        )
+        if (firstAttempt.rawBase64 != null || firstAttempt.isSecureWindow) {
+            return firstAttempt
+        }
+
+        if (firstAttempt.errorCode == ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT) {
             try {
                 Thread.sleep(350)
             } catch (_: InterruptedException) {
                 Thread.currentThread().interrupt()
+                return firstAttempt
             }
-            return takeScreenshotOnce(service, jpegQuality, elements, screenWidth, screenHeight)
+            val retry = takeScreenshotOnce(
+                service = service,
+                jpegQuality = jpegQuality,
+                elements = elements,
+                screenWidth = screenWidth,
+                screenHeight = screenHeight,
+                targetWindowId = if (preferWindowCapture) targetWindowId else -1,
+                targetWindowBounds = if (preferWindowCapture) targetWindowBounds else null
+            )
+            if (retry.rawBase64 != null || retry.isSecureWindow || !preferWindowCapture) {
+                return retry
+            }
+        }
+
+        // Fallback to full-display capture if window-scoped capture failed (e.g. window closed / INVALID_WINDOW)
+        if (preferWindowCapture &&
+            (firstAttempt.errorCode == ERROR_TAKE_SCREENSHOT_INVALID_WINDOW || firstAttempt.rawBase64 == null)
+        ) {
+            return takeScreenshotOnce(
+                service = service,
+                jpegQuality = jpegQuality,
+                elements = elements,
+                screenWidth = screenWidth,
+                screenHeight = screenHeight,
+                targetWindowId = -1,
+                targetWindowBounds = null
+            )
         }
         return firstAttempt
+    }
+
+    private fun isOnMainThread(): Boolean = try {
+        Looper.myLooper() != null && Looper.myLooper() == Looper.getMainLooper()
+    } catch (_: Throwable) {
+        false
     }
 
     private fun takeScreenshotOnce(
@@ -494,79 +752,182 @@ object HierarchyDumper {
         jpegQuality: Int,
         elements: List<IndexedUiElement>,
         screenWidth: Int,
-        screenHeight: Int
-    ): Triple<String?, String?, String?> {
+        screenHeight: Int,
+        targetWindowId: Int,
+        targetWindowBounds: Rect?
+    ): ScreenshotCaptureResult {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-            return Triple(null, null, "API < 30")
+            return ScreenshotCaptureResult(error = "API < 30")
         }
+        if (isOnMainThread()) {
+            Log.w(TAG, "takeScreenshotOnce called on main thread; refusing blocking latch.await")
+            return ScreenshotCaptureResult(error = "Skipped screenshot capture on main thread")
+        }
+
         val latch = CountDownLatch(1)
         val base64Ref = AtomicReference<String?>(null)
         val somBase64Ref = AtomicReference<String?>(null)
         val errorRef = AtomicReference<String?>(null)
+        val errorCodeRef = AtomicInteger(0)
+        val secureWindowRef = AtomicBoolean(false)
+
+        val callback = object : AccessibilityService.TakeScreenshotCallback {
+            override fun onSuccess(screenshot: AccessibilityService.ScreenshotResult) {
+                val hwBuffer = screenshot.hardwareBuffer
+                var hwBitmap: Bitmap? = null
+                var softBitmap: Bitmap? = null
+                var srgbBitmap: Bitmap? = null
+                var scaledBitmap: Bitmap? = null
+                var somBitmap: Bitmap? = null
+                try {
+                    val colorSpace = screenshot.colorSpace ?: ColorSpace.get(ColorSpace.Named.SRGB)
+                    hwBitmap = Bitmap.wrapHardwareBuffer(hwBuffer, colorSpace)
+                    if (hwBitmap != null) {
+                        softBitmap = hwBitmap.copy(Bitmap.Config.ARGB_8888, false)
+                        if (softBitmap != null) {
+                            srgbBitmap = ensureSrgbArgb8888(softBitmap)
+                            scaledBitmap = prepareScreenAlignedScaledBitmap(
+                                src = srgbBitmap,
+                                maxDimension = 960,
+                                screenWidth = screenWidth,
+                                screenHeight = screenHeight,
+                                windowBounds = if (targetWindowId > 0) targetWindowBounds else null
+                            )
+                            val quality = jpegQuality.coerceIn(45, 85)
+                            val baos = ByteArrayOutputStream()
+                            scaledBitmap.compress(Bitmap.CompressFormat.JPEG, quality, baos)
+                            base64Ref.set(Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP))
+
+                            if (elements.isNotEmpty()) {
+                                somBitmap = SetOfMarksAnnotator.annotateBitmap(
+                                    source = scaledBitmap,
+                                    elements = elements,
+                                    screenWidth = screenWidth,
+                                    screenHeight = screenHeight
+                                )
+                                if (somBitmap != null) {
+                                    val somBaos = ByteArrayOutputStream()
+                                    somBitmap.compress(Bitmap.CompressFormat.JPEG, quality, somBaos)
+                                    somBase64Ref.set(Base64.encodeToString(somBaos.toByteArray(), Base64.NO_WRAP))
+                                }
+                            }
+                        } else {
+                            errorRef.set("Failed to copy hardware bitmap")
+                        }
+                    } else {
+                        errorRef.set("wrapHardwareBuffer returned null")
+                    }
+                } catch (t: Throwable) {
+                    Log.e(TAG, "Screenshot processing failed", t)
+                    errorRef.set(t.message ?: "Screenshot processing exception")
+                } finally {
+                    try {
+                        hwBuffer.close()
+                    } catch (_: Throwable) {
+                    }
+                    if (somBitmap != null && !somBitmap.isRecycled) somBitmap.recycle()
+                    if (scaledBitmap != null &&
+                        scaledBitmap !== srgbBitmap &&
+                        scaledBitmap !== softBitmap &&
+                        !scaledBitmap.isRecycled
+                    ) {
+                        scaledBitmap.recycle()
+                    }
+                    if (srgbBitmap != null && srgbBitmap !== softBitmap && !srgbBitmap.isRecycled) {
+                        srgbBitmap.recycle()
+                    }
+                    if (softBitmap != null && !softBitmap.isRecycled) softBitmap.recycle()
+                    if (hwBitmap != null && !hwBitmap.isRecycled) hwBitmap.recycle()
+                    latch.countDown()
+                }
+            }
+
+            override fun onFailure(errorCode: Int) {
+                errorCodeRef.set(errorCode)
+                if (errorCode == ERROR_TAKE_SCREENSHOT_SECURE_WINDOW) {
+                    secureWindowRef.set(true)
+                    Log.w(TAG, "Screenshot blocked by FLAG_SECURE window (code=$errorCode)")
+                    errorRef.set("FLAG_SECURE window detected (code=$errorCode)")
+                } else {
+                    errorRef.set("takeScreenshot failed code=$errorCode")
+                }
+                latch.countDown()
+            }
+        }
 
         try {
-            service.takeScreenshot(
-                Display.DEFAULT_DISPLAY,
-                service.mainExecutor,
-                object : AccessibilityService.TakeScreenshotCallback {
-                    override fun onSuccess(screenshot: AccessibilityService.ScreenshotResult) {
-                        try {
-                            val hwBuffer = screenshot.hardwareBuffer
-                            val colorSpace = screenshot.colorSpace
-                            val hwBitmap = Bitmap.wrapHardwareBuffer(hwBuffer, colorSpace)
-                            hwBuffer.close()
-                            if (hwBitmap != null) {
-                                val softBitmap = hwBitmap.copy(Bitmap.Config.ARGB_8888, false)
-                                hwBitmap.recycle()
-                                if (softBitmap != null) {
-                                    val scaled = scaleBitmapIfNeeded(softBitmap, maxDimension = 960)
-                                    val quality = jpegQuality.coerceIn(45, 85)
-                                    val baos = ByteArrayOutputStream()
-                                    scaled.compress(Bitmap.CompressFormat.JPEG, quality, baos)
-                                    base64Ref.set(Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP))
-
-                                    if (elements.isNotEmpty()) {
-                                        val somBitmap = SetOfMarksAnnotator.annotateBitmap(
-                                            source = scaled,
-                                            elements = elements,
-                                            screenWidth = screenWidth,
-                                            screenHeight = screenHeight
-                                        )
-                                        if (somBitmap != null) {
-                                            val somBaos = ByteArrayOutputStream()
-                                            somBitmap.compress(Bitmap.CompressFormat.JPEG, quality, somBaos)
-                                            somBitmap.recycle()
-                                            somBase64Ref.set(Base64.encodeToString(somBaos.toByteArray(), Base64.NO_WRAP))
-                                        }
-                                    }
-
-                                    if (scaled !== softBitmap) scaled.recycle()
-                                    softBitmap.recycle()
-                                } else {
-                                    errorRef.set("Failed to copy hardware bitmap")
-                                }
-                            } else {
-                                errorRef.set("wrapHardwareBuffer returned null")
-                            }
-                        } catch (t: Throwable) {
-                            Log.e(TAG, "Screenshot processing failed", t)
-                            errorRef.set(t.message ?: "Screenshot processing exception")
-                        } finally {
-                            latch.countDown()
-                        }
-                    }
-
-                    override fun onFailure(errorCode: Int) {
-                        errorRef.set("takeScreenshot failed code=$errorCode")
-                        latch.countDown()
-                    }
-                }
-            )
-            latch.await(4, TimeUnit.SECONDS)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE && targetWindowId > 0) {
+                service.takeScreenshotOfWindow(targetWindowId, screenshotExecutor, callback)
+            } else {
+                service.takeScreenshot(Display.DEFAULT_DISPLAY, screenshotExecutor, callback)
+            }
+            val completed = latch.await(4, TimeUnit.SECONDS)
+            if (!completed && base64Ref.get() == null && errorRef.get() == null) {
+                errorRef.set("takeScreenshot timed out after 4s")
+            }
         } catch (t: Throwable) {
             errorRef.set(t.message ?: "takeScreenshot exception")
         }
-        return Triple(base64Ref.get(), somBase64Ref.get(), errorRef.get())
+
+        return ScreenshotCaptureResult(
+            rawBase64 = base64Ref.get(),
+            somBase64 = somBase64Ref.get(),
+            error = errorRef.get(),
+            errorCode = errorCodeRef.get(),
+            isSecureWindow = secureWindowRef.get()
+        )
+    }
+
+    private fun ensureSrgbArgb8888(src: Bitmap): Bitmap {
+        val srgb = ColorSpace.get(ColorSpace.Named.SRGB)
+        if (src.config == Bitmap.Config.ARGB_8888 && src.colorSpace == srgb) {
+            return src
+        }
+        val out = Bitmap.createBitmap(src.width, src.height, Bitmap.Config.ARGB_8888, true, srgb)
+        val canvas = Canvas(out)
+        canvas.drawBitmap(src, 0f, 0f, null)
+        return out
+    }
+
+    /**
+     * Scales the captured bitmap to fit within [maxDimension]. When a window-scoped capture
+     * (`takeScreenshotOfWindow`) has bounds smaller than the full display, composites it at its
+     * exact screen offset on an sRGB canvas so normalized 0..1000 & SoM coordinates stay 1:1 aligned.
+     */
+    private fun prepareScreenAlignedScaledBitmap(
+        src: Bitmap,
+        maxDimension: Int,
+        screenWidth: Int,
+        screenHeight: Int,
+        windowBounds: Rect?
+    ): Bitmap {
+        if (windowBounds == null || screenWidth <= 0 || screenHeight <= 0) {
+            return scaleBitmapIfNeeded(src, maxDimension)
+        }
+        val coversFullScreen = windowBounds.left <= 2 &&
+            windowBounds.top <= 2 &&
+            windowBounds.width() >= screenWidth - 4 &&
+            windowBounds.height() >= screenHeight - 4
+        if (coversFullScreen) {
+            return scaleBitmapIfNeeded(src, maxDimension)
+        }
+
+        val scale = min(maxDimension.toFloat() / screenWidth, maxDimension.toFloat() / screenHeight)
+            .coerceAtMost(1f)
+        val outW = (screenWidth * scale).toInt().coerceAtLeast(1)
+        val outH = (screenHeight * scale).toInt().coerceAtLeast(1)
+        val srgb = ColorSpace.get(ColorSpace.Named.SRGB)
+        val composed = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888, false, srgb)
+        val canvas = Canvas(composed)
+        canvas.drawColor(Color.BLACK)
+        val dstRect = RectF(
+            windowBounds.left * scale,
+            windowBounds.top * scale,
+            windowBounds.right * scale,
+            windowBounds.bottom * scale
+        )
+        canvas.drawBitmap(src, null, dstRect, null)
+        return composed
     }
 
     private fun scaleBitmapIfNeeded(src: Bitmap, maxDimension: Int): Bitmap {

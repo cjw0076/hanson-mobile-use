@@ -41,8 +41,9 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
+SERVER_VERSION = "6.0.0"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 18889
 DEFAULT_WORKSPACE_DIR = "./agent_workspace"
@@ -65,36 +66,75 @@ FORBIDDEN_BROWSER_OR_PROXY_HEADERS = (
     "tailscale-user-login",
 )
 
+# All 45 registered on-device tools (42 ToolSpecRegistry + set_timer + execute_lifestyle_routine + observe_screen)
 VALID_TOOLS = {
+    # 1. Google Artemis GUI Operator Tools (11)
     "click",
     "long_press",
     "input_text",
     "swipe",
     "drag_and_drop",
     "haptic_trajectory",
+    "click_sequence",
     "press_key",
     "manage_app",
-    "open_url",
+    "wait_for_delay",
+    "open_link",
+    # 2. Screen-Off Notification & Quick-Reply Tools (2)
     "list_notifications",
     "reply_notification",
+    # 3. OS Fast-Lane, Everyday & Lifestyle Tools (11)
     "control_device_setting",
-    "render_generative_ui",
-    "reverse_engineer_app",
+    "make_call",
+    "send_sms",
+    "search_contacts",
+    "manage_calendar",
+    "set_alarm",
+    "set_timer",
+    "execute_lifestyle_routine",
+    "save_note",
+    "read_note",
+    "observe_screen",
+    # 4. Native OS CLI, UARP, Browser-Use, Multimodal & Cross-Device Tools (8)
     "os_cli_exec",
-    "wait",
+    "reverse_engineer_app",
+    "learn_app_skill",
+    "render_generative_ui",
+    "browser_use",
+    "cross_device_control",
+    "draw_with_code",
+    "generate_visual_media",
+    # 5. Task Lifecycle & Human-in-the-Loop Control (2)
+    "ask_user",
     "complete_task",
+    # 6. Local Sandbox Workspace & CLI Bridge Tools (6)
     "workspace_list",
     "workspace_read",
     "workspace_write",
     "workspace_edit",
     "workspace_search",
     "workspace_exec",
+    # 7. Blind Vault, Watchers, A2A & Scratchpad Tools (5)
     "vault_blind_inject",
     "vault_list_handles",
     "watcher_manage",
     "a2a_negotiate_schedule",
     "scratchpad_note",
 }
+
+TOOL_NAME_ALIASES: Dict[str, str] = {
+    "open_url": "open_link",
+    "wait": "wait_for_delay",
+}
+
+DEVICE_SETTING_ALIASES: Dict[str, str] = {
+    "wifi": "wifi_panel",
+    "bluetooth": "bluetooth_panel",
+}
+
+
+class BackendUnavailableError(RuntimeError):
+    """Raised when no configured CLI or env API reasoning backend is available or succeeds."""
 
 APP_MAP = {
     "배달의민족": "com.sampleapp",
@@ -704,25 +744,153 @@ def workspace_exec(command: str, timeout_sec: float = 15.0) -> Dict[str, Any]:
         }
 
 
+ALLOWED_CLIS = ("claude", "gemini", "codex")
+
+
+def resolve_cli_executable(cli_name: str) -> Optional[str]:
+    """
+    Safely resolves `claude`, `gemini`, or `codex` across Windows (`.exe`, `.cmd`, `.bat`, `.ps1`)
+    and POSIX platforms without invoking a shell.
+    """
+    name = (cli_name or "").strip().lower()
+    if name not in ALLOWED_CLIS:
+        return None
+
+    if os.name == "nt":
+        for candidate in (f"{name}.exe", f"{name}.cmd", f"{name}.bat", f"{name}.ps1", name):
+            found = shutil.which(candidate)
+            if found:
+                return found
+
+        extra_dirs: List[Path] = []
+        appdata = os.environ.get("APPDATA", "").strip()
+        if appdata:
+            extra_dirs.append(Path(appdata) / "npm")
+        local_appdata = os.environ.get("LOCALAPPDATA", "").strip()
+        if local_appdata:
+            extra_dirs.append(Path(local_appdata) / "Programs" / name)
+        try:
+            extra_dirs.append(Path.home() / ".local" / "bin")
+        except Exception:
+            pass
+
+        for d in extra_dirs:
+            if not d.is_dir():
+                continue
+            for ext in (".exe", ".cmd", ".bat", ".ps1"):
+                cand_path = d / f"{name}{ext}"
+                if cand_path.is_file():
+                    return str(cand_path)
+        return None
+
+    return shutil.which(name)
+
+
+def build_cli_argv(exe_path: str, args: List[str]) -> List[str]:
+    """
+    Constructs a shell=False argv vector for executing a resolved CLI path safely.
+    Handles Windows `.ps1` via PowerShell (`-NoProfile -ExecutionPolicy Bypass -File`)
+    and `.cmd`/`.bat` via `cmd.exe /d /c` without shell string interpolation.
+    """
+    ext = Path(exe_path).suffix.lower()
+    if ext == ".ps1":
+        ps_exe = shutil.which("pwsh") or shutil.which("powershell") or "powershell.exe"
+        return [ps_exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", exe_path, *args]
+    if ext in (".cmd", ".bat"):
+        cmd_exe = os.environ.get("COMSPEC") or shutil.which("cmd") or "cmd.exe"
+        return [cmd_exe, "/d", "/c", exe_path, *args]
+    return [exe_path, *args]
+
+
 def detect_available_clis() -> List[str]:
     found: List[str] = []
-    for cli in ("claude", "gemini", "codex"):
-        if shutil.which(cli):
+    for cli in ALLOWED_CLIS:
+        if resolve_cli_executable(cli):
             found.append(cli)
     return found
 
 
+def has_configured_env_api() -> bool:
+    return any(
+        os.environ.get(k, "").strip()
+        for k in ("GEMINI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL")
+    )
+
+
 def resolve_active_backend(preferred: str) -> str:
-    pref = (preferred or "auto").lower()
+    pref = (preferred or "auto").strip().lower()
     if pref in ("claude", "gemini", "codex", "api", "heuristic"):
         return pref
-    # Auto-detect: prefer installed coding CLIs first ($0 extra API cost), then env API keys, then heuristic
+    # Auto-detect: prefer installed coding CLIs first ($0 extra API cost), then env API keys.
+    # Never silently fall back to heuristic hallucinations when no real backend is available.
     clis = detect_available_clis()
     if clis:
         return clis[0]
-    if any(os.environ.get(k) for k in ("OPENAI_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_BASE_URL")):
+    if has_configured_env_api():
         return "api"
-    return "heuristic"
+    return "none"
+
+
+def sanitize_spoken_reply(raw_text: str, fallback: str = "요청을 처리하고 있어요.") -> str:
+    """Strips internal technical bracket tags (e.g. [Self-Healing], [CLAUDE CLI]) for clean Korean speech."""
+    text = str(raw_text or "")
+    text = re.sub(r"\[[^\]]*\]", " ", text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        clean_fb = re.sub(r"\[[^\]]*\]", " ", str(fallback or ""))
+        clean_fb = re.sub(r"\s+", " ", clean_fb).strip()
+        return clean_fb or "요청을 처리하고 있어요."
+    return text[:220]
+
+
+def normalize_tool_call(tool_name: str, tool_args: Optional[Dict[str, Any]]) -> Tuple[str, Dict[str, Any]]:
+    """
+    Normalizes legacy/alias tool names and argument keys to canonical on-device schemas:
+    - open_url -> open_link
+    - wait -> wait_for_delay
+    - input_text: submit_enter -> press_enter
+    - control_device_setting: wifi -> wifi_panel, bluetooth -> bluetooth_panel
+    """
+    raw_name = str(tool_name or "").strip()
+    canonical_name = TOOL_NAME_ALIASES.get(raw_name, raw_name)
+    args: Dict[str, Any] = dict(tool_args) if isinstance(tool_args, dict) else {}
+
+    if canonical_name == "input_text":
+        if "submit_enter" in args:
+            if "press_enter" not in args:
+                args["press_enter"] = bool(args["submit_enter"])
+            args.pop("submit_enter", None)
+    elif canonical_name == "control_device_setting":
+        raw_setting = str(args.get("setting") or "").strip().lower()
+        if raw_setting in DEVICE_SETTING_ALIASES:
+            args["setting"] = DEVICE_SETTING_ALIASES[raw_setting]
+        elif raw_setting:
+            args["setting"] = raw_setting
+    elif canonical_name == "wait_for_delay":
+        if "time_in_ms" not in args:
+            if "duration_ms" in args:
+                args["time_in_ms"] = int(args.pop("duration_ms"))
+            elif "ms" in args:
+                args["time_in_ms"] = int(args.pop("ms"))
+            elif "seconds" in args:
+                args["time_in_ms"] = int(float(args.pop("seconds")) * 1000)
+
+    return canonical_name, args
+
+
+def _format_chat_history_block(chat_history: Optional[List[Dict[str, Any]]]) -> str:
+    if not chat_history:
+        return "(none)"
+    lines: List[str] = []
+    for item in chat_history[-8:]:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("sender") or item.get("role") or "USER").strip().upper()
+        text = str(item.get("text") or item.get("content") or "").replace("\n", " ").strip()
+        if text:
+            lines.append(f"  - [{role}]: {text[:240]}")
+    return "\n".join(lines) if lines else "(none)"
 
 
 def parse_ui_elements(prompt_context: str) -> List[Dict[str, Any]]:
@@ -769,6 +937,7 @@ def build_deliberative_prompt(
     active_pkg: str,
     prompt_context: str,
     history_steps: List[Dict[str, Any]],
+    chat_history: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     history_txt = "(none — first turn)"
     if history_steps:
@@ -780,35 +949,52 @@ def build_deliberative_prompt(
             )
         history_txt = "\n".join(lines)
 
+    chat_txt = _format_chat_history_block(chat_history)
+
     return f"""You are an autonomous Android Mobile-Use Agent controlling a real Android smartphone.
 Follow an empirical Observe -> Decide -> Act -> Verify loop:
-1. NEVER call `complete_task` until the user's goal postcondition is visibly satisfied on the CURRENT screen (for example, if the user asked to search '족발' in 배달의민족, launching the app or clicking the search icon is NOT completion — you must focus/type '족발' with `submit_enter=true` AND verify the search results screen before calling `complete_task`).
+1. NEVER call `complete_task` until the user's goal postcondition is visibly satisfied on the CURRENT screen (for example, if the user asked to search '족발' in 배달의민족, launching the app or clicking the search icon is NOT completion — you must focus/type '족발' with `press_enter=true` AND verify the search results screen before calling `complete_task`).
 2. NEVER click elements belonging to `com.hanson.mobileuse` when operating an external app.
 3. Prefer `element_index` from Visible UI Elements (matching the `[index]` badges on the Set-of-Marks screenshot when attached).
 4. If the previous step had `FAILED/NO-DELTA`, do NOT repeat the exact same ineffective action; dismiss any blocking popup, tap the search container/input box explicitly, or swipe to reveal the target.
+5. Always provide a clean, natural Korean `spokenReply` without technical bracket tags.
 
-Available `toolName` & `toolArgs` schemas:
-- `"manage_app"`: `{{"action": "launch", "app_name": "<Korean/English app name or package>"}}`
-- `"click"`: `{{"element_index": <int>, "target_description": "<why>"}}` (or `"norm_x": 0..1000, "norm_y": 0..1000` if unindexed)
-- `"long_press"`: `{{"element_index": <int>, "duration_ms": 700}}`
-- `"input_text"`: `{{"element_index": <optional int>, "text": "<query>", "clear_existing": false, "submit_enter": true}}`
-- `"swipe"`: `{{"direction": "up"|"down"|"left"|"right", "duration_ms": 350}}` (`"up"` scrolls down to reveal lower items)
-- `"press_key"`: `{{"key": "BACK"|"HOME"|"ENTER"|"RECENTS"}}`
-- `"open_url"`: `{{"url": "https://..."}}`
+Available canonical `toolName` & `toolArgs` schemas (45 registered tools):
+- `"manage_app"`: `{{"action": "launch"|"search"|"list_games"|"list_all", "app_name": "<Korean/English app name or package>"}}`
+- `"click"`: `{{"element_index": <int>, "target_description": "<why>"}}` (or `"norm_x": 0..1000, "norm_y": 0..1000`)
+- `"long_press"`: `{{"element_index": <int>, "target_description": "<why>", "duration_ms": 700}}`
+- `"click_sequence"`: `{{"indices_csv": "1,2,3", "description": "<why>"}}`
+- `"input_text"`: `{{"element_index": <optional int>, "text": "<query>", "clear_existing": false, "press_enter": true}}`
+- `"swipe"`: `{{"direction": "up"|"down"|"left"|"right", "duration_ms": 350}}`
+- `"drag_and_drop"`: `{{"start_norm_x": 0..1000, "start_norm_y": 0..1000, "end_norm_x": 0..1000, "end_norm_y": 0..1000, "description": "<why>"}}`
+- `"haptic_trajectory"`: `{{"waypoints_csv": "200,500;500,450;850,500", "description": "<why>"}}`
+- `"press_key"`: `{{"key": "BACK"|"HOME"|"ENTER"|"RECENTS"|"NOTIFICATIONS"|"QUICK_SETTINGS"}}`
+- `"open_link"`: `{{"url": "https://..."}}`
+- `"wait_for_delay"`: `{{"time_in_ms": 1500}}`
+- `"observe_screen"`: `{{}}`
 - `"list_notifications"`: `{{"only_replyable": false, "limit": 10}}`
 - `"reply_notification"`: `{{"target": "<sender>", "message": "<reply>"}}`
-- `"control_device_setting"`: `{{"setting": "brightness"|"volume_media"|"wifi"|"bluetooth"|"dnd"|"torch", "value": "<val>"}}`
-- `"workspace_list"`: `{{"path": "<optional relative sub_dir>"}}`
-- `"workspace_read"`: `{{"path": "<relative file path>", "start_line": 1, "end_line": 200}}`
-- `"workspace_write"`: `{{"path": "<relative file path>", "content": "<full utf-8 content>"}}`
-- `"workspace_edit"`: `{{"path": "<relative file path>", "old_text": "<exact text>", "new_text": "<replacement>"}}`
-- `"workspace_search"`: `{{"query": "<search substring>", "path_prefix": "<optional relative prefix>"}}`
-- `"workspace_exec"`: `{{"command": "<sandboxed read-only or workspace command>"}}`
+- `"control_device_setting"`: `{{"setting": "brightness"|"volume_media"|"volume_ring"|"volume_alarm"|"dnd"|"clipboard"|"wifi_panel"|"bluetooth_panel", "value": "<val>"}}`
+- `"set_alarm"`: `{{"hour": 7, "minute": 30, "label": "<label>"}}`
+- `"set_timer"`: `{{"seconds": 180, "label": "<label>"}}`
+- `"manage_calendar"`: `{{"action": "list"|"add", "title": "<title>", "offset_minutes_from_now": 60, "duration_minutes": 60}}`
+- `"make_call"`: `{{"recipient": "<name or number>", "direct_call": false}}`
+- `"send_sms"`: `{{"recipient": "<name or number>", "message": "<text>"}}`
+- `"search_contacts"`: `{{"query": "<name>"}}`
+- `"save_note"` / `"read_note"`: `{{"key": "<title>", "content": "<text>"}}`
+- `"execute_lifestyle_routine"`: `{{"routine_id": "<id>"}}`
+- `"browser_use"`: `{{"action": "fetch_clean_dom"|"open_interactive_board", "url": "https://...", "goal": "<extract>"}}`
+- `"render_generative_ui"` / `"draw_with_code"` / `"generate_visual_media"` / `"cross_device_control"` / `"os_cli_exec"` / `"reverse_engineer_app"` / `"learn_app_skill"`
+- `"workspace_list"` / `"workspace_read"` / `"workspace_write"` / `"workspace_edit"` / `"workspace_search"` / `"workspace_exec"`
+- `"vault_blind_inject"` / `"vault_list_handles"` / `"watcher_manage"` / `"a2a_negotiate_schedule"` / `"scratchpad_note"`
+- `"ask_user"`: `{{"question": "<concise Korean clarification question>"}}`
 - `"complete_task"`: `{{"summary": "<concise Korean summary of verified result>"}}`
 
 User Goal: {goal}
 Current Iteration: {iteration}
 Foreground Package: {active_pkg or "unknown"}
+Recent Conversation History:
+{chat_txt}
 Recent Step History:
 {history_txt}
 
@@ -820,7 +1006,7 @@ Respond with ONLY a single valid JSON object (no markdown fences, no commentary 
   "observation": "Brief Korean observation of current screen & delta from last step",
   "spokenReply": "Short natural Korean status or final answer",
   "subGoals": [{{"title": "Step name", "status": "COMPLETED|IN_PROGRESS|PENDING"}}],
-  "toolName": "<one of the toolName values above>",
+  "toolName": "<one of the canonical toolName values above>",
   "toolArgs": {{}}
 }}"""
 
@@ -849,14 +1035,14 @@ def extract_json_object(raw_text: str) -> Optional[Dict[str, Any]]:
 def validate_decision_dict(d: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     if not isinstance(d, dict):
         return None
-    tool_name = str(d.get("toolName", "")).strip()
+    raw_tool = str(d.get("toolName", "")).strip()
+    raw_args = d.get("toolArgs")
+    tool_name, tool_args = normalize_tool_call(raw_tool, raw_args if isinstance(raw_args, dict) else {})
     if tool_name not in VALID_TOOLS:
         return None
-    tool_args = d.get("toolArgs")
-    if not isinstance(tool_args, dict):
-        tool_args = {}
     obs = str(d.get("observation") or "화면 분석 완료").strip()
-    spoken = str(d.get("spokenReply") or obs).strip()
+    raw_spoken = str(d.get("spokenReply") or "").strip()
+    spoken = sanitize_spoken_reply(raw_spoken, fallback=obs)
     raw_sub = d.get("subGoals")
     sub_goals: List[Dict[str, str]] = []
     if isinstance(raw_sub, list):
@@ -875,13 +1061,14 @@ def validate_decision_dict(d: Optional[Dict[str, Any]]) -> Optional[Dict[str, An
     }
 
 
-def invoke_coding_cli_backend(
+def invoke_coding_cli_text(
     cli_name: str,
     prompt: str,
     som_screenshot_b64: Optional[str] = None,
     timeout_sec: float = 28.0,
-) -> Optional[Dict[str, Any]]:
-    exe = shutil.which(cli_name)
+) -> Optional[str]:
+    """Invokes a resolved desktop coding CLI (`claude`, `gemini`, `codex`) safely and returns raw stdout text."""
+    exe = resolve_cli_executable(cli_name)
     if not exe:
         return None
 
@@ -894,50 +1081,38 @@ def invoke_coding_cli_backend(
                 f.write(base64.b64decode(som_screenshot_b64))
 
         if cli_name == "claude":
-            cmd = [exe, "-p", "--output-format", "text"]
+            cli_args = ["-p", "--output-format", "text"]
             if CONFIGURED_MODEL:
-                cmd.extend(["--model", CONFIGURED_MODEL])
-            proc = subprocess.run(
-                cmd,
-                input=prompt.encode("utf-8"),
-                capture_output=True,
-                timeout=timeout_sec,
-                check=False,
-            )
+                cli_args.extend(["--model", CONFIGURED_MODEL])
         elif cli_name == "gemini":
-            cmd = [exe, "-p", "Respond with ONLY the JSON object requested in stdin."]
+            cli_args = ["-p", "Follow the instructions in stdin and respond concisely."]
             if CONFIGURED_MODEL:
-                cmd.extend(["-m", CONFIGURED_MODEL])
-            proc = subprocess.run(
-                cmd,
-                input=prompt.encode("utf-8"),
-                capture_output=True,
-                timeout=timeout_sec,
-                check=False,
-            )
+                cli_args.extend(["-m", CONFIGURED_MODEL])
         elif cli_name == "codex":
-            cmd = [exe, "exec", "--skip-git-repo-check", "--ephemeral"]
+            cli_args = ["exec", "--skip-git-repo-check", "--ephemeral"]
             if CONFIGURED_MODEL:
-                cmd.extend(["-m", CONFIGURED_MODEL])
+                cli_args.extend(["-m", CONFIGURED_MODEL])
             if temp_img_path:
-                cmd.extend(["-i", temp_img_path])
-            cmd.append("-")
-            proc = subprocess.run(
-                cmd,
-                input=prompt.encode("utf-8"),
-                capture_output=True,
-                timeout=timeout_sec,
-                check=False,
-            )
+                cli_args.extend(["-i", temp_img_path])
+            cli_args.append("-")
         else:
             return None
 
-        stdout_text = proc.stdout.decode("utf-8", errors="replace")
-        parsed = extract_json_object(stdout_text)
-        validated = validate_decision_dict(parsed)
-        if validated is not None:
-            validated["observation"] = f"[{cli_name.upper()} CLI] {validated['observation']}"
-        return validated
+        argv = build_cli_argv(exe, cli_args)
+        proc = subprocess.run(
+            argv,
+            input=prompt.encode("utf-8"),
+            capture_output=True,
+            timeout=timeout_sec,
+            check=False,
+            shell=False,
+        )
+        stdout_text = proc.stdout.decode("utf-8", errors="replace").strip()
+        if proc.returncode != 0 and not stdout_text:
+            stderr_preview = proc.stderr.decode("utf-8", errors="replace").strip()[:200]
+            print(f"[LaptopCLI] {cli_name} exited {proc.returncode}: {stderr_preview}", flush=True)
+            return None
+        return stdout_text or None
     except Exception as exc:
         print(f"[LaptopCLI] {cli_name} invocation error: {exc}", flush=True)
         return None
@@ -949,42 +1124,260 @@ def invoke_coding_cli_backend(
                 pass
 
 
+def invoke_coding_cli_backend(
+    cli_name: str,
+    prompt: str,
+    som_screenshot_b64: Optional[str] = None,
+    timeout_sec: float = 28.0,
+) -> Optional[Dict[str, Any]]:
+    stdout_text = invoke_coding_cli_text(
+        cli_name=cli_name,
+        prompt=prompt,
+        som_screenshot_b64=som_screenshot_b64,
+        timeout_sec=timeout_sec,
+    )
+    if not stdout_text:
+        return None
+    parsed = extract_json_object(stdout_text)
+    validated = validate_decision_dict(parsed)
+    if validated is not None:
+        validated["observation"] = f"[{cli_name.upper()} CLI] {validated['observation']}"
+        validated["spokenReply"] = sanitize_spoken_reply(validated["spokenReply"], fallback=validated["observation"])
+    return validated
+
+
+def _extract_gemini_grounding_citations(data: Dict[str, Any]) -> List[Dict[str, str]]:
+    citations: List[Dict[str, str]] = []
+    seen_urls = set()
+    candidates = data.get("candidates") or []
+    for cand in candidates:
+        gm = (cand or {}).get("groundingMetadata") or {}
+        for chunk in gm.get("groundingChunks") or []:
+            web = (chunk or {}).get("web") or {}
+            url = str(web.get("uri") or "").strip()
+            title = str(web.get("title") or "").strip() or url
+            if url.startswith(("https://", "http://")) and url not in seen_urls:
+                seen_urls.add(url)
+                citations.append({"title": title, "url": url})
+    return citations
+
+
+def _invoke_gemini_rest_api(
+    prompt: str,
+    som_screenshot_b64: Optional[str] = None,
+    timeout_sec: float = 25.0,
+    enable_google_search: bool = True,
+) -> Optional[Tuple[str, List[Dict[str, str]]]]:
+    gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if not gemini_key:
+        return None
+
+    model = (
+        CONFIGURED_MODEL
+        if CONFIGURED_MODEL and CONFIGURED_MODEL.lower().startswith("gemini")
+        else os.environ.get("GEMINI_MODEL", "gemini-3.8-flash").strip() or "gemini-3.8-flash"
+    )
+    if model.startswith("models/"):
+        model = model[len("models/") :]
+
+    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{urllib.parse.quote(model, safe='.-_')}:generateContent"
+    parts: List[Dict[str, Any]] = [{"text": prompt}]
+    if som_screenshot_b64:
+        parts.append({"inline_data": {"mime_type": "image/jpeg", "data": som_screenshot_b64}})
+
+    def _call(with_search: bool) -> Dict[str, Any]:
+        req_payload: Dict[str, Any] = {
+            "contents": [{"role": "user", "parts": parts}],
+            "generationConfig": {"temperature": 0.1},
+        }
+        if with_search:
+            req_payload["tools"] = [{"google_search": {}}]
+        body = json.dumps(req_payload, ensure_ascii=False).encode("utf-8")
+        headers = {
+            "Content-Type": "application/json; charset=utf-8",
+            "x-goog-api-key": gemini_key,
+        }
+        req = urllib.request.Request(endpoint, data=body, headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+            return json.loads(resp.read().decode("utf-8", errors="replace"))
+
+    try:
+        try:
+            data = _call(with_search=enable_google_search)
+        except urllib.error.HTTPError as http_err:
+            if enable_google_search and http_err.code == 400:
+                data = _call(with_search=False)
+            else:
+                raise
+        text_chunks: List[str] = []
+        for cand in data.get("candidates") or []:
+            content = (cand or {}).get("content") or {}
+            for p in content.get("parts") or []:
+                t = (p or {}).get("text")
+                if t:
+                    text_chunks.append(str(t))
+        combined = "\n".join(text_chunks).strip()
+        if not combined:
+            return None
+        return combined, _extract_gemini_grounding_citations(data)
+    except Exception as exc:
+        print(f"[LaptopCLI] Gemini REST API error: {exc}", flush=True)
+        return None
+
+
+def _invoke_anthropic_messages_api(
+    prompt: str,
+    som_screenshot_b64: Optional[str] = None,
+    timeout_sec: float = 25.0,
+    max_tokens: int = 1200,
+) -> Optional[str]:
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not anthropic_key:
+        return None
+
+    endpoint = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1/messages").strip()
+    model = (
+        CONFIGURED_MODEL
+        if CONFIGURED_MODEL and CONFIGURED_MODEL.lower().startswith("claude")
+        else os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-20250514").strip() or "claude-sonnet-4-20250514"
+    )
+    user_content: Any = prompt
+    if som_screenshot_b64:
+        user_content = [
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/jpeg",
+                    "data": som_screenshot_b64,
+                },
+            },
+            {"type": "text", "text": prompt},
+        ]
+    body = json.dumps(
+        {
+            "model": model,
+            "max_tokens": max_tokens,
+            "temperature": 0.1,
+            "messages": [{"role": "user", "content": user_content}],
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json; charset=utf-8",
+        "x-api-key": anthropic_key,
+        "anthropic-version": "2023-06-01",
+    }
+    req = urllib.request.Request(endpoint, data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+            blocks = [
+                str(b.get("text", ""))
+                for b in (data.get("content") or [])
+                if isinstance(b, dict) and b.get("type") == "text" and b.get("text")
+            ]
+            combined = "\n".join(blocks).strip()
+            return combined or None
+    except Exception as exc:
+        print(f"[LaptopCLI] Anthropic Messages API error: {exc}", flush=True)
+        return None
+
+
+def _invoke_openai_compatible_api(
+    prompt: str,
+    som_screenshot_b64: Optional[str] = None,
+    timeout_sec: float = 25.0,
+) -> Optional[str]:
+    base_url = os.environ.get("OPENAI_BASE_URL", "").strip()
+    openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not (base_url or openai_key):
+        return None
+
+    endpoint = base_url.rstrip("/") if base_url else "https://api.openai.com/v1/chat/completions"
+    if not endpoint.endswith("/chat/completions"):
+        endpoint = endpoint + ("/chat/completions" if endpoint.endswith("/v1") else "/v1/chat/completions")
+    model = (
+        CONFIGURED_MODEL
+        if CONFIGURED_MODEL and not CONFIGURED_MODEL.lower().startswith(("gemini", "claude"))
+        else os.environ.get("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
+    )
+    user_content: Any = prompt
+    if som_screenshot_b64:
+        user_content = [
+            {"type": "text", "text": prompt},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{som_screenshot_b64}"}},
+        ]
+    body = json.dumps(
+        {
+            "model": model,
+            "temperature": 0.1,
+            "messages": [{"role": "user", "content": user_content}],
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+    headers = {"Content-Type": "application/json; charset=utf-8"}
+    if openai_key:
+        headers["Authorization"] = f"Bearer {openai_key}"
+    req = urllib.request.Request(endpoint, data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+            content = data["choices"][0]["message"]["content"]
+            return str(content).strip() or None
+    except Exception as exc:
+        print(f"[LaptopCLI] OpenAI-compatible API error: {exc}", flush=True)
+        return None
+
+
+def _ordered_env_api_providers() -> List[str]:
+    hint = CONFIGURED_MODEL.lower()
+    if hint.startswith("claude"):
+        return ["anthropic", "gemini", "openai"]
+    if hint.startswith(("gpt", "o1", "o3", "o4")):
+        return ["openai", "gemini", "anthropic"]
+    return ["gemini", "anthropic", "openai"]
+
+
 def invoke_env_api_backend(
     prompt: str,
     som_screenshot_b64: Optional[str] = None,
     timeout_sec: float = 25.0,
 ) -> Optional[Dict[str, Any]]:
-    base_url = os.environ.get("OPENAI_BASE_URL", "").strip()
-    openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
-    if base_url or openai_key:
-        endpoint = base_url.rstrip("/") if base_url else "https://api.openai.com/v1/chat/completions"
-        if not endpoint.endswith("/chat/completions"):
-            endpoint = endpoint + ("/chat/completions" if endpoint.endswith("/v1") else "/v1/chat/completions")
-        model = CONFIGURED_MODEL or os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
-        user_content: Any = prompt
-        if som_screenshot_b64:
-            user_content = [
-                {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{som_screenshot_b64}"}},
-            ]
-        body = json.dumps(
-            {
-                "model": model,
-                "temperature": 0.1,
-                "messages": [{"role": "user", "content": user_content}],
-            }
-        ).encode("utf-8")
-        headers = {"Content-Type": "application/json"}
-        if openai_key:
-            headers["Authorization"] = f"Bearer {openai_key}"
-        req = urllib.request.Request(endpoint, data=body, headers=headers, method="POST")
-        try:
-            with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
-                data = json.loads(resp.read().decode("utf-8", errors="replace"))
-                content = data["choices"][0]["message"]["content"]
-                return validate_decision_dict(extract_json_object(content))
-        except Exception as exc:
-            print(f"[LaptopCLI] OpenAI-compatible API error: {exc}", flush=True)
+    """
+    Calls real configured environment API backends in priority order:
+    - GEMINI_API_KEY (Gemini REST v1beta with x-goog-api-key header + google_search grounding)
+    - ANTHROPIC_API_KEY (Anthropic Messages API with x-api-key header)
+    - OPENAI_API_KEY / OPENAI_BASE_URL (OpenAI-compatible Chat Completions API)
+    """
+    for provider in _ordered_env_api_providers():
+        raw_text: Optional[str] = None
+        if provider == "gemini":
+            res = _invoke_gemini_rest_api(
+                prompt,
+                som_screenshot_b64=som_screenshot_b64,
+                timeout_sec=timeout_sec,
+                enable_google_search=True,
+            )
+            if res is not None:
+                raw_text = res[0]
+        elif provider == "anthropic":
+            raw_text = _invoke_anthropic_messages_api(
+                prompt,
+                som_screenshot_b64=som_screenshot_b64,
+                timeout_sec=timeout_sec,
+            )
+        elif provider == "openai":
+            raw_text = _invoke_openai_compatible_api(
+                prompt,
+                som_screenshot_b64=som_screenshot_b64,
+                timeout_sec=timeout_sec,
+            )
+
+        if raw_text:
+            validated = validate_decision_dict(extract_json_object(raw_text))
+            if validated is not None:
+                return validated
     return None
 
 
@@ -1007,6 +1400,19 @@ def extract_query_from_goal(goal: str) -> Optional[str]:
     return None
 
 
+def _resolve_swipe_direction(lower_goal: str) -> str:
+    """Explicit scroll/swipe direction mapping: '아래로' -> 'down', '위로' -> 'up'."""
+    if "아래로" in lower_goal or "아래" in lower_goal or "내려" in lower_goal:
+        return "down"
+    if "위로" in lower_goal or "위" in lower_goal or "올려" in lower_goal:
+        return "up"
+    if "왼쪽" in lower_goal or "좌로" in lower_goal:
+        return "left"
+    if "오른쪽" in lower_goal or "우로" in lower_goal:
+        return "right"
+    return "down"
+
+
 def local_cli_decide(
     goal: str,
     iteration: int,
@@ -1014,11 +1420,28 @@ def local_cli_decide(
     prompt_context: str,
     history_steps: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
+    """
+    Deterministic offline heuristic mode — ONLY invoked when `--backend heuristic` is explicitly selected.
+    Never used as a silent hallucination fallback when real CLI/API backends fail.
+    """
     g = goal.strip()
     lower = g.lower()
     elements = parse_ui_elements(prompt_context)
 
-    # 0. Self-Healing Recovery if previous step failed or stalled
+    def _finalize(decision: Dict[str, Any]) -> Dict[str, Any]:
+        validated = validate_decision_dict(decision)
+        if validated is not None:
+            return validated
+        obs = str(decision.get("observation") or "요청을 처리하고 있어요.")
+        return {
+            "observation": obs,
+            "spokenReply": sanitize_spoken_reply(decision.get("spokenReply") or obs),
+            "subGoals": list(decision.get("subGoals") or []),
+            "toolName": str(decision.get("toolName") or "complete_task"),
+            "toolArgs": dict(decision.get("toolArgs") or {}),
+        }
+
+    # 0. Recovery if previous step failed or stalled (clean Korean spokenReply, no [Self-Healing] tag leak)
     if history_steps:
         last_step = history_steps[-1]
         last_ok = bool(last_step.get("succeeded", True))
@@ -1035,32 +1458,39 @@ def local_cli_decide(
                 None,
             )
             if modal_btn:
-                return {
-                    "observation": f"[Self-Healing] 팝업 요소('{modal_btn['text'] or modal_btn['desc']}')를 먼저 닫고 재시도합니다.",
-                    "subGoals": [
-                        {"title": "팝업 닫기 복구", "status": "IN_PROGRESS"},
-                        {"title": "원래 목표 재실행", "status": "PENDING"},
-                    ],
-                    "toolName": "click",
-                    "toolArgs": {"element_index": modal_btn["index"], "target_description": "팝업 닫기"},
-                }
+                btn_label = modal_btn["text"] or modal_btn["desc"]
+                return _finalize(
+                    {
+                        "observation": f"팝업 요소('{btn_label}')를 먼저 닫고 재시도합니다.",
+                        "spokenReply": f"화면에 뜬 '{btn_label}' 팝업을 먼저 닫고 다시 진행할게요.",
+                        "subGoals": [
+                            {"title": "팝업 닫기 복구", "status": "IN_PROGRESS"},
+                            {"title": "원래 목표 재실행", "status": "PENDING"},
+                        ],
+                        "toolName": "click",
+                        "toolArgs": {"element_index": modal_btn["index"], "target_description": "팝업 닫기"},
+                    }
+                )
             if last_tool == "click":
-                return {
-                    "observation": f"[Self-Healing] 이전 클릭 후 화면 변화가 없어({last_result[:45]}) 스크롤 후 재탐색합니다.",
-                    "subGoals": [
-                        {"title": "화면 스와이프 재노출", "status": "IN_PROGRESS"},
-                        {"title": "타깃 재실행", "status": "PENDING"},
-                    ],
-                    "toolName": "swipe",
-                    "toolArgs": {"direction": "up", "duration_ms": 360},
-                }
+                return _finalize(
+                    {
+                        "observation": f"이전 클릭 후 화면 변화가 없어({last_result[:45]}) 스크롤 후 재탐색합니다.",
+                        "spokenReply": "화면 변화가 없어서 스크롤하며 다시 찾아볼게요.",
+                        "subGoals": [
+                            {"title": "화면 스와이프 재노출", "status": "IN_PROGRESS"},
+                            {"title": "타깃 재실행", "status": "PENDING"},
+                        ],
+                        "toolName": "swipe",
+                        "toolArgs": {"direction": "down", "duration_ms": 360},
+                    }
+                )
 
     matched_app_name = next((name for name in APP_MAP if name in lower), None)
     target_pkg = APP_MAP.get(matched_app_name) if matched_app_name else None
     search_query = extract_query_from_goal(g)
 
     wants_drag_drop = any(k in lower for k in ["드래그", "슬라이더", "옮겨", "drag"])
-    wants_swipe = any(k in lower for k in ["스크롤", "스와이프", "내려", "올려"])
+    wants_swipe = any(k in lower for k in ["스크롤", "스와이프", "내려", "올려", "아래로", "위로"])
     wants_post_click = (search_query is not None) and any(
         k in lower for k in ["클릭", "틀어", "재생", "선택", "들어가", "열어", "눌러"]
     )
@@ -1101,27 +1531,33 @@ def local_cli_decide(
             )
 
         if matched_app_name and active_pkg != target_pkg and not has_launched:
-            return {
-                "observation": f"목표 앱 '{matched_app_name}'을(를) 실행합니다.",
-                "subGoals": ledger,
-                "toolName": "manage_app",
-                "toolArgs": {"action": "launch", "app_name": matched_app_name},
-            }
+            return _finalize(
+                {
+                    "observation": f"목표 앱 '{matched_app_name}'을(를) 실행합니다.",
+                    "spokenReply": f"{matched_app_name} 앱을 열게요.",
+                    "subGoals": ledger,
+                    "toolName": "manage_app",
+                    "toolArgs": {"action": "launch", "app_name": matched_app_name},
+                }
+            )
 
         if search_query and not has_typed:
             editable_el = next((el for el in elements if el["editable"]), None)
             if editable_el is not None:
-                return {
-                    "observation": f"입력창([{editable_el['index']}])에 '{search_query}'을(를) 입력하고 검색을 제출합니다.",
-                    "subGoals": ledger,
-                    "toolName": "input_text",
-                    "toolArgs": {
-                        "element_index": editable_el["index"],
-                        "text": search_query,
-                        "clear_existing": False,
-                        "submit_enter": True,
-                    },
-                }
+                return _finalize(
+                    {
+                        "observation": f"입력창([{editable_el['index']}])에 '{search_query}'을(를) 입력하고 검색을 제출합니다.",
+                        "spokenReply": f"'{search_query}'를 검색할게요.",
+                        "subGoals": ledger,
+                        "toolName": "input_text",
+                        "toolArgs": {
+                            "element_index": editable_el["index"],
+                            "text": search_query,
+                            "clear_existing": False,
+                            "press_enter": True,
+                        },
+                    }
+                )
 
             if not has_clicked_search:
                 search_btn = next(
@@ -1139,19 +1575,25 @@ def local_cli_decide(
                     )
                 if search_btn is not None:
                     label = search_btn["text"] or search_btn["desc"] or "검색창"
-                    return {
-                        "observation": f"화면에서 검색 진입 요소([{search_btn['index']}] '{label}')를 탭합니다.",
-                        "subGoals": ledger,
-                        "toolName": "click",
-                        "toolArgs": {"element_index": search_btn["index"], "target_description": f"검색창 열기 ({label})"},
-                    }
+                    return _finalize(
+                        {
+                            "observation": f"화면에서 검색 진입 요소([{search_btn['index']}] '{label}')를 탭합니다.",
+                            "spokenReply": "검색창을 먼저 열게요.",
+                            "subGoals": ledger,
+                            "toolName": "click",
+                            "toolArgs": {"element_index": search_btn["index"], "target_description": f"검색창 열기 ({label})"},
+                        }
+                    )
 
-            return {
-                "observation": f"'{search_query}' 검색어를 입력하고 제출합니다.",
-                "subGoals": ledger,
-                "toolName": "input_text",
-                "toolArgs": {"text": search_query, "submit_enter": True},
-            }
+            return _finalize(
+                {
+                    "observation": f"'{search_query}' 검색어를 입력하고 제출합니다.",
+                    "spokenReply": f"'{search_query}'를 입력할게요.",
+                    "subGoals": ledger,
+                    "toolName": "input_text",
+                    "toolArgs": {"text": search_query, "press_enter": True},
+                }
+            )
 
         if wants_drag_drop and not has_dragged:
             slider_el = next(
@@ -1159,28 +1601,36 @@ def local_cli_decide(
                 None,
             )
             norm_y = slider_el["norm_y"] if slider_el else 500
-            return {
-                "observation": f"좌표 (250, {norm_y}) -> (780, {norm_y}) 드래그 앤 드롭을 실행합니다.",
-                "subGoals": ledger,
-                "toolName": "drag_and_drop",
-                "toolArgs": {
-                    "start_norm_x": 250,
-                    "start_norm_y": norm_y,
-                    "end_norm_x": 780,
-                    "end_norm_y": norm_y,
-                    "hold_ms": 480,
-                    "duration_ms": 680,
-                },
-            }
+            return _finalize(
+                {
+                    "observation": f"좌표 (250, {norm_y}) -> (780, {norm_y}) 드래그 앤 드롭을 실행합니다.",
+                    "spokenReply": "슬라이더를 드래그해서 조절할게요.",
+                    "subGoals": ledger,
+                    "toolName": "drag_and_drop",
+                    "toolArgs": {
+                        "start_norm_x": 250,
+                        "start_norm_y": norm_y,
+                        "end_norm_x": 780,
+                        "end_norm_y": norm_y,
+                        "hold_ms": 480,
+                        "duration_ms": 680,
+                        "description": "슬라이더 드래그",
+                    },
+                }
+            )
 
         if wants_swipe and not has_swiped:
-            direction = "down" if ("아래로" in lower or "위로 스크롤" in lower) else "up"
-            return {
-                "observation": f"'{direction}' 방향으로 스와이프합니다.",
-                "subGoals": ledger,
-                "toolName": "swipe",
-                "toolArgs": {"direction": direction, "duration_ms": 380},
-            }
+            direction = _resolve_swipe_direction(lower)
+            dir_ko = {"down": "아래로", "up": "위로", "left": "왼쪽으로", "right": "오른쪽으로"}.get(direction, direction)
+            return _finalize(
+                {
+                    "observation": f"'{direction}' 방향으로 스크롤합니다.",
+                    "spokenReply": f"화면을 {dir_ko} 스크롤할게요.",
+                    "subGoals": ledger,
+                    "toolName": "swipe",
+                    "toolArgs": {"direction": direction, "duration_ms": 380},
+                }
+            )
 
         if wants_post_click and clicks_after_input == 0:
             result_el = next(
@@ -1198,42 +1648,54 @@ def local_cli_decide(
             )
             if result_el is not None:
                 label = (result_el["text"] or result_el["desc"])[:28]
-                return {
-                    "observation": f"검색 결과 요소([{result_el['index']}] '{label}')를 탭합니다.",
-                    "subGoals": ledger,
-                    "toolName": "click",
-                    "toolArgs": {"element_index": result_el["index"], "target_description": f"검색 결과 선택 ({label})"},
-                }
+                return _finalize(
+                    {
+                        "observation": f"검색 결과 요소([{result_el['index']}] '{label}')를 탭합니다.",
+                        "spokenReply": f"'{label}' 항목을 선택할게요.",
+                        "subGoals": ledger,
+                        "toolName": "click",
+                        "toolArgs": {"element_index": result_el["index"], "target_description": f"검색 결과 선택 ({label})"},
+                    }
+                )
 
         if history_steps:
             step_lines = [
                 f"• Step {s.get('step')} [{s.get('tool')}]: {(str(s.get('result') or '').splitlines() or [''])[0]}"
                 for s in history_steps
             ]
-            return {
-                "observation": f"총 {len(history_steps)}단계의 실행 및 사후 화면 검증을 완료했습니다.",
-                "subGoals": [{**item, "status": "COMPLETED"} for item in ledger],
-                "toolName": "complete_task",
-                "toolArgs": {"summary": f"✅ 목표 완료 ({len(history_steps)}스텝 검증됨)\n" + "\n".join(step_lines)},
-            }
+            return _finalize(
+                {
+                    "observation": f"총 {len(history_steps)}단계의 실행 및 사후 화면 검증을 완료했습니다.",
+                    "spokenReply": "요청하신 작업을 모두 마쳤어요.",
+                    "subGoals": [{**item, "status": "COMPLETED"} for item in ledger],
+                    "toolName": "complete_task",
+                    "toolArgs": {"summary": f"✅ 목표 완료 ({len(history_steps)}스텝 검증됨)\n" + "\n".join(step_lines)},
+                }
+            )
 
     if iteration >= 2 and history_steps:
         last = history_steps[-1]
-        return {
-            "observation": f"'{last.get('tool', '')}' 실행 및 화면 전이 확인을 마쳤습니다.",
-            "subGoals": [{"title": "실행 및 검증 완료", "status": "COMPLETED"}],
-            "toolName": "complete_task",
-            "toolArgs": {"summary": str(last.get("result", "완료"))},
-        }
+        return _finalize(
+            {
+                "observation": f"'{last.get('tool', '')}' 실행 및 화면 전이 확인을 마쳤습니다.",
+                "spokenReply": "실행 결과를 확인하고 작업을 마쳤어요.",
+                "subGoals": [{"title": "실행 및 검증 완료", "status": "COMPLETED"}],
+                "toolName": "complete_task",
+                "toolArgs": {"summary": str(last.get("result", "완료"))},
+            }
+        )
 
     for kw in APP_MAP:
         if kw in lower and any(v in lower for v in ["열어", "실행", "켜", "가자", "틀어"]):
-            return {
-                "observation": f"'{kw}' 앱을 실행합니다.",
-                "subGoals": [{"title": f"'{kw}' 앱 실행", "status": "IN_PROGRESS"}],
-                "toolName": "manage_app",
-                "toolArgs": {"action": "launch", "app_name": kw},
-            }
+            return _finalize(
+                {
+                    "observation": f"'{kw}' 앱을 실행합니다.",
+                    "spokenReply": f"{kw} 앱을 실행할게요.",
+                    "subGoals": [{"title": f"'{kw}' 앱 실행", "status": "IN_PROGRESS"}],
+                    "toolName": "manage_app",
+                    "toolArgs": {"action": "launch", "app_name": kw},
+                }
+            )
 
     matched_el = next(
         (
@@ -1245,27 +1707,36 @@ def local_cli_decide(
     )
     if matched_el is not None:
         label = matched_el["text"] or matched_el["desc"]
-        return {
-            "observation": f"현재 화면에서 '[{matched_el['index']}] {label}' 요소를 탭합니다.",
-            "subGoals": [{"title": f"'{label}' 탭", "status": "IN_PROGRESS"}],
-            "toolName": "click",
-            "toolArgs": {"element_index": matched_el["index"], "target_description": label},
-        }
+        return _finalize(
+            {
+                "observation": f"현재 화면에서 '[{matched_el['index']}] {label}' 요소를 탭합니다.",
+                "spokenReply": f"'{label}' 버튼을 누를게요.",
+                "subGoals": [{"title": f"'{label}' 탭", "status": "IN_PROGRESS"}],
+                "toolName": "click",
+                "toolArgs": {"element_index": matched_el["index"], "target_description": label},
+            }
+        )
 
     if "홈" in lower:
-        return {
-            "observation": "홈 화면으로 이동합니다.",
-            "subGoals": [{"title": "HOME 이동", "status": "IN_PROGRESS"}],
-            "toolName": "press_key",
-            "toolArgs": {"key": "HOME"},
-        }
+        return _finalize(
+            {
+                "observation": "홈 화면으로 이동합니다.",
+                "spokenReply": "홈 화면으로 이동할게요.",
+                "subGoals": [{"title": "HOME 이동", "status": "IN_PROGRESS"}],
+                "toolName": "press_key",
+                "toolArgs": {"key": "HOME"},
+            }
+        )
 
-    return {
-        "observation": f"'{g}' 요청을 확인했습니다.",
-        "subGoals": [{"title": "응답 완료", "status": "COMPLETED"}],
-        "toolName": "complete_task",
-        "toolArgs": {"summary": f"요청 확인됨: '{g}'"},
-    }
+    return _finalize(
+        {
+            "observation": f"'{g}' 요청을 확인했습니다.",
+            "spokenReply": "요청을 확인했어요.",
+            "subGoals": [{"title": "응답 완료", "status": "COMPLETED"}],
+            "toolName": "complete_task",
+            "toolArgs": {"summary": f"요청 확인됨: '{g}'"},
+        }
+    )
 
 
 def decide_turn(
@@ -1275,20 +1746,237 @@ def decide_turn(
     prompt_context: str,
     history_steps: List[Dict[str, Any]],
     som_screenshot_b64: Optional[str] = None,
+    chat_history: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    backend = resolve_active_backend(CONFIGURED_BACKEND)
-    if backend in ("claude", "gemini", "codex"):
-        prompt = build_deliberative_prompt(goal, iteration, active_pkg, prompt_context, history_steps)
-        cli_decision = invoke_coding_cli_backend(backend, prompt, som_screenshot_b64=som_screenshot_b64)
+    configured = (CONFIGURED_BACKEND or "auto").strip().lower()
+    if configured == "heuristic":
+        return local_cli_decide(goal, iteration, active_pkg, prompt_context, history_steps)
+
+    prompt = build_deliberative_prompt(
+        goal,
+        iteration,
+        active_pkg,
+        prompt_context,
+        history_steps,
+        chat_history=chat_history,
+    )
+
+    attempted: List[str] = []
+    if configured in ALLOWED_CLIS:
+        attempted.append(configured)
+        cli_decision = invoke_coding_cli_backend(configured, prompt, som_screenshot_b64=som_screenshot_b64)
         if cli_decision is not None:
             return cli_decision
-    elif backend == "api":
-        prompt = build_deliberative_prompt(goal, iteration, active_pkg, prompt_context, history_steps)
+    elif configured == "api":
+        attempted.append("api")
         api_decision = invoke_env_api_backend(prompt, som_screenshot_b64=som_screenshot_b64)
         if api_decision is not None:
             return api_decision
+    else:
+        # Auto mode: try all available desktop CLIs ($0 extra API cost), then env API keys
+        for cli in detect_available_clis():
+            attempted.append(cli)
+            cli_decision = invoke_coding_cli_backend(cli, prompt, som_screenshot_b64=som_screenshot_b64)
+            if cli_decision is not None:
+                return cli_decision
+        if has_configured_env_api():
+            attempted.append("api")
+            api_decision = invoke_env_api_backend(prompt, som_screenshot_b64=som_screenshot_b64)
+            if api_decision is not None:
+                return api_decision
 
-    return local_cli_decide(goal, iteration, active_pkg, prompt_context, history_steps)
+    tried_desc = ", ".join(attempted) if attempted else "none detected"
+    raise BackendUnavailableError(
+        f"No reasoning backend succeeded (configured={configured}, attempted={tried_desc}). "
+        "Install/authenticate claude, gemini, or codex CLI, or set GEMINI_API_KEY / ANTHROPIC_API_KEY / OPENAI_API_KEY."
+    )
+
+
+def build_web_research_prompt(
+    query: str,
+    system_context: str = "",
+    chat_history: Optional[List[Dict[str, Any]]] = None,
+) -> str:
+    ctx_block = system_context.strip() or "(none)"
+    chat_block = _format_chat_history_block(chat_history)
+    return f"""You are Hanson's desktop AI web & knowledge researcher.
+Answer the user's question accurately, concisely, and naturally in Korean (`answer_ko`).
+Include up to 5 verified web reference links (`citations`) when available (only real `https://` or `http://` URLs; never invent fake URLs).
+
+System Context:
+{ctx_block}
+
+Recent Conversation History:
+{chat_block}
+
+User Query:
+{query.strip()}
+
+Respond with ONLY a single valid JSON object (no markdown fences):
+{{
+  "answer_ko": "자연스럽고 정확한 한국어 답변 (핵심 요약)",
+  "citations": [{{"title": "출처 제목", "url": "https://example.com"}}]
+}}"""
+
+
+def _sanitize_citations(
+    raw_citations: Any,
+    fallback_text: str = "",
+    extra_citations: Optional[List[Dict[str, str]]] = None,
+) -> List[Dict[str, str]]:
+    cleaned: List[Dict[str, str]] = []
+    seen = set()
+
+    def _add(title: str, url: str) -> None:
+        u = (url or "").strip().rstrip(").,;\"'")
+        if not u.startswith(("https://", "http://")):
+            return
+        if u in seen:
+            return
+        seen.add(u)
+        t = (title or "").strip() or u
+        cleaned.append({"title": t[:160], "url": u[:1024]})
+
+    if isinstance(raw_citations, list):
+        for item in raw_citations:
+            if isinstance(item, dict):
+                _add(str(item.get("title") or ""), str(item.get("url") or item.get("uri") or ""))
+            elif isinstance(item, str):
+                _add(item, item)
+
+    if extra_citations:
+        for item in extra_citations:
+            if isinstance(item, dict):
+                _add(str(item.get("title") or ""), str(item.get("url") or ""))
+
+    if fallback_text:
+        for m in re.finditer(r"\[([^\]]{1,120})\]\((https?://[^\s)]+)\)", fallback_text):
+            _add(m.group(1), m.group(2))
+        for m in re.finditer(r"(?<![(\"])(https?://[^\s<>)\"']+)", fallback_text):
+            _add(m.group(1), m.group(1))
+
+    return cleaned[:8]
+
+
+def _parse_web_research_output(
+    raw_text: str,
+    backend_label: str,
+    extra_citations: Optional[List[Dict[str, str]]] = None,
+) -> Optional[Dict[str, Any]]:
+    if not raw_text or not raw_text.strip():
+        return None
+    parsed = extract_json_object(raw_text)
+    if isinstance(parsed, dict):
+        answer = str(parsed.get("answer_ko") or parsed.get("answer") or parsed.get("summary") or "").strip()
+        if answer:
+            citations = _sanitize_citations(
+                parsed.get("citations"),
+                fallback_text=answer,
+                extra_citations=extra_citations,
+            )
+            return {
+                "ok": True,
+                "answer_ko": answer,
+                "citations": citations,
+                "backend": backend_label,
+            }
+    plain = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", raw_text.strip()).strip()
+    if not plain:
+        return None
+    citations = _sanitize_citations([], fallback_text=plain, extra_citations=extra_citations)
+    return {
+        "ok": True,
+        "answer_ko": plain,
+        "citations": citations,
+        "backend": backend_label,
+    }
+
+
+def run_web_research(
+    query: str,
+    system_context: str = "",
+    chat_history: Optional[List[Dict[str, Any]]] = None,
+    timeout_sec: float = 32.0,
+) -> Dict[str, Any]:
+    clean_query = (query or "").strip()
+    if not clean_query:
+        raise WorkspaceValidationError("Field 'query' must not be empty.")
+
+    configured = (CONFIGURED_BACKEND or "auto").strip().lower()
+    prompt = build_web_research_prompt(clean_query, system_context=system_context, chat_history=chat_history)
+    attempted: List[str] = []
+
+    def _try_cli(cli_name: str) -> Optional[Dict[str, Any]]:
+        attempted.append(cli_name)
+        raw = invoke_coding_cli_text(cli_name, prompt, som_screenshot_b64=None, timeout_sec=timeout_sec)
+        if not raw:
+            return None
+        return _parse_web_research_output(raw, backend_label=f"{cli_name}_cli")
+
+    def _try_env_apis() -> Optional[Dict[str, Any]]:
+        for provider in _ordered_env_api_providers():
+            if provider == "gemini" and os.environ.get("GEMINI_API_KEY", "").strip():
+                attempted.append("gemini_api")
+                res = _invoke_gemini_rest_api(
+                    prompt,
+                    som_screenshot_b64=None,
+                    timeout_sec=timeout_sec,
+                    enable_google_search=True,
+                )
+                if res is not None:
+                    parsed = _parse_web_research_output(
+                        res[0],
+                        backend_label="gemini_api_google_search",
+                        extra_citations=res[1],
+                    )
+                    if parsed is not None:
+                        return parsed
+            elif provider == "anthropic" and os.environ.get("ANTHROPIC_API_KEY", "").strip():
+                attempted.append("anthropic_api")
+                raw = _invoke_anthropic_messages_api(
+                    prompt,
+                    som_screenshot_b64=None,
+                    timeout_sec=timeout_sec,
+                    max_tokens=1600,
+                )
+                if raw:
+                    parsed = _parse_web_research_output(raw, backend_label="anthropic_api")
+                    if parsed is not None:
+                        return parsed
+            elif provider == "openai" and (
+                os.environ.get("OPENAI_API_KEY", "").strip() or os.environ.get("OPENAI_BASE_URL", "").strip()
+            ):
+                attempted.append("openai_api")
+                raw = _invoke_openai_compatible_api(prompt, som_screenshot_b64=None, timeout_sec=timeout_sec)
+                if raw:
+                    parsed = _parse_web_research_output(raw, backend_label="openai_api")
+                    if parsed is not None:
+                        return parsed
+        return None
+
+    if configured in ALLOWED_CLIS:
+        hit = _try_cli(configured)
+        if hit is not None:
+            return hit
+    elif configured == "api":
+        hit = _try_env_apis()
+        if hit is not None:
+            return hit
+    elif configured != "heuristic":
+        for cli in detect_available_clis():
+            hit = _try_cli(cli)
+            if hit is not None:
+                return hit
+        if has_configured_env_api():
+            hit = _try_env_apis()
+            if hit is not None:
+                return hit
+
+    tried_desc = ", ".join(attempted) if attempted else "none detected"
+    raise BackendUnavailableError(
+        f"No live web research backend succeeded (configured={configured}, attempted={tried_desc}). "
+        "Authenticate claude/gemini/codex CLI or configure GEMINI_API_KEY / ANTHROPIC_API_KEY / OPENAI_API_KEY."
+    )
 
 
 class LaptopCliBridgeHandler(BaseHTTPRequestHandler):
@@ -1449,13 +2137,14 @@ class LaptopCliBridgeHandler(BaseHTTPRequestHandler):
                 {
                     "status": "ok",
                     "bridge": "Hanson-Laptop-CLI-Bridge-v6.0",
-                    "version": "6.0.0",
+                    "version": SERVER_VERSION,
                     "port": self.server.server_port,
                     "configuredBackend": CONFIGURED_BACKEND,
                     "activeBackend": resolve_active_backend(CONFIGURED_BACKEND),
                     "availableClis": detect_available_clis(),
                     "workspace_root": get_safe_workspace_label(),
                     "workspace_routes": True,
+                    "web_research_route": True,
                     "allow_workspace_exec": ALLOW_WORKSPACE_EXEC,
                     "pickle_sota_capabilities": [
                         "blind_vault_no_llm_plaintext",
@@ -1468,6 +2157,7 @@ class LaptopCliBridgeHandler(BaseHTTPRequestHandler):
                         "human_memory_bubbles",
                         "d_artemis_tac_aca_alignment",
                         "one_tap_reversible_receipts",
+                        "zero_cost_desktop_web_research",
                     ],
                     "valid_tools_count": len(VALID_TOOLS),
                 }
@@ -1477,7 +2167,7 @@ class LaptopCliBridgeHandler(BaseHTTPRequestHandler):
         if route == "/pickle/capabilities":
             self._send_json(
                 {
-                    "version": "6.0.0",
+                    "version": SERVER_VERSION,
                     "bridge": "Hanson-Laptop-CLI-Bridge-v6.0",
                     "validTools": sorted(VALID_TOOLS),
                     "validToolsCount": len(VALID_TOOLS),
@@ -1519,13 +2209,13 @@ class LaptopCliBridgeHandler(BaseHTTPRequestHandler):
         try:
             parsed_json = json.loads(raw_body) if raw_body.strip() else {}
         except Exception:
-            if route.startswith("/workspace/"):
+            if route.startswith("/workspace/") or route == "/web/research":
                 self._send_json({"ok": False, "error": "Invalid JSON body"}, status=400)
                 return
             parsed_json = {}
 
         if not isinstance(parsed_json, dict):
-            if route.startswith("/workspace/"):
+            if route.startswith("/workspace/") or route == "/web/research":
                 self._send_json({"ok": False, "error": "JSON payload must be an object"}, status=400)
                 return
             parsed_json = {}
@@ -1542,20 +2232,52 @@ class LaptopCliBridgeHandler(BaseHTTPRequestHandler):
             self._handle_workspace_route(route, payload)
             return
 
+        if route == "/web/research":
+            query = str(payload.get("query") or "").strip()
+            if not query:
+                self._send_json({"ok": False, "error": "Field 'query' is required."}, status=400)
+                return
+            system_context = str(payload.get("system_context") or payload.get("systemContext") or "")
+            chat_history = list(payload.get("chat_history") or payload.get("chatHistory") or [])
+            try:
+                result = run_web_research(
+                    query=query,
+                    system_context=system_context,
+                    chat_history=chat_history,
+                )
+                self._send_json(result, status=200)
+            except WorkspaceValidationError as exc:
+                self._send_json({"ok": False, "error": str(exc)}, status=400)
+            except BackendUnavailableError as exc:
+                self._send_json({"ok": False, "error": str(exc)}, status=503)
+            return
+
         if route.startswith("/decide"):
             goal = str(payload.get("goal", ""))
             iteration = int(payload.get("iteration", 1))
             active_pkg = str(payload.get("activePackage", ""))
             prompt_context = str(payload.get("promptContext", ""))
             history_steps = list(payload.get("historySteps") or [])
+            chat_history = list(payload.get("chatHistory") or payload.get("chat_history") or [])
             som_b64 = payload.get("somScreenshot")
             backend = resolve_active_backend(CONFIGURED_BACKEND)
             print(
-                f"[LaptopCLI v5.0] backend={backend} | iter={iteration} | pkg={active_pkg} | som={bool(som_b64)} | goal='{goal}'",
+                f"[LaptopCLI v6.0] backend={backend} | iter={iteration} | pkg={active_pkg} | som={bool(som_b64)} | chat={len(chat_history)} | goal='{goal}'",
                 flush=True,
             )
-            decision = decide_turn(goal, iteration, active_pkg, prompt_context, history_steps, som_b64)
-            self._send_json(decision)
+            try:
+                decision = decide_turn(
+                    goal,
+                    iteration,
+                    active_pkg,
+                    prompt_context,
+                    history_steps,
+                    som_screenshot_b64=som_b64,
+                    chat_history=chat_history,
+                )
+                self._send_json(decision, status=200)
+            except BackendUnavailableError as exc:
+                self._send_json({"ok": False, "error": str(exc)}, status=503)
             return
 
         if route.startswith("/bridge"):

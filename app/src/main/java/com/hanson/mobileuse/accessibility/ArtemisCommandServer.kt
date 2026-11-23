@@ -245,9 +245,13 @@ class ArtemisCommandServer(
                 sendHttpResponse(out, 200, "application/json", card.toString())
             }
             "/mcp/tools" -> {
-                val toolsJson = com.hanson.mobileuse.agent.ToolSpecRegistry.toGeminiToolsJson()
+                val mcpTools: Any = com.hanson.mobileuse.agent.ToolSpecRegistry.toMcpToolsJson()
+                val payload = when (mcpTools) {
+                    is JSONObject -> if (mcpTools.has("tools")) mcpTools else JSONObject().put("tools", mcpTools)
+                    else -> JSONObject().put("tools", mcpTools)
+                }
                 onBridgeEvent?.invoke(path, "200 OK (MCP Tools)")
-                sendHttpResponse(out, 200, "application/json", toolsJson.toString())
+                sendHttpResponse(out, 200, "application/json", payload.toString())
             }
             "/a2a" -> {
                 val engine = HansonRuntimeHolder.getAgentEngine(service.applicationContext)
@@ -303,10 +307,19 @@ class ArtemisCommandServer(
             }
             "/engine_stats", "/stats" -> {
                 val engine = HansonRuntimeHolder.getAgentEngine(service.applicationContext)
-                val stats = engine.executionModeController.getStatsJson()
-                stats.put("worldGraphNodes", engine.worldModelGraph.getAllNodes().size)
-                stats.put("worldGraphEdges", engine.worldModelGraph.getAllEdges().size)
-                stats.put("neuralSkillCompiler", engine.neuralSkillCompiler.getCompilerStatsJson())
+                val session = engine.currentSession.value
+                val stats = JSONObject().apply {
+                    put("status", "ok")
+                    put("agentStatus", session.status.name)
+                    put("sessionSteps", session.steps.size)
+                    put("activeParallelCount", engine.activeParallelTasks.value.size)
+                    put("chatMessageCount", engine.chatMessages.value.size)
+                    put("bridgeRequests", totalRequests.get())
+                    put("watcherRuleCount", engine.resolvedWatcherEngine.listRules().size)
+                    put("scratchpadEntryCount", engine.resolvedScratchpad.listEntries().size)
+                    put("memoryBubbleCount", engine.resolvedMemoryBubbles.bubbles.value.size)
+                    put("routineCount", engine.resolvedPersonalRoutines.routines.value.size)
+                }
                 onBridgeEvent?.invoke("/engine_stats", "200 OK")
                 sendHttpResponse(out, 200, "application/json", stats.toString())
             }
@@ -531,18 +544,24 @@ class ArtemisCommandServer(
                     val y = params.optDouble("y", 0.0).toFloat()
                     val times = params.optInt("times", 1)
                     val delay = params.optLong("delay", 120L)
-                    success = GestureController.multiTap(service, x, y, times, delay)
+                    success = withTemporaryHudPassThrough {
+                        GestureController.multiTap(service, x, y, times, delay)
+                    }
                 }
                 "double_tap" -> {
                     val x = params.optDouble("x", 0.0).toFloat()
                     val y = params.optDouble("y", 0.0).toFloat()
-                    success = GestureController.doubleTap(service, x, y)
+                    success = withTemporaryHudPassThrough {
+                        GestureController.doubleTap(service, x, y)
+                    }
                 }
                 "long_press" -> {
                     val x = params.optDouble("x", 0.0).toFloat()
                     val y = params.optDouble("y", 0.0).toFloat()
                     val duration = params.optLong("duration", 700L)
-                    success = GestureController.longPress(service, x, y, duration)
+                    success = withTemporaryHudPassThrough {
+                        GestureController.longPress(service, x, y, duration)
+                    }
                 }
                 "swipe" -> {
                     val x1 = params.optDouble("x1", params.optDouble("startX", 0.0)).toFloat()
@@ -550,7 +569,9 @@ class ArtemisCommandServer(
                     val x2 = params.optDouble("x2", params.optDouble("endX", 0.0)).toFloat()
                     val y2 = params.optDouble("y2", params.optDouble("endY", 0.0)).toFloat()
                     val duration = params.optLong("duration", 350L)
-                    success = GestureController.swipe(service, x1, y1, x2, y2, duration)
+                    success = withTemporaryHudPassThrough {
+                        GestureController.swipe(service, x1, y1, x2, y2, duration)
+                    }
                 }
                 "click_sequence" -> {
                     val arr: JSONArray? = params.optJSONArray("points") ?: params.optJSONArray("sequence")
@@ -564,12 +585,16 @@ class ArtemisCommandServer(
                             }
                         }
                     }
-                    success = GestureController.clickSequence(service, pts, delay)
+                    success = withTemporaryHudPassThrough {
+                        GestureController.clickSequence(service, pts, delay)
+                    }
                 }
                 "type", "input_text" -> {
                     val text = params.optString("text", "")
                     val clear = params.optBoolean("clear", false)
-                    success = GestureController.inputText(service, text, clearExisting = clear)
+                    success = withTemporaryHudPassThrough {
+                        GestureController.inputText(service, text, clearExisting = clear)
+                    }
                 }
                 "clear" -> {
                     success = GestureController.clearText(service)
@@ -582,10 +607,10 @@ class ArtemisCommandServer(
                     val action = params.optString("action", params.optString("key", "HOME"))
                     success = GestureController.performGlobalKey(service, action)
                 }
-                "click_element", "launch_app", "list_apps", "open_url", "notifications", "reply_notification", "device_setting", "tool" -> {
+                "click_element", "launch_app", "list_apps", "open_url", "open_link", "wait", "wait_for_delay", "observe_screen", "notifications", "reply_notification", "device_setting", "tool" -> {
                     val harness = com.hanson.mobileuse.agent.AgentToolExecutionHarness(service.applicationContext)
                     val snap = HierarchyDumper.captureAtomicSnapshot(service, includeScreenshot = false)
-                    val (mappedTool, mappedArgs) = when (cmd.lowercase()) {
+                    val (rawMappedTool, mappedArgs) = when (cmd.lowercase()) {
                         "click_element" -> "click" to params
                         "launch_app" -> "manage_app" to JSONObject().apply {
                             put("action", "launch")
@@ -595,12 +620,15 @@ class ArtemisCommandServer(
                             put("action", params.optString("filter_action", "list"))
                             put("app_name", params.optString("query", ""))
                         }
-                        "open_url" -> "open_url" to JSONObject().put("url", params.optString("url", ""))
+                        "open_url", "open_link" -> "open_link" to JSONObject().put("url", params.optString("url", ""))
+                        "wait", "wait_for_delay" -> "wait_for_delay" to params
+                        "observe_screen" -> "observe_screen" to params
                         "notifications" -> "list_notifications" to params
                         "reply_notification" -> "reply_notification" to params
                         "device_setting" -> "control_device_setting" to params
                         else -> params.optString("tool_name", params.optString("name", "")) to (params.optJSONObject("args") ?: params)
                     }
+                    val mappedTool = normalizeToolAlias(rawMappedTool)
                     val outcome = harness.execute(mappedTool, mappedArgs, snap)
                     success = outcome.succeeded
                     response.put("output", outcome.outputText)
@@ -646,6 +674,23 @@ class ArtemisCommandServer(
         out.write(headers.toByteArray(StandardCharsets.UTF_8))
         out.write(bodyBytes)
         out.flush()
+    }
+
+    private fun normalizeToolAlias(rawToolName: String): String {
+        return when (rawToolName.trim().lowercase()) {
+            "open_url" -> "open_link"
+            "wait" -> "wait_for_delay"
+            else -> rawToolName.trim()
+        }
+    }
+
+    private inline fun <T> withTemporaryHudPassThrough(block: () -> T): T {
+        com.hanson.mobileuse.service.FloatingHudService.setPassThroughTemporarily(true)
+        return try {
+            block()
+        } finally {
+            com.hanson.mobileuse.service.FloatingHudService.setPassThroughTemporarily(false)
+        }
     }
 
     private fun generateToken(): String {

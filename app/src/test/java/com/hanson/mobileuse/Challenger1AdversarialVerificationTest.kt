@@ -424,34 +424,35 @@ class Challenger1AdversarialVerificationTest {
 
     @Test
     fun testHumanSummaryAndCardBuilder_transformsRawHackerNewsDumpIntoStructuredUi() {
-        val rawHnDump = """
-            [모바일 Browser-Use 추출 완료] 제목: Hacker News
-            URL: https://news.ycombinator.com/
-            핵심 본문 요약: Hacker News Hacker News new | past | comments | ask | show | jobs | submit login 1. KetchUp – Open-source SketchUp alternative built with Rust and WebGPU ( ketchup3d.github.io ) 149 points by dcoulmbe 2 hours ago | hide | 25 comments 2. Herb Sutter: When a language&#x27;s creator and its owners strongly disagree [pdf] ( isocpp.org ) 42 points by acossta 1 hours ago | hide | 12 comments
-            주요 링크 (10개):
-              [1] Hacker News -> news
+        val groundedHnResponse = """
+            오늘 해커뉴스 주요 화제는 Rust/WebGPU 기반 3D 도구 KetchUp과 Herb Sutter의 언어 거버넌스 글입니다.
+
+            출처:
+            - [KetchUp – Open-source SketchUp alternative built with Rust and WebGPU](https://ketchup3d.github.io/)
+            - [Herb Sutter: When a language&#x27;s creator and its owners strongly disagree](https://isocpp.org/blog/sutter)
+            - [Hacker News Frontpage](https://news.ycombinator.com/)
         """.trimIndent()
 
         val rawMsg = com.hanson.mobileuse.agent.LiveChatMessage(
             sender = com.hanson.mobileuse.agent.ChatSender.AGENT,
-            text = rawHnDump,
-            toolBadge = "NEXUS-BROWSER-USE"
+            text = groundedHnResponse,
+            toolBadge = "WEB-GROUNDING"
         )
         val enriched = com.hanson.mobileuse.agent.HumanSummaryAndCardBuilder.enrichMessageForHumanDisplay(rawMsg)
 
-        // 1. Main text must be a clean human Korean summary without raw '[모바일 Browser-Use 추출 완료]' or '&#x27;'
-        assertTrue(!enriched.text.contains("[모바일 Browser-Use"))
+        // 1. Main text must be a clean human Korean summary without raw HTML entities or citation markdown lines
         assertTrue(!enriched.text.contains("&#x27;"))
         assertTrue(enriched.text.contains("해커뉴스"))
 
-        // 2. Structured card must be CURATED_LIST with clean parsed items and decoded apostrophe
+        // 2. Structured card must be CURATED_LIST with verified clickable HTTPS URLs and decoded apostrophe
         assertNotNull(enriched.structuredCard)
         assertEquals(com.hanson.mobileuse.agent.StructuredUiTemplateType.CURATED_LIST, enriched.structuredCard!!.templateType)
-        assertTrue(enriched.structuredCard!!.items.size >= 2)
+        assertEquals(3, enriched.structuredCard!!.items.size)
         assertTrue(enriched.structuredCard!!.items[1].title.contains("language's creator"))
+        assertTrue(enriched.structuredCard!!.items.all { it.actionUrlOrCmd.startsWith("https://") })
 
-        // 3. Detail payload must preserve full raw technical output for tap-to-view modal
+        // 3. Detail payload must preserve full raw output and primary verified HTTPS source URL
         assertNotNull(enriched.detailPayload)
-        assertEquals("https://news.ycombinator.com/", enriched.detailPayload!!.sourceUrl)
+        assertEquals("https://ketchup3d.github.io/", enriched.detailPayload!!.sourceUrl)
     }
 }

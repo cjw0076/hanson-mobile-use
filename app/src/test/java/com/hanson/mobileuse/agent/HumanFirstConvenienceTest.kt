@@ -106,11 +106,13 @@ class HumanFirstConvenienceTest {
         val file = File(tempFolder.newFolder("bubbles_crud"), "hanson_memory_bubbles.json")
         val store = HumanMemoryBubblesStore(file)
 
+        // Modernized (P0-4): seedDefaultsIfEmpty() is an idempotent no-op by default so personal memory
+        // stays empty until the user explicitly opts in during onboarding or adds bubbles manually.
         store.seedDefaultsIfEmpty()
-        val seededCount = store.bubbles.value.size
-        assertEquals(3, seededCount)
+        assertEquals(0, store.bubbles.value.size)
+        assertEquals("", store.formatBubblesForSystemPrompt())
         store.seedDefaultsIfEmpty()
-        assertEquals("seedDefaultsIfEmpty must be idempotent", seededCount, store.bubbles.value.size)
+        assertEquals("seedDefaultsIfEmpty must remain idempotent and empty", 0, store.bubbles.value.size)
 
         val added = store.addBubble(factKo = "음식은 덜 맵게 먹는 편이에요", category = "food", emoji = "🍜")
         assertNotNull(added)
@@ -124,12 +126,12 @@ class HumanFirstConvenienceTest {
         assertFalse(store.toggleBubble("non_existent_id"))
 
         val reloaded = HumanMemoryBubblesStore(file)
-        assertEquals(seededCount + 1, reloaded.bubbles.value.size)
+        assertEquals(1, reloaded.bubbles.value.size)
         assertTrue(reloaded.bubbles.value.any { it.factKo == "음식은 덜 맵게 먹는 편이에요" })
 
         assertTrue(reloaded.removeBubble(added.id))
         assertFalse(reloaded.removeBubble(added.id))
-        assertEquals(seededCount, reloaded.bubbles.value.size)
+        assertEquals(0, reloaded.bubbles.value.size)
 
         reloaded.clearAll()
         assertTrue(reloaded.bubbles.value.isEmpty())
@@ -146,26 +148,25 @@ class HumanFirstConvenienceTest {
         assertTrue(b1!!.factKo.contains("아이스 아메리카노"))
         assertEquals("FOOD", b1.category)
 
-        val b2 = store.extractAndLearnFromUserUtterance("내 취향은 조용한 창가 자리야")
+        val b2 = store.extractAndLearnFromUserUtterance("조용한 창가 자리를 취향으로 저장해줘")
         assertNotNull(b2)
         assertTrue(b2!!.factKo.contains("조용한 창가 자리"))
 
-        val b3 = store.extractAndLearnFromUserUtterance("나는 저자극 식단을 선호해")
+        val b3 = store.extractAndLearnFromUserUtterance("집 주소는 서울 성동구 왕십리로 125 기억해둬")
         assertNotNull(b3)
-        assertTrue(b3!!.factKo.contains("선호해"))
+        assertEquals("PLACE", b3!!.category)
 
-        val b4 = store.extractAndLearnFromUserUtterance("나는 땅콩이랑 고수는 못 먹어")
+        val b4 = store.extractAndLearnFromUserUtterance("선호 시간은 평일 오후 4시 이후 외워줘")
         assertNotNull(b4)
-        assertEquals("FOOD", b4!!.category)
+        assertEquals("TIME", b4!!.category)
 
-        val b5 = store.extractAndLearnFromUserUtterance("집 주소는 서울 성동구 왕십리로 125")
+        val b5 = store.extractAndLearnFromUserUtterance("땅콩이랑 고수는 못 먹는 편 기억 버블에 추가해줘")
         assertNotNull(b5)
-        assertEquals("PLACE", b5!!.category)
+        assertEquals("FOOD", b5!!.category)
 
-        val b6 = store.extractAndLearnFromUserUtterance("선호 시간은 평일 오후 4시 이후")
-        assertNotNull(b6)
-        assertEquals("TIME", b6!!.category)
-
+        // Non-explicit utterances & knowledge questions MUST NEVER be speculatively saved as memory bubbles
+        assertNull(store.extractAndLearnFromUserUtterance("땅콩 알레르기 증상 알려줘"))
+        assertNull(store.extractAndLearnFromUserUtterance("내 취향은 조용한 창가 자리야"))
         assertNull(store.extractAndLearnFromUserUtterance("유튜브에서 음악 틀어줘"))
         assertNull(store.extractAndLearnFromUserUtterance("오늘 날씨 어때?"))
     }
@@ -445,14 +446,13 @@ class HumanFirstConvenienceTest {
     }
 
     @Test
-    fun artemisAligner_autoBindsInputTextByFocusedThenSearchChatThenTopEditable() {
+    fun artemisAligner_isPurelyAdvisoryAndNeverMutatesInputTextArgs() {
         val topPlainEdit = makeEl(0, shortClass = "EditText", text = "", resourceId = "memo_box", editable = true, focused = false, top = 120)
         val searchEdit = makeEl(1, shortClass = "EditText", text = "검색어 입력", resourceId = "search_input", editable = true, focused = false, top = 400)
         val focusedEdit = makeEl(2, shortClass = "EditText", text = "", resourceId = "reply_box", editable = true, focused = true, top = 1800)
         val nonEditableBtn = makeEl(3, shortClass = "Button", text = "확인", editable = false, clickable = true, top = 1950)
         val ownHansonEdit = makeEl(4, shortClass = "EditText", packageName = "com.hanson.mobileuse", editable = true, focused = true, top = 50)
 
-        // 1. Missing index -> picks focused external node (2), ignoring own Hanson node (4)
         val snapWithFocus = makeSnap("com.kakao.talk", elements = listOf(ownHansonEdit, topPlainEdit, searchEdit, focusedEdit, nonEditableBtn))
         val r1 = ArtemisDeliberativeAligner.alignBeforeExecution(
             toolName = "input_text",
@@ -461,34 +461,22 @@ class HumanFirstConvenienceTest {
             snapshot = snapWithFocus,
             iteration = 1
         )
-        assertTrue(r1.wasCorrected)
-        assertEquals(2, r1.alignedArgs.getInt("element_index"))
+        assertFalse("Advisory aligner must NEVER mutate input_text args", r1.wasCorrected)
+        assertFalse("Must not inject element_index when omitted by VLM", r1.alignedArgs.has("element_index"))
+        assertEquals("안녕하세요", r1.alignedArgs.getString("text"))
+        assertTrue(r1.appTipKo.contains("카카오톡"))
 
-        // 2. Non-editable index (3) and no focused node -> picks search/chat node (1) over top plain node (0)
-        val unfocusedSearch = searchEdit.copy(focused = false)
-        val snapNoFocus = makeSnap("com.kakao.talk", elements = listOf(topPlainEdit, unfocusedSearch, nonEditableBtn))
-        val r2 = ArtemisDeliberativeAligner.alignBeforeExecution(
+        // Explicit index pointing at own Hanson UI produces advisory warning without mutating args
+        val rOwn = ArtemisDeliberativeAligner.alignBeforeExecution(
             toolName = "input_text",
-            args = JSONObject().put("element_index", 3).put("text", "족발"),
+            args = JSONObject().put("element_index", 4).put("text", "족발"),
             thoughtOrReply = "검색합니다",
-            snapshot = snapNoFocus,
+            snapshot = snapWithFocus,
             iteration = 1
         )
-        assertTrue(r2.wasCorrected)
-        assertEquals(1, r2.alignedArgs.getInt("element_index"))
-
-        // 3. Invalid index (99) and no search/chat hints -> picks top editable node (0)
-        val bottomEdit = makeEl(5, shortClass = "EditText", resourceId = "other_box", editable = true, focused = false, top = 900)
-        val snapTopFallback = makeSnap("com.sample.app", elements = listOf(bottomEdit, topPlainEdit))
-        val r3 = ArtemisDeliberativeAligner.alignBeforeExecution(
-            toolName = "input_text",
-            args = JSONObject().put("element_index", 99).put("text", "hello"),
-            thoughtOrReply = "",
-            snapshot = snapTopFallback,
-            iteration = 2
-        )
-        assertTrue(r3.wasCorrected)
-        assertEquals(0, r3.alignedArgs.getInt("element_index"))
+        assertFalse(rOwn.wasCorrected)
+        assertEquals(4, rOwn.alignedArgs.getInt("element_index"))
+        assertTrue("Expected advisory warning for Hanson own element", rOwn.advisoryWarningKo.isNotBlank())
     }
 
     @Test
@@ -507,28 +495,41 @@ class HumanFirstConvenienceTest {
         )
         assertFalse(res.wasCorrected)
         assertEquals(1, res.alignedArgs.getInt("element_index"))
+        assertEquals("", res.advisoryWarningKo)
     }
 
     @Test
-    fun artemisAligner_rebindsSemanticClickAcrossMismatchMissingInvalidAndOwnPackage() {
+    fun artemisAligner_neverMutatesVlmClickCoordinatesOrElementIndex() {
         val ownHansonBubble = makeEl(0, text = "전송", packageName = "com.hanson.mobileuse", clickable = true)
         val cancelBtn = makeEl(1, text = "취소", clickable = true)
         val sendBtn = makeEl(2, text = "전송", contentDesc = "메시지 전송", clickable = true)
-        val searchIcon = makeEl(3, text = "", contentDesc = "검색", clickable = true)
-        val snap = makeSnap("com.kakao.talk", elements = listOf(ownHansonBubble, cancelBtn, sendBtn, searchIcon))
+        val snap = makeSnap("com.kakao.talk", elements = listOf(ownHansonBubble, cancelBtn, sendBtn))
 
-        // 1. Mismatched index (1="취소") with single quotes
-        val rMismatch = ArtemisDeliberativeAligner.alignBeforeExecution(
+        // 1. VLM element_index is preserved verbatim
+        val rIndex = ArtemisDeliberativeAligner.alignBeforeExecution(
             toolName = "click",
             args = JSONObject().put("element_index", 1),
             thoughtOrReply = "이제 '전송' 버튼을 눌러 보낼게요.",
             snapshot = snap,
             iteration = 2
         )
-        assertTrue(rMismatch.wasCorrected)
-        assertEquals(2, rMismatch.alignedArgs.getInt("element_index"))
+        assertFalse(rIndex.wasCorrected)
+        assertEquals(1, rIndex.alignedArgs.getInt("element_index"))
 
-        // 2. Hanson own package element (0) selected -> rebinds to external element (2)
+        // 2. VLM norm_x / norm_y coordinates are preserved verbatim
+        val rCoords = ArtemisDeliberativeAligner.alignBeforeExecution(
+            toolName = "click",
+            args = JSONObject().put("norm_x", 412).put("norm_y", 778).put("target_description", "전송"),
+            thoughtOrReply = "'전송' 버튼을 누릅니다",
+            snapshot = snap,
+            iteration = 2
+        )
+        assertFalse(rCoords.wasCorrected)
+        assertEquals(412, rCoords.alignedArgs.getInt("norm_x"))
+        assertEquals(778, rCoords.alignedArgs.getInt("norm_y"))
+        assertFalse(rCoords.alignedArgs.has("element_index"))
+
+        // 3. Hanson own package element emits advisory warning without mutating args
         val rOwnPkg = ArtemisDeliberativeAligner.alignBeforeExecution(
             toolName = "click",
             args = JSONObject().put("element_index", 0),
@@ -536,47 +537,27 @@ class HumanFirstConvenienceTest {
             snapshot = snap,
             iteration = 2
         )
-        assertTrue(rOwnPkg.wasCorrected)
-        assertEquals(2, rOwnPkg.alignedArgs.getInt("element_index"))
-
-        // 3. Missing element_index with unquoted "<label> 아이콘"
-        val rMissing = ArtemisDeliberativeAligner.alignBeforeExecution(
-            toolName = "click",
-            args = JSONObject().put("target_description", "검색"),
-            thoughtOrReply = "상단의 검색 아이콘을 탭합니다.",
-            snapshot = snap,
-            iteration = 1
-        )
-        assertTrue(rMissing.wasCorrected)
-        assertEquals(3, rMissing.alignedArgs.getInt("element_index"))
-
-        // 4. Invalid out-of-range index
-        val rInvalid = ArtemisDeliberativeAligner.alignBeforeExecution(
-            toolName = "click",
-            args = JSONObject().put("element_index", 77),
-            thoughtOrReply = "취소 버튼을 눌러 돌아갑니다.",
-            snapshot = snap,
-            iteration = 3
-        )
-        assertTrue(rInvalid.wasCorrected)
-        assertEquals(1, rInvalid.alignedArgs.getInt("element_index"))
+        assertFalse(rOwnPkg.wasCorrected)
+        assertEquals(0, rOwnPkg.alignedArgs.getInt("element_index"))
+        assertTrue(rOwnPkg.advisoryWarningKo.contains("Hanson"))
     }
 
     @Test
-    fun artemisAligner_doesNotRebindToDisabledOrAlreadyMatchingClick() {
+    fun artemisAligner_emitsAdvisoryWarningOnDisabledElementWithoutMutatingClick() {
         val disabledTarget = makeEl(0, text = "결제", clickable = true, enabled = false)
         val okBtn = makeEl(1, text = "확인", clickable = true, enabled = true)
         val snap = makeSnap("com.sampleapp", elements = listOf(disabledTarget, okBtn))
 
         val rDisabled = ArtemisDeliberativeAligner.alignBeforeExecution(
             toolName = "click",
-            args = JSONObject().put("element_index", 1),
+            args = JSONObject().put("element_index", 0),
             thoughtOrReply = "'결제' 버튼을 누릅니다",
             snapshot = snap,
             iteration = 2
         )
-        assertFalse("Disabled candidate must not be selected", rDisabled.wasCorrected)
-        assertEquals(1, rDisabled.alignedArgs.getInt("element_index"))
+        assertFalse(rDisabled.wasCorrected)
+        assertEquals(0, rDisabled.alignedArgs.getInt("element_index"))
+        assertTrue("Disabled element should emit advisory warning", rDisabled.advisoryWarningKo.contains("비활성화"))
 
         val rClean = ArtemisDeliberativeAligner.alignBeforeExecution(
             toolName = "click",
@@ -587,10 +568,11 @@ class HumanFirstConvenienceTest {
         )
         assertFalse(rClean.wasCorrected)
         assertEquals(1, rClean.alignedArgs.getInt("element_index"))
+        assertEquals("", rClean.advisoryWarningKo)
     }
 
     @Test
-    fun artemisAligner_convertsStep1HomePressInTargetAppToWait600ms() {
+    fun artemisAligner_warnsOnStep1HomePressInTargetAppWithoutMutatingTool() {
         val targetSnap = makeSnap("com.kakao.talk", elements = listOf(makeEl(0, text = "채팅")))
         val step1 = ArtemisDeliberativeAligner.alignBeforeExecution(
             toolName = "press_key",
@@ -599,13 +581,13 @@ class HumanFirstConvenienceTest {
             snapshot = targetSnap,
             iteration = 1
         )
-        assertTrue(step1.wasCorrected)
-        assertEquals("wait_for_delay", step1.toolName)
-        assertEquals(600, step1.alignedArgs.getInt("duration_ms"))
-        assertEquals(600, step1.alignedArgs.getInt("time_in_ms"))
+        assertFalse("Advisory aligner must never rewrite toolName or args", step1.wasCorrected)
+        assertEquals("press_key", step1.toolName)
+        assertEquals("HOME", step1.alignedArgs.getString("key"))
         assertTrue(step1.appTipKo.contains("카카오톡"))
+        assertTrue("Expected advisory warning for step-1 HOME in external app", step1.advisoryWarningKo.contains("HOME"))
 
-        // Iteration 2 is NOT blocked
+        // Iteration 2 does not trigger step-1 HOME advisory warning
         val step2 = ArtemisDeliberativeAligner.alignBeforeExecution(
             toolName = "press_key",
             args = JSONObject().put("key", "HOME"),
@@ -615,8 +597,9 @@ class HumanFirstConvenienceTest {
         )
         assertFalse(step2.wasCorrected)
         assertEquals("press_key", step2.toolName)
+        assertEquals("", step2.advisoryWarningKo)
 
-        // Own Hanson app is NOT blocked
+        // Own Hanson app does not trigger step-1 HOME advisory warning
         val hansonSnap = makeSnap("com.hanson.mobileuse", elements = emptyList())
         val ownStep1 = ArtemisDeliberativeAligner.alignBeforeExecution(
             toolName = "press_key",
@@ -627,6 +610,7 @@ class HumanFirstConvenienceTest {
         )
         assertFalse(ownStep1.wasCorrected)
         assertEquals("press_key", ownStep1.toolName)
+        assertEquals("", ownStep1.advisoryWarningKo)
     }
 
     // =========================================================================

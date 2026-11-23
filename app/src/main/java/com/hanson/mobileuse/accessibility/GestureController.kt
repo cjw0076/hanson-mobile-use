@@ -8,6 +8,9 @@ import android.content.Context
 import android.graphics.Path
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.HandlerThread
+import android.os.Looper
 import android.util.Log
 import android.view.accessibility.AccessibilityNodeInfo
 import java.util.concurrent.CountDownLatch
@@ -22,6 +25,18 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 object GestureController {
     private const val TAG = "GestureController"
+
+    private val gestureCallbackHandler: Handler? by lazy {
+        try {
+            val thread = HandlerThread("Hanson-GestureCallback").apply {
+                isDaemon = true
+                start()
+            }
+            thread.looper?.let { Handler(it) }
+        } catch (_: Throwable) {
+            null
+        }
+    }
 
     fun tap(service: AccessibilityService, x: Float, y: Float, durationMs: Long = 60L): Boolean {
         val path = Path().apply { moveTo(x.coerceAtLeast(0f), y.coerceAtLeast(0f)) }
@@ -260,6 +275,25 @@ object GestureController {
     }
 
     fun setClipboard(service: AccessibilityService, text: String): Boolean {
+        val isMain = try {
+            Looper.myLooper() != null && Looper.myLooper() == Looper.getMainLooper()
+        } catch (_: Throwable) {
+            false
+        }
+        if (isMain) {
+            return try {
+                val cm = service.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                if (cm != null) {
+                    cm.setPrimaryClip(ClipData.newPlainText("hanson_mobile_use", text))
+                    true
+                } else {
+                    false
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Clipboard set error", e)
+                false
+            }
+        }
         val latch = CountDownLatch(1)
         val ok = AtomicBoolean(false)
         service.mainExecutor.execute {
@@ -278,6 +312,7 @@ object GestureController {
         return try {
             latch.await(2, TimeUnit.SECONDS) && ok.get()
         } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
             false
         }
     }
@@ -346,6 +381,7 @@ object GestureController {
     private fun dispatch(service: AccessibilityService, gesture: GestureDescription): Boolean {
         val latch = CountDownLatch(1)
         val success = AtomicBoolean(false)
+        val callbackHandler = gestureCallbackHandler
         val dispatched = service.dispatchGesture(
             gesture,
             object : AccessibilityService.GestureResultCallback() {
@@ -360,7 +396,7 @@ object GestureController {
                     latch.countDown()
                 }
             },
-            null
+            callbackHandler
         )
         if (!dispatched) return false
         return try {

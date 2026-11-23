@@ -42,8 +42,8 @@ android {
         applicationId = "com.hanson.mobileuse"
         minSdk = 31
         targetSdk = 35
-        versionCode = 4
-        versionName = "3.1.0"
+        versionCode = 6
+        versionName = "6.2.0"
 
         buildConfigField("String", "GEMINI_API_KEY", "\"$escapedGeminiApiKey\"")
 
@@ -86,6 +86,8 @@ android {
             versionNameSuffix = "-debug"
         }
         release {
+            // Security invariant: public release APKs must NEVER embed local developer API keys.
+            buildConfigField("String", "GEMINI_API_KEY", "\"\"")
             isMinifyEnabled = false
             val releaseSigning = signingConfigs.getByName("release")
             if (releaseSigning.storeFile != null) {

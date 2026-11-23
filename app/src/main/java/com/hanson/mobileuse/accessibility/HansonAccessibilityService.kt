@@ -2,12 +2,15 @@ package com.hanson.mobileuse.accessibility
 
 import android.accessibilityservice.AccessibilityService
 import android.content.Intent
+import android.os.Build
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityWindowInfo
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import java.util.concurrent.atomic.AtomicLong
 
 data class BridgeTrafficEntry(
     val timestampMs: Long = System.currentTimeMillis(),
@@ -40,6 +43,8 @@ class HansonAccessibilityService : AccessibilityService() {
         @Volatile
         var instance: HansonAccessibilityService? = null
 
+        val uiChangeCounter = AtomicLong(0L)
+
         private val _engineState = MutableStateFlow(AccessibilityEngineState())
         val engineState: StateFlow<AccessibilityEngineState> = _engineState.asStateFlow()
 
@@ -49,6 +54,9 @@ class HansonAccessibilityService : AccessibilityService() {
             return com.hanson.mobileuse.service.HansonForegroundService.initiateAccessibilitySelfHealing(context)
         }
     }
+
+    val uiChangeCounter: AtomicLong
+        get() = Companion.uiChangeCounter
 
     private var commandServer: ArtemisCommandServer? = null
 
@@ -91,11 +99,22 @@ class HansonAccessibilityService : AccessibilityService() {
         if (event == null) return
         val pkg = event.packageName?.toString().orEmpty()
         val cls = event.className?.toString().orEmpty()
+        val isChromeOrEdge = HierarchyDumper.isSystemChromeOrEdgePackage(pkg)
+
+        if (!isChromeOrEdge && (
+                event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+                    event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED ||
+                    event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED ||
+                    event.eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED
+                )
+        ) {
+            Companion.uiChangeCounter.incrementAndGet()
+        }
 
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
             event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED
         ) {
-            if (pkg.isNotBlank()) {
+            if (pkg.isNotBlank() && !isChromeOrEdge && isApplicationWindowForEvent(event, pkg)) {
                 _engineState.update {
                     it.copy(
                         activePackage = pkg,
@@ -172,6 +191,43 @@ class HansonAccessibilityService : AccessibilityService() {
         _engineState.update { it.copy(bridgeRequireToken = enabled) }
     }
 
+    private fun isApplicationWindowForEvent(event: AccessibilityEvent, pkg: String): Boolean {
+        try {
+            val srcWin = event.source?.window
+            if (srcWin != null) {
+                val title = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    srcWin.title?.toString().orEmpty()
+                } else ""
+                if (HierarchyDumper.isSystemChromeOrEdgePackage(pkg, title) ||
+                    HierarchyDumper.isFloatingHudTitle(title)
+                ) {
+                    return false
+                }
+                return srcWin.type == AccessibilityWindowInfo.TYPE_APPLICATION
+            }
+        } catch (_: Throwable) {
+        }
+        val winId = event.windowId
+        if (winId >= 0) {
+            try {
+                val matched = windows?.firstOrNull { it.id == winId }
+                if (matched != null) {
+                    val title = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                        matched.title?.toString().orEmpty()
+                    } else ""
+                    if (HierarchyDumper.isSystemChromeOrEdgePackage(pkg, title) ||
+                        HierarchyDumper.isFloatingHudTitle(title)
+                    ) {
+                        return false
+                    }
+                    return matched.type == AccessibilityWindowInfo.TYPE_APPLICATION
+                }
+            } catch (_: Throwable) {
+            }
+        }
+        return false
+    }
+
     fun captureSnapshotNow(includeScreenshot: Boolean = true): AtomicSnapshot {
         val snap = HierarchyDumper.captureAtomicSnapshot(
             service = this,
@@ -179,9 +235,12 @@ class HansonAccessibilityService : AccessibilityService() {
             filterInvisible = true
         )
         _engineState.update {
+            val nextPkg = snap.activePackage.takeIf { p ->
+                p.isNotBlank() && !HierarchyDumper.isSystemChromeOrEdgePackage(p)
+            }
             it.copy(
                 latestSnapshot = snap,
-                activePackage = snap.activePackage.ifBlank { it.activePackage }
+                activePackage = nextPkg ?: it.activePackage
             )
         }
         return snap

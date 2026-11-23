@@ -137,18 +137,17 @@ class HumanMemoryBubblesStore @JvmOverloads constructor(
         private const val BUBBLES_FILE_NAME = "hanson_memory_bubbles.json"
         private const val MAX_BUBBLES = 50
         private val EXPLICIT_LEADING_TRIGGERS = Regex(
-            "^(?:꼭\\s*)?(?:기억해\\s*줘|기억해\\s*둬|기억해|외워\\s*둬|외워\\s*줘|메모해\\s*줘|메모해\\s*둬)\\s*[:：-]?\\s*"
+            "^(?:꼭\\s*)?(?:기억해\\s*줘|기억해\\s*둬|기억해\\s*주세요|기억해|외워\\s*둬|외워\\s*줘|외워\\s*주세요)\\s*[:：-]?\\s*"
         )
         private val EXPLICIT_TRAILING_TRIGGERS = Regex(
-            "\\s*(?:꼭\\s*)?(?:기억해\\s*줘|기억해\\s*둬|외워\\s*둬|외워\\s*줘)\\s*[.!?~]*$"
+            "\\s*(?:꼭\\s*)?(?:기억해\\s*줘|기억해\\s*둬|기억해\\s*주세요|외워\\s*둬|외워\\s*줘|외워\\s*주세요|기억\\s*버블에\\s*(?:추가|저장|등록)(?:해\\s*줘|해줘)?|취향으로\\s*(?:추가|저장|등록)(?:해\\s*줘|해줘)?)\\s*[.!?~]*$"
         )
-        private val PREFERENCE_DETECTION_PATTERNS = listOf(
-            Regex("(?:기억해\\s*줘|기억해\\s*둬|외워\\s*둬|메모해\\s*줘)"),
-            Regex("(?:내|제)\\s*취향은"),
-            Regex("(?:집|우리\\s*집|회사)\\s*주소는"),
-            Regex("선호\\s*(?:하는\\s*)?시간은"),
-            Regex("(?:나는|난|저는|제가)\\s+.{2,64}?(?:선호해|선호해요|선호합니다|좋아해|좋아해요|좋아합니다|못\\s*먹어|못먹어|못\\s*먹어요|안\\s*먹어|안먹어요|즐겨\\s*마셔|자주\\s*시켜)"),
-            Regex("(?:못\\s*먹어|못먹어|못\\s*먹어요|알레르기(?:가|는|라)?)")
+        // Only learn personal preferences when the user issues an explicit memory-save command.
+        // Never speculatively regex-learn facts or allergies from arbitrary knowledge questions
+        // (e.g., "땅콩 알레르기 증상").
+        private val EXPLICIT_MEMORY_SAVE_PATTERNS = listOf(
+            Regex("(?:꼭\\s*)?(?:기억해\\s*줘|기억해\\s*둬|기억해\\s*주세요|외워\\s*둬|외워\\s*줘|외워\\s*주세요)"),
+            Regex("(?:기억\\s*버블에|취향으로)\\s*(?:추가|저장|등록)")
         )
     }
 
@@ -282,39 +281,13 @@ class HumanMemoryBubblesStore @JvmOverloads constructor(
         }
     }
 
+    /**
+     * Kept as an idempotent no-op by default so personal memory bubbles stay empty until the
+     * user explicitly selects bubbles in onboarding or adds them directly.
+     * Does NOT auto-seed default tone, coffee, or commute bubbles.
+     */
     fun seedDefaultsIfEmpty() {
         synchronized(lock) {
-            if (bubbleList.isNotEmpty()) return
-            val now = System.currentTimeMillis()
-            bubbleList.addAll(
-                listOf(
-                    HumanMemoryBubble(
-                        id = "seed_coffee",
-                        emoji = "☕",
-                        category = "FOOD",
-                        factKo = "커피는 아이스 아메리카노를 주로 선호해요",
-                        enabled = true,
-                        updatedAtMs = now
-                    ),
-                    HumanMemoryBubble(
-                        id = "seed_route",
-                        emoji = "🚇",
-                        category = "PLACE",
-                        factKo = "이동 경로는 환승이 적은 편한 경로를 선호해요",
-                        enabled = true,
-                        updatedAtMs = now - 1L
-                    ),
-                    HumanMemoryBubble(
-                        id = "seed_tone",
-                        emoji = "💬",
-                        category = "STYLE",
-                        factKo = "답장이나 요약은 짧고 다정한 한국어로 정리해 주세요",
-                        enabled = true,
-                        updatedAtMs = now - 2L
-                    )
-                )
-            )
-            saveToDiskLocked()
             _bubbles.value = bubbleList.toList()
         }
     }
@@ -327,7 +300,7 @@ class HumanMemoryBubblesStore @JvmOverloads constructor(
         if (trimmed.isEmpty()) return null
         if (ConvenienceSecretGuard.containsSensitiveSecret(trimmed, vault)) return null
 
-        val matchesExplicitCue = PREFERENCE_DETECTION_PATTERNS.any { it.containsMatchIn(trimmed) }
+        val matchesExplicitCue = EXPLICIT_MEMORY_SAVE_PATTERNS.any { it.containsMatchIn(trimmed) }
         if (!matchesExplicitCue) return null
 
         val cleanedFact = trimmed
@@ -335,13 +308,18 @@ class HumanMemoryBubblesStore @JvmOverloads constructor(
             .replace(EXPLICIT_TRAILING_TRIGGERS, "")
             .trim()
         if (cleanedFact.length < 2) return null
+        if (cleanedFact.endsWith("?")) return null
         if (ConvenienceSecretGuard.containsSensitiveSecret(cleanedFact, vault)) return null
 
         val (category, emoji) = inferCategoryAndEmoji(cleanedFact)
         return addBubble(factKo = cleanedFact, category = category, emoji = emoji)
     }
 
-    fun toPromptContextBlock(
+    /**
+     * Formats active memory bubbles cleanly for **system prompt** injection ONLY.
+     * Callers MUST pass this via system instructions and NEVER concatenate it into `userGoal`.
+     */
+    fun formatBubblesForSystemPrompt(
         vault: BlindCredentialVault? = null,
         maxItems: Int = 8
     ): String {
@@ -366,6 +344,15 @@ class HumanMemoryBubblesStore @JvmOverloads constructor(
             lines.forEach { appendLine(it) }
         }.trim()
     }
+
+    /**
+     * Backward-compatible alias for [formatBubblesForSystemPrompt].
+     * For system-prompt injection only — NEVER concatenate into `userGoal`.
+     */
+    fun toPromptContextBlock(
+        vault: BlindCredentialVault? = null,
+        maxItems: Int = 8
+    ): String = formatBubblesForSystemPrompt(vault = vault, maxItems = maxItems)
 
     private fun inferCategoryAndEmoji(fact: String): Pair<String, String> {
         val lower = fact.lowercase(Locale.ROOT)
@@ -854,23 +841,20 @@ data class ArtemisAlignmentResult(
     val alignedArgs: JSONObject,
     val wasCorrected: Boolean = false,
     val correctionReasonKo: String = "",
-    val appTipKo: String = ""
+    val appTipKo: String = "",
+    val advisoryWarningKo: String = ""
 )
 
+/**
+ * Purely advisory / safety-check inspector for VLM tool calls.
+ *
+ * INVARIANT (B2): NEVER mutates or overwrites VLM-chosen `element_index`, `x`, `y`,
+ * `norm_x`, or `norm_y` click/input coordinates. Always returns `wasCorrected = false`
+ * with an untouched copy of `args`, attaching only contextual tips and advisory safety warnings.
+ */
 object ArtemisDeliberativeAligner {
 
     private const val HANSON_PACKAGE_PREFIX = "com.hanson.mobileuse"
-    private val QUOTED_LABEL_REGEX = Regex("['\"‘“]([^'\"‘“’”]{1,40})['\"’”]")
-    private val SUFFIX_LABEL_REGEX = Regex(
-        "((?:[가-힣A-Za-z0-9_+\\-·]{1,20}\\s+)?[가-힣A-Za-z0-9_+\\-·]{1,20})\\s*(?:버튼|탭|아이콘|메뉴|항목)"
-    )
-    private val SEARCH_OR_CHAT_HINTS = listOf(
-        "검색", "search", "query", "입력", "메시지", "채팅", "chat", "message", "msg", "comment", "댓글", "url", "주소"
-    )
-    private val PARTICLE_SUFFIX_REGEX = Regex("(?:을|를|이|가|은|는|의|에|로|으로)$")
-    private val LEADING_NOISE_WORDS = setOf(
-        "이제", "먼저", "일단", "상단", "상단의", "하단", "하단의", "오른쪽", "왼쪽", "화면의", "해당", "그", "이", "저", "다음에"
-    )
 
     fun alignBeforeExecution(
         toolName: String,
@@ -879,277 +863,60 @@ object ArtemisDeliberativeAligner {
         snapshot: AtomicSnapshot?,
         iteration: Int
     ): ArtemisAlignmentResult {
-        val clonedArgs = JSONObject(args.toString())
+        val untouchedArgs = JSONObject(args.toString())
         val appTip = AppSpecificTipBank.getTipForPackageOrGoal(
             activePackage = snapshot?.activePackage.orEmpty(),
             goal = thoughtOrReply
         )
 
-        // (c) Step-1 premature press_key("HOME") escape guard inside non-Hanson target app
+        val advisoryWarning = buildAdvisorySafetyWarning(
+            toolName = toolName,
+            args = untouchedArgs,
+            snapshot = snapshot,
+            iteration = iteration
+        )
+
+        return ArtemisAlignmentResult(
+            toolName = toolName,
+            alignedArgs = untouchedArgs,
+            wasCorrected = false,
+            correctionReasonKo = "",
+            appTipKo = appTip,
+            advisoryWarningKo = advisoryWarning
+        )
+    }
+
+    private fun buildAdvisorySafetyWarning(
+        toolName: String,
+        args: JSONObject,
+        snapshot: AtomicSnapshot?,
+        iteration: Int
+    ): String {
+        if (snapshot == null) return ""
+
         if (iteration == 1 &&
             toolName == "press_key" &&
-            clonedArgs.optString("key", "").trim().equals("HOME", ignoreCase = true) &&
-            snapshot != null &&
+            args.optString("key", "").trim().equals("HOME", ignoreCase = true) &&
             snapshot.activePackage.isNotBlank() &&
             !snapshot.activePackage.startsWith(HANSON_PACKAGE_PREFIX)
         ) {
-            val waitArgs = JSONObject().apply {
-                put("duration_ms", 600)
-                put("time_in_ms", 600)
+            return "참고: 첫 단계에서 현재 외부 앱(${snapshot.activePackage})을 벗어나는 HOME 입력이 요청되었습니다."
+        }
+
+        if ((toolName == "click" || toolName == "long_press" || toolName == "input_text") &&
+            args.has("element_index")
+        ) {
+            val rawIndex = args.optInt("element_index", -1)
+            val selectedEl = snapshot.indexedElements.firstOrNull { it.index == rawIndex }
+            if (selectedEl != null && isOwnElement(selectedEl)) {
+                return "안전 참고: 선택된 요소 [$rawIndex]가 Hanson 자체 UI 또는 Edge 패널에 속합니다."
             }
-            return ArtemisAlignmentResult(
-                toolName = "wait_for_delay",
-                alignedArgs = waitArgs,
-                wasCorrected = true,
-                correctionReasonKo = "첫 단계에서 현재 앱(${snapshot.activePackage})을 바로 벗어나지 않도록 잠시 대기 후 화면을 다시 확인해요.",
-                appTipKo = appTip
-            )
-        }
-
-        if (snapshot == null || snapshot.indexedElements.isEmpty()) {
-            return ArtemisAlignmentResult(
-                toolName = toolName,
-                alignedArgs = clonedArgs,
-                wasCorrected = false,
-                appTipKo = appTip
-            )
-        }
-
-        // (a) ACA unfocused input_text auto-bind to best editable node
-        if (toolName == "input_text") {
-            return alignInputText(toolName, clonedArgs, snapshot, appTip)
-        }
-
-        // (b) TAC + ACA semantic click rebind
-        if (toolName == "click" || toolName == "long_press") {
-            return alignSemanticClick(toolName, clonedArgs, thoughtOrReply, snapshot, appTip)
-        }
-
-        return ArtemisAlignmentResult(
-            toolName = toolName,
-            alignedArgs = clonedArgs,
-            wasCorrected = false,
-            appTipKo = appTip
-        )
-    }
-
-    private fun alignInputText(
-        toolName: String,
-        args: JSONObject,
-        snapshot: AtomicSnapshot,
-        appTip: String
-    ): ArtemisAlignmentResult {
-        val hasIndex = args.has("element_index")
-        val rawIndex = if (hasIndex) args.optInt("element_index", -1) else -1
-        val currentEl = if (hasIndex && rawIndex >= 0) {
-            snapshot.indexedElements.firstOrNull { it.index == rawIndex }
-        } else null
-
-        val currentIsValidEditable = currentEl != null &&
-            currentEl.editable &&
-            currentEl.enabled &&
-            !isOwnElement(currentEl)
-
-        if (currentIsValidEditable) {
-            return ArtemisAlignmentResult(
-                toolName = toolName,
-                alignedArgs = args,
-                wasCorrected = false,
-                appTipKo = appTip
-            )
-        }
-
-        val bestEditable = snapshot.indexedElements
-            .filter { el ->
-                el.enabled &&
-                    !isOwnElement(el) &&
-                    (el.editable || el.shortClass.contains("EditText", ignoreCase = true))
-            }
-            .sortedWith(
-                compareByDescending<IndexedUiElement> { it.editable }
-                    .thenByDescending { it.focused }
-                    .thenByDescending { hasSearchOrChatHint(it) }
-                    .thenBy { it.top }
-                    .thenBy { it.index }
-            )
-            .firstOrNull()
-
-        if (bestEditable == null) {
-            return ArtemisAlignmentResult(
-                toolName = toolName,
-                alignedArgs = args,
-                wasCorrected = false,
-                appTipKo = appTip
-            )
-        }
-
-        args.put("element_index", bestEditable.index)
-        args.put("norm_x", bestEditable.normX)
-        args.put("norm_y", bestEditable.normY)
-        return ArtemisAlignmentResult(
-            toolName = toolName,
-            alignedArgs = args,
-            wasCorrected = true,
-            correctionReasonKo = "입력할 수 있는 입력창 [${bestEditable.index}]을 자동으로 찾아 연결했어요.",
-            appTipKo = appTip
-        )
-    }
-
-    private fun alignSemanticClick(
-        toolName: String,
-        args: JSONObject,
-        thoughtOrReply: String,
-        snapshot: AtomicSnapshot,
-        appTip: String
-    ): ArtemisAlignmentResult {
-        val candidateQueries = extractClickLabelQueries(thoughtOrReply)
-        if (candidateQueries.isEmpty()) {
-            return ArtemisAlignmentResult(
-                toolName = toolName,
-                alignedArgs = args,
-                wasCorrected = false,
-                appTipKo = appTip
-            )
-        }
-
-        val hasIndex = args.has("element_index")
-        val rawIndex = if (hasIndex) args.optInt("element_index", -1) else -1
-        val selectedEl = if (hasIndex && rawIndex >= 0) {
-            snapshot.indexedElements.firstOrNull { it.index == rawIndex }
-        } else null
-
-        val selectedIsCleanMatch = selectedEl != null &&
-            selectedEl.enabled &&
-            !isOwnElement(selectedEl) &&
-            candidateQueries.any { q -> scoreElementAgainstQuery(selectedEl, q) >= 0.68 }
-
-        if (selectedIsCleanMatch) {
-            return ArtemisAlignmentResult(
-                toolName = toolName,
-                alignedArgs = args,
-                wasCorrected = false,
-                appTipKo = appTip
-            )
-        }
-
-        var bestCandidate: IndexedUiElement? = null
-        var bestQuery = ""
-        var bestScore = 0.0
-
-        for (query in candidateQueries) {
-            for (el in snapshot.indexedElements) {
-                if (!el.enabled || !el.clickable || isOwnElement(el)) continue
-                val score = scoreElementAgainstQuery(el, query)
-                if (score >= 0.68 && score > bestScore) {
-                    bestScore = score
-                    bestCandidate = el
-                    bestQuery = query
-                }
+            if (selectedEl != null && !selectedEl.enabled) {
+                return "참고: 선택된 요소 [$rawIndex]가 현재 비활성화 상태입니다."
             }
         }
 
-        if (bestCandidate == null || bestCandidate.index == rawIndex) {
-            return ArtemisAlignmentResult(
-                toolName = toolName,
-                alignedArgs = args,
-                wasCorrected = false,
-                appTipKo = appTip
-            )
-        }
-
-        args.put("element_index", bestCandidate.index)
-        args.put("norm_x", bestCandidate.normX)
-        args.put("norm_y", bestCandidate.normY)
-        if (args.optString("target_description", "").isBlank()) {
-            val bestLabel = bestCandidate.text.trim()
-                .ifBlank { bestCandidate.contentDesc.trim() }
-                .ifBlank { bestQuery }
-            args.put("target_description", bestLabel)
-        }
-
-        return ArtemisAlignmentResult(
-            toolName = toolName,
-            alignedArgs = args,
-            wasCorrected = true,
-            correctionReasonKo = "설명된 '$bestQuery' 요소 [${bestCandidate.index}]로 터치 대상을 정확히 맞췄어요.",
-            appTipKo = appTip
-        )
-    }
-
-    private fun extractClickLabelQueries(thoughtOrReply: String): List<String> {
-        if (thoughtOrReply.isBlank()) return emptyList()
-        val queries = mutableListOf<String>()
-
-        QUOTED_LABEL_REGEX.findAll(thoughtOrReply).forEach { m ->
-            val q = m.groupValues[1].trim()
-            if (q.isNotEmpty()) queries.add(q)
-        }
-        SUFFIX_LABEL_REGEX.findAll(thoughtOrReply).forEach { m ->
-            val raw = m.groupValues[1].trim()
-            if (raw.isNotEmpty()) {
-                val tokens = raw.split(Regex("\\s+")).filter { it.isNotBlank() }
-                val strippedTokens = if (tokens.size >= 2 && tokens.first() in LEADING_NOISE_WORDS) {
-                    tokens.drop(1)
-                } else {
-                    tokens
-                }
-                val phrase = strippedTokens.joinToString(" ")
-                if (phrase.isNotEmpty()) {
-                    queries.add(phrase)
-                    val withoutParticle = phrase.replace(PARTICLE_SUFFIX_REGEX, "").trim()
-                    if (withoutParticle.isNotEmpty() && withoutParticle != phrase) {
-                        queries.add(withoutParticle)
-                    }
-                }
-                val lastToken = strippedTokens.lastOrNull().orEmpty()
-                if (lastToken.isNotEmpty() && lastToken != phrase) {
-                    queries.add(lastToken)
-                    val lastNoParticle = lastToken.replace(PARTICLE_SUFFIX_REGEX, "").trim()
-                    if (lastNoParticle.isNotEmpty() && lastNoParticle != lastToken) {
-                        queries.add(lastNoParticle)
-                    }
-                }
-            }
-        }
-        return queries.distinct()
-    }
-
-    private fun scoreElementAgainstQuery(el: IndexedUiElement, query: String): Double {
-        val normQ = normalizeUiText(query)
-        if (normQ.isEmpty()) return 0.0
-
-        val candidates = listOf(
-            el.text.trim(),
-            el.contentDesc.trim(),
-            el.resourceId.substringAfterLast('/').trim()
-        ).filter { it.isNotEmpty() }
-
-        var best = 0.0
-        for ((idx, label) in candidates.withIndex()) {
-            val normL = normalizeUiText(label)
-            if (normL.isEmpty()) continue
-            val weightPenalty = if (idx == 2) 0.12 else 0.0
-            val baseScore = when {
-                normL == normQ -> 1.0
-                normL.contains(normQ) -> 0.90
-                normQ.contains(normL) && normL.length >= 2 -> 0.84
-                normQ.length >= 2 && normL.length >= 2 ->
-                    IntentDecomposerAndRouter.computeQueryToElementMatchScore(query, label)
-                else -> 0.0
-            }
-            val adjusted = (baseScore - weightPenalty).coerceAtLeast(0.0)
-            if (adjusted > best) best = adjusted
-        }
-        return best
-    }
-
-    private fun normalizeUiText(raw: String): String =
-        raw.lowercase(Locale.ROOT)
-            .replace(Regex("[\\s'\"`·•,\\-_.:;/\\\\()\\[\\]{}!?~]+"), "")
-
-    private fun hasSearchOrChatHint(el: IndexedUiElement): Boolean {
-        val combined = "${el.resourceId} ${el.contentDesc} ${el.text}".lowercase(Locale.ROOT)
-        return SEARCH_OR_CHAT_HINTS.any { combined.contains(it) }
+        return ""
     }
 
     private fun isOwnElement(el: IndexedUiElement): Boolean {

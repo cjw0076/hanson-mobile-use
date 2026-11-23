@@ -12,9 +12,8 @@ import com.hanson.mobileuse.agent.SubGoalStatus
 import com.hanson.mobileuse.agent.ToolSpecRegistry
 import com.hanson.mobileuse.notification.InterceptedNotification
 import com.hanson.mobileuse.notification.RemoteInputSessionCache
-import com.hanson.mobileuse.paradigm.WorldModelGraph
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -55,13 +54,16 @@ class MobileUseHarnessTest {
     @Test
     fun toolSpecRegistry_exposesAll24MobileUseToolsAndValidGeminiSchema() {
         val specs = ToolSpecRegistry.allSpecs
-        assertEquals(42, specs.size)
+        assertEquals(45, specs.size)
+        assertNotNull(ToolSpecRegistry.find("observe_screen"))
         assertNotNull(ToolSpecRegistry.find("click"))
         assertNotNull(ToolSpecRegistry.find("click_sequence"))
         assertNotNull(ToolSpecRegistry.find("drag_and_drop"))
         assertNotNull(ToolSpecRegistry.find("haptic_trajectory"))
         assertNotNull(ToolSpecRegistry.find("reply_notification"))
         assertNotNull(ToolSpecRegistry.find("control_device_setting"))
+        assertNotNull(ToolSpecRegistry.find("set_timer"))
+        assertNotNull(ToolSpecRegistry.find("execute_lifestyle_routine"))
         assertNotNull(ToolSpecRegistry.find("manage_app"))
         assertNotNull(ToolSpecRegistry.find("os_cli_exec"))
         assertNotNull(ToolSpecRegistry.find("reverse_engineer_app"))
@@ -81,7 +83,7 @@ class MobileUseHarnessTest {
         val geminiJson = ToolSpecRegistry.toGeminiToolsJson()
         assertEquals(1, geminiJson.length())
         val declarations = geminiJson.getJSONObject(0).getJSONArray("functionDeclarations")
-        assertEquals(42, declarations.length())
+        assertEquals(45, declarations.length())
     }
 
     @Test
@@ -103,7 +105,7 @@ class MobileUseHarnessTest {
     }
 
     @Test
-    fun geminiMultimodalClient_localFallbackHandlesFastLaneAndUiMatching() {
+    fun geminiMultimodalClient_localFallbackReturnsHonestOfflineGuidanceAndHarnessMatchesUi() {
         val client = GeminiMultimodalClient()
         val snapshot = AtomicSnapshot(
             screenWidth = 1080,
@@ -140,6 +142,7 @@ class MobileUseHarnessTest {
             )
         )
 
+        // Honest offline fallback never hijacks prompts into reply_notification or fuzzy clicks without a real LLM
         val replyDecision = client.inferLocalOnDeviceAction(
             goal = "최근 카톡 알림에 \"금방 갈게\"라고 답장해줘",
             iteration = 1,
@@ -147,8 +150,9 @@ class MobileUseHarnessTest {
             historySteps = emptyList(),
             previousPlan = emptyList()
         )
-        assertEquals("reply_notification", replyDecision.toolName)
-        assertEquals("금방 갈게", replyDecision.toolArgs.getString("message"))
+        assertEquals("ask_user", replyDecision.toolName)
+        assertTrue(replyDecision.spokenReply.contains("API") || replyDecision.spokenReply.contains("연결"))
+        assertFalse(replyDecision.spokenReply.contains("화면 화면"))
 
         val clickDecision = client.inferLocalOnDeviceAction(
             goal = "화면에서 통합검색 눌러줘",
@@ -157,8 +161,12 @@ class MobileUseHarnessTest {
             historySteps = emptyList(),
             previousPlan = emptyList()
         )
-        assertEquals("click", clickDecision.toolName)
-        assertEquals(0, clickDecision.toolArgs.getInt("element_index"))
+        assertEquals("ask_user", clickDecision.toolName)
+
+        // Harness fuzzy matcher still resolves explicit UI targets when invoked by tool execution
+        val matched = AgentToolExecutionHarness.findBestMatchingElement(snapshot, "통합검색")
+        assertNotNull(matched)
+        assertEquals(0, matched?.index)
     }
 
     @Test
@@ -261,38 +269,35 @@ class MobileUseHarnessTest {
         val validDelta = ActionTrajectoryVerifierAndHealer.computeUiTreeDeltaRatio(snapYoutubeMain, snapYoutubeSearchOpen)
         assertTrue(validDelta > 0.5f)
 
-        // 3. WorldModelGraph produces distinct perceptual hashes for distinct states
-        val hashMain = WorldModelGraph.computeStateHash(snapYoutubeMain)
-        val hashSearch = WorldModelGraph.computeStateHash(snapYoutubeSearchOpen)
-        assertNotEquals(hashMain, hashSearch)
-
-        // 4. Multi-step trajectory planner progresses: Step 1 (manage_app) -> Step 2 (click search) -> Step 3 (input_text)
+        // 3. Offline fallback stays honest (ask_user) and never fabricates multi-step actions without an LLM
         val client = GeminiMultimodalClient()
         val goal = "유튜브 열어서 아이유 검색하고 클릭해줘"
 
         val step1 = client.inferLocalOnDeviceAction(goal, 1, snapHome, emptyList(), emptyList())
-        assertEquals("manage_app", step1.toolName)
+        assertEquals("ask_user", step1.toolName)
 
         val historyAfterStep1 = listOf(
             AgentStepLog(1, "앱 실행", emptyList(), "manage_app", "{}", "유튜브 실행 완료", true, "com.google.android.youtube", 1)
         )
         val step2 = client.inferLocalOnDeviceAction(goal, 2, snapYoutubeMain, historyAfterStep1, step1.subGoals)
-        assertEquals("click", step2.toolName)
+        assertEquals("ask_user", step2.toolName)
 
         val historyAfterStep2 = historyAfterStep1 + AgentStepLog(
             2, "검색창 탭", emptyList(), "click", "{}", "검색 버튼 탭 완료", true, "com.google.android.youtube", 1
         )
         val step3 = client.inferLocalOnDeviceAction(goal, 3, snapYoutubeSearchOpen, historyAfterStep2, step2.subGoals)
-        assertEquals("input_text", step3.toolName)
-        assertEquals("아이유", step3.toolArgs.getString("text"))
+        assertEquals("ask_user", step3.toolName)
+        assertTrue(step3.spokenReply.contains("API") || step3.spokenReply.contains("브리지"))
     }
 
     @Test
     fun aiStudioOfficialModelsAndInteractionsSchema_alignWith2026Docs() {
-        // Official Dec 1, 2026 routing per https://aistudio.google.com/docs/models
-        assertEquals("gemini-3.5-flash-lite", GeminiMultimodalClient.normalize2026ModelName("gemini-2.5-flash"))
-        assertEquals("gemini-3.8-flash", GeminiMultimodalClient.normalize2026ModelName("gemini-2.5-pro"))
+        // Live 2.5 models are NOT silently rewritten; default is gemini-3.8-flash (live on both AQ. and AIza keys)
+        assertEquals("gemini-3.8-flash", GeminiMultimodalClient.DEFAULT_MODEL)
+        assertEquals("gemini-2.5-flash", GeminiMultimodalClient.normalize2026ModelName("gemini-2.5-flash"))
         assertEquals("gemini-2.5-flash-lite", GeminiMultimodalClient.normalize2026ModelName("gemini-2.5-flash-lite"))
+        assertEquals("gemini-3.1-pro-preview", GeminiMultimodalClient.normalize2026ModelName("gemini-2.5-pro"))
+        assertEquals("gemini-3.8-flash", GeminiMultimodalClient.normalize2026ModelName("gemini-2.0-flash"))
         assertEquals("gemini-3.1-flash-lite", GeminiMultimodalClient.normalize2026ModelName("gemini-3.1-flash-lite-preview"))
         assertEquals("gemini-robotics-er-2-preview", GeminiMultimodalClient.normalize2026ModelName("gemini-robotics-er-1.6-preview"))
         assertEquals("gemini-3.8-live", GeminiMultimodalClient.normalize2026ModelName("gemini-3.1-flash-live-preview"))
@@ -301,18 +306,25 @@ class MobileUseHarnessTest {
         assertEquals("gemini-4-argon", GeminiMultimodalClient.normalize2026ModelName("gemini-4-argon"))
 
         val officialIds = GeminiMultimodalClient.AISTUDIO_OFFICIAL_MODELS.map { it.first }.toSet()
+        assertTrue(officialIds.contains("gemini-2.5-flash"))
+        assertTrue(officialIds.contains("gemini-2.5-flash-lite"))
         assertTrue(officialIds.contains("gemini-4-argon"))
         assertTrue(officialIds.contains("gemini-3.8-flash"))
         assertTrue(officialIds.contains("gemini-3.6-flash"))
         assertTrue(officialIds.contains("gemini-3.5-flash-lite"))
         assertTrue(officialIds.contains("gemini-3.1-flash-lite"))
         assertTrue(officialIds.contains("gemini-robotics-er-2-preview"))
-        assertTrue(officialIds.contains("antigravity-preview-09-2026"))
         assertTrue(officialIds.contains("gemini-3.8-live"))
         assertTrue(officialIds.contains("gemini-3.8-live-extended-thinking"))
+        assertFalse("Unusable managed-agent alias must be excluded from catalog", officialIds.contains("antigravity-preview-09-2026"))
+
+        val pickerIds = GeminiMultimodalClient.VLM_PICKER_MODELS.map { it.first }.toSet()
+        assertTrue(pickerIds.contains("gemini-2.5-flash"))
+        assertFalse("VLM picker must exclude TTS models", pickerIds.any { it.contains("-tts") })
+        assertFalse("VLM picker must exclude Live audio models", pickerIds.any { it.contains("-live") })
 
         val interactionsTools = ToolSpecRegistry.toGeminiInteractionsToolsJson()
-        assertEquals(42, interactionsTools.length())
+        assertEquals(45, interactionsTools.length())
         val firstTool = interactionsTools.getJSONObject(0)
         assertEquals("function", firstTool.getString("type"))
         assertEquals("object", firstTool.getJSONObject("parameters").getString("type"))
@@ -364,7 +376,7 @@ class MobileUseHarnessTest {
         assertNotNull(match2)
         assertEquals(5, match2?.index)
 
-        // 2. Local decision for entering "사층 회의실 카톡방 들어가 봐" clicks index 5 directly
+        // 2. Offline fallback returns honest ask_user guidance instead of hijacking clicks or app scans without an LLM
         val client = GeminiMultimodalClient()
         val roomDecision = client.inferLocalOnDeviceAction(
             goal = "사층 회의실 카톡방 들어가 봐",
@@ -373,10 +385,9 @@ class MobileUseHarnessTest {
             historySteps = emptyList(),
             previousPlan = emptyList()
         )
-        assertEquals("click", roomDecision.toolName)
-        assertEquals(5, roomDecision.toolArgs.getInt("element_index"))
+        assertEquals("ask_user", roomDecision.toolName)
+        assertTrue(roomDecision.spokenReply.contains("카카오톡"))
 
-        // 3. Local decision for "내 앱에서 그 게임 있는지 한번 찾아봐 볼래 무슨 게임 있는지 전부 찾아봐 줘" calls manage_app(list_games)
         val gameDecision = client.inferLocalOnDeviceAction(
             goal = "내 앱에서 그 게임 있는지 한번 찾아봐 볼래 무슨 게임 있는지 전부 찾아봐 줘",
             iteration = 1,
@@ -384,7 +395,6 @@ class MobileUseHarnessTest {
             historySteps = emptyList(),
             previousPlan = emptyList()
         )
-        assertEquals("manage_app", gameDecision.toolName)
-        assertEquals("list_games", gameDecision.toolArgs.getString("action"))
+        assertEquals("ask_user", gameDecision.toolName)
     }
 }

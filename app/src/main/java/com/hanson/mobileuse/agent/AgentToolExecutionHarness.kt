@@ -24,6 +24,7 @@ import com.hanson.mobileuse.accessibility.GestureController
 import com.hanson.mobileuse.accessibility.HansonAccessibilityService
 import com.hanson.mobileuse.accessibility.HierarchyDumper
 import com.hanson.mobileuse.notification.RemoteInputSessionCache
+import com.hanson.mobileuse.service.FloatingHudService
 import com.hanson.mobileuse.workspace.MobileWorkspaceEngine
 import org.json.JSONObject
 import kotlin.math.roundToInt
@@ -227,14 +228,28 @@ class AgentToolExecutionHarness @JvmOverloads constructor(
     private fun resolveScratchpad(): NotetakerScratchpad =
         scratchpadRef ?: HansonRuntimeHolder.getScratchpad(context).also { scratchpadRef = it }
 
+    private inline fun <T> withTemporaryHudPassThrough(block: () -> T): T {
+        FloatingHudService.setPassThroughTemporarily(true)
+        return try {
+            block()
+        } finally {
+            FloatingHudService.setPassThroughTemporarily(false)
+        }
+    }
+
     fun execute(
         toolName: String,
         args: JSONObject,
         latestSnapshot: AtomicSnapshot?
     ): ToolExecutionOutcome {
+        val canonicalTool = when (toolName.trim().lowercase()) {
+            "open_url" -> "open_link"
+            "wait" -> "wait_for_delay"
+            else -> toolName.trim()
+        }
         return try {
-            val preActionValue = capturePreActionValueForUndo(toolName, args)
-            val rawOutcome = when (toolName) {
+            val preActionValue = capturePreActionValueForUndo(canonicalTool, args)
+            val rawOutcome = when (canonicalTool) {
                 "click" -> executeClick(args, latestSnapshot)
                 "long_press" -> executeLongPress(args, latestSnapshot)
                 "input_text" -> executeInputText(args, latestSnapshot)
@@ -246,6 +261,7 @@ class AgentToolExecutionHarness @JvmOverloads constructor(
                 "manage_app" -> executeManageApp(args)
                 "wait_for_delay" -> executeWait(args)
                 "open_link" -> executeOpenLink(args)
+                "observe_screen" -> executeObserveScreen(args, latestSnapshot)
                 "list_notifications" -> executeListNotifications(args)
                 "reply_notification" -> executeReplyNotification(args)
                 "control_device_setting" -> executeControlDeviceSetting(args)
@@ -294,7 +310,7 @@ class AgentToolExecutionHarness @JvmOverloads constructor(
             val redactedText = vault.redactSensitiveText(rawOutcome.outputText)
             val enrichedReceipt = rawOutcome.receipt?.let { rcpt ->
                 val withUndo = if (rcpt.undoToolName.isBlank()) {
-                    val spec = ReversibleReceiptPlanner.planUndoForAction(toolName, args, preActionValue)
+                    val spec = ReversibleReceiptPlanner.planUndoForAction(canonicalTool, args, preActionValue)
                     if (spec != null) {
                         val combinedHint = when {
                             rcpt.undoHintKo.isBlank() -> spec.undoLabelKo
@@ -395,22 +411,18 @@ class AgentToolExecutionHarness @JvmOverloads constructor(
             HierarchyDumper.getScreenDimensions(context)
         }
 
-        if (args.has("x") && args.has("y")) {
-            val rx = args.optInt("x", -1)
-            val ry = args.optInt("y", -1)
-            if (rx >= 0 && ry >= 0) {
-                return rx to ry
-            }
-        }
-
+        // Priority 1: explicit element_index (>= 0) resolved from snapshot
         if (args.has("element_index")) {
             val idx = args.optInt("element_index", -1)
-            val el = snapshot?.indexedElements?.firstOrNull { it.index == idx }
-            if (el != null) {
-                return el.centerX to el.centerY
+            if (idx >= 0) {
+                val el = snapshot?.indexedElements?.firstOrNull { it.index == idx }
+                if (el != null) {
+                    return el.centerX to el.centerY
+                }
             }
         }
 
+        // Priority 2: explicit normalized coordinates (0..1000)
         if (args.has("norm_x") && args.has("norm_y")) {
             val nx = args.optInt("norm_x", -1)
             val ny = args.optInt("norm_y", -1)
@@ -419,6 +431,22 @@ class AgentToolExecutionHarness @JvmOverloads constructor(
             }
         }
 
+        // Priority 3: x / y — treat as 0..1000 normalized coordinates when both are in 0..1000,
+        // and treat as raw pixel coordinates only when either exceeds 1000.
+        if (args.has("x") && args.has("y")) {
+            val rx = args.optInt("x", -1)
+            val ry = args.optInt("y", -1)
+            if (rx >= 0 && ry >= 0) {
+                return if (rx <= 1000 && ry <= 1000) {
+                    CoordinateNormalizer.normalizedToPixel(rx, ry, screenW, screenH)
+                } else {
+                    rx.coerceIn(0, (screenW - 1).coerceAtLeast(0)) to
+                        ry.coerceIn(0, (screenH - 1).coerceAtLeast(0))
+                }
+            }
+        }
+
+        // Priority 4: fuzzy match on target_description
         val desc = args.optString("target_description", "").trim()
         if (desc.isNotEmpty()) {
             val fuzzyEl = findBestMatchingElement(snapshot, desc)
@@ -441,28 +469,43 @@ class AgentToolExecutionHarness @JvmOverloads constructor(
         if (service == null) {
             val px = pt.first
             val py = pt.second
-            var lastCliOutcome = executeOsCli(JSONObject().put("command", "tap $px $py"))
+            var allOk = true
+            var lastCliOutcome = withTemporaryHudPassThrough {
+                executeOsCli(JSONObject().put("command", "tap $px $py"))
+            }
+            if (!lastCliOutcome.succeeded) allOk = false
             for (i in 2..times) {
                 try {
                     Thread.sleep(delayMs)
                 } catch (_: InterruptedException) {
                     Thread.currentThread().interrupt()
+                    allOk = false
+                    break
                 }
-                lastCliOutcome = executeOsCli(JSONObject().put("command", "tap $px $py"))
+                lastCliOutcome = withTemporaryHudPassThrough {
+                    executeOsCli(JSONObject().put("command", "tap $px $py"))
+                }
+                if (!lastCliOutcome.succeeded) allOk = false
             }
             return ToolExecutionOutcome(
-                succeeded = true,
-                outputText = "'$desc' 위치($px, $py) ${times}회 탭 완료 [OS CLI 데몬 자동 폴백: tap $px $py]\n${lastCliOutcome.outputText}",
-                receipt = ActionReceipt(
+                succeeded = allOk,
+                outputText = if (allOk) {
+                    "'$desc' 위치($px, $py) ${times}회 탭 완료 [OS CLI 데몬 자동 폴백: tap $px $py]\n${lastCliOutcome.outputText}"
+                } else {
+                    "'$desc' 위치($px, $py) 탭 실패 [OS CLI 데몬 폴백 실패]\n${lastCliOutcome.outputText}"
+                },
+                receipt = if (allOk) ActionReceipt(
                     toolName = "click",
                     summaryKo = "'$desc' 화면 탭 (${times}회 · OS CLI 데몬 폴백)",
                     detailKo = "접근성 서비스 미연결로 OS CLI 커널 tap $px $py 실행",
                     undoHintKo = "뒤로가기(BACK) 키로 이전 화면으로 돌아갈 수 있습니다."
-                )
+                ) else null
             )
         }
 
-        val ok = GestureController.multiTap(service, pt.first.toFloat(), pt.second.toFloat(), times, delayMs)
+        val ok = withTemporaryHudPassThrough {
+            GestureController.multiTap(service, pt.first.toFloat(), pt.second.toFloat(), times, delayMs)
+        }
         return ToolExecutionOutcome(
             succeeded = ok,
             outputText = if (ok) "'$desc' 위치(${pt.first}, ${pt.second}) ${times}회 탭 완료" else "'$desc' 탭 실패",
@@ -487,20 +530,29 @@ class AgentToolExecutionHarness @JvmOverloads constructor(
             val px = pt.first
             val py = pt.second
             val dur = duration
-            val cliOutcome = executeOsCli(JSONObject().put("command", "swipe $px $py $px $py $dur"))
+            val cliOutcome = withTemporaryHudPassThrough {
+                executeOsCli(JSONObject().put("command", "swipe $px $py $px $py $dur"))
+            }
+            val ok = cliOutcome.succeeded
             return ToolExecutionOutcome(
-                succeeded = true,
-                outputText = "'$desc' ($px, $py) ${dur}ms 길게 누르기 완료 [OS CLI 데몬 자동 폴백: swipe $px $py $px $py $dur]\n${cliOutcome.outputText}",
-                receipt = ActionReceipt(
+                succeeded = ok,
+                outputText = if (ok) {
+                    "'$desc' ($px, $py) ${dur}ms 길게 누르기 완료 [OS CLI 데몬 자동 폴백: swipe $px $py $px $py $dur]\n${cliOutcome.outputText}"
+                } else {
+                    "'$desc' ($px, $py) 길게 누르기 실패 [OS CLI 데몬 폴백 실패]\n${cliOutcome.outputText}"
+                },
+                receipt = if (ok) ActionReceipt(
                     toolName = "long_press",
                     summaryKo = "'$desc' 길게 누르기 (OS CLI 데몬 폴백)",
                     detailKo = "좌표 ($px, $py) 커널 swipe $px $py $px $py $dur 홀드 (A11y 부재 폴백)",
                     undoHintKo = "빈 영역을 탭하거나 BACK 키로 컨텍스트 메뉴를 닫으세요."
-                )
+                ) else null
             )
         }
 
-        val ok = GestureController.longPress(service, pt.first.toFloat(), pt.second.toFloat(), duration)
+        val ok = withTemporaryHudPassThrough {
+            GestureController.longPress(service, pt.first.toFloat(), pt.second.toFloat(), duration)
+        }
 
         return ToolExecutionOutcome(
             succeeded = ok,
@@ -518,13 +570,19 @@ class AgentToolExecutionHarness @JvmOverloads constructor(
         val rawText = args.optString("text", "")
         val text = normalizeSinoKoreanNumberPrefix(rawText)
         val clear = args.optBoolean("clear_existing", false)
-        val pressEnter = args.optBoolean("press_enter", true)
+        val pressEnter = if (args.has("press_enter")) {
+            args.optBoolean("press_enter", true)
+        } else {
+            args.optBoolean("submit_enter", true)
+        }
         val pt = resolveTargetPixel(args, snapshot)
 
         val service = HansonAccessibilityService.instance
         if (service == null) {
             if (pt != null) {
-                executeOsCli(JSONObject().put("command", "tap ${pt.first} ${pt.second}"))
+                withTemporaryHudPassThrough {
+                    executeOsCli(JSONObject().put("command", "tap ${pt.first} ${pt.second}"))
+                }
                 try {
                     Thread.sleep(150L)
                 } catch (_: InterruptedException) {
@@ -532,37 +590,46 @@ class AgentToolExecutionHarness @JvmOverloads constructor(
                 }
             }
             val cliOutcome = executeOsCli(JSONObject().put("command", "text $text"))
-            if (pressEnter) {
+            var ok = cliOutcome.succeeded
+            if (ok && pressEnter) {
                 try {
                     Thread.sleep(150L)
                 } catch (_: InterruptedException) {
                     Thread.currentThread().interrupt()
                 }
-                executeOsCli(JSONObject().put("command", "key 66"))
+                val enterOutcome = executeOsCli(JSONObject().put("command", "key 66"))
+                ok = ok && enterOutcome.succeeded
             }
             return ToolExecutionOutcome(
-                succeeded = true,
-                outputText = "텍스트 입력 완료: \"$text\" [OS CLI 데몬 자동 폴백: text $text]\n${cliOutcome.outputText}",
-                receipt = ActionReceipt(
+                succeeded = ok,
+                outputText = if (ok) {
+                    "텍스트 입력 완료: \"$text\" [OS CLI 데몬 자동 폴백: text $text]\n${cliOutcome.outputText}"
+                } else {
+                    "텍스트 입력 실패: \"$text\" [OS CLI 데몬 폴백 실패]\n${cliOutcome.outputText}"
+                },
+                receipt = if (ok) ActionReceipt(
                     toolName = "input_text",
                     summaryKo = "텍스트 입력: \"${text.take(24)}\" (OS CLI 데몬 폴백)",
                     detailKo = "입력창 커널 text $text 주입 및 엔터 연동 (A11y 부재 폴백)",
                     undoHintKo = "입력창 내용을 지워 되돌릴 수 있습니다."
-                )
+                ) else null
             )
         }
 
-        val ok = GestureController.inputText(
-            service = service,
-            text = text,
-            targetX = pt?.first?.toFloat(),
-            targetY = pt?.second?.toFloat(),
-            clearExisting = clear
-        )
+        val ok = withTemporaryHudPassThrough {
+            GestureController.inputText(
+                service = service,
+                text = text,
+                targetX = pt?.first?.toFloat(),
+                targetY = pt?.second?.toFloat(),
+                clearExisting = clear
+            )
+        }
         if (ok && pressEnter) {
             try {
                 Thread.sleep(150L)
             } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
             }
             GestureController.performGlobalKey(service, "ENTER")
         }
@@ -624,27 +691,36 @@ class AgentToolExecutionHarness @JvmOverloads constructor(
             val px2 = vector.endX
             val py2 = vector.endY
             val dur = duration
-            val cliOutcome = executeOsCli(JSONObject().put("command", "swipe $px1 $py1 $px2 $py2 $dur"))
+            val cliOutcome = withTemporaryHudPassThrough {
+                executeOsCli(JSONObject().put("command", "swipe $px1 $py1 $px2 $py2 $dur"))
+            }
+            val ok = cliOutcome.succeeded
             return ToolExecutionOutcome(
-                succeeded = true,
-                outputText = "스와이프($direction) 완료: ($px1,$py1) -> ($px2,$py2) [OS CLI 데몬 자동 폴백: swipe $px1 $py1 $px2 $py2 $dur]\n${cliOutcome.outputText}",
-                receipt = ActionReceipt(
+                succeeded = ok,
+                outputText = if (ok) {
+                    "스와이프($direction) 완료: ($px1,$py1) -> ($px2,$py2) [OS CLI 데몬 자동 폴백: swipe $px1 $py1 $px2 $py2 $dur]\n${cliOutcome.outputText}"
+                } else {
+                    "스와이프($direction) 실패 [OS CLI 데몬 폴백 실패]\n${cliOutcome.outputText}"
+                },
+                receipt = if (ok) ActionReceipt(
                     toolName = "swipe",
                     summaryKo = "스와이프: $direction (OS CLI 데몬 폴백)",
                     detailKo = "($px1,$py1) -> ($px2,$py2) ${dur}ms (A11y 부재 폴백)",
                     undoHintKo = "반대 방향 스와이프로 되돌릴 수 있습니다."
-                )
+                ) else null
             )
         }
 
-        val ok = GestureController.swipe(
-            service = service,
-            startX = vector.startX.toFloat(),
-            startY = vector.startY.toFloat(),
-            endX = vector.endX.toFloat(),
-            endY = vector.endY.toFloat(),
-            durationMs = duration
-        )
+        val ok = withTemporaryHudPassThrough {
+            GestureController.swipe(
+                service = service,
+                startX = vector.startX.toFloat(),
+                startY = vector.startY.toFloat(),
+                endX = vector.endX.toFloat(),
+                endY = vector.endY.toFloat(),
+                durationMs = duration
+            )
+        }
 
         return ToolExecutionOutcome(
             succeeded = ok,
@@ -704,28 +780,37 @@ class AgentToolExecutionHarness @JvmOverloads constructor(
 
         val service = HansonAccessibilityService.instance
         if (service == null) {
-            val cliOutcome = executeOsCli(JSONObject().put("command", "swipe $startX $startY $endX $endY $durationMs"))
+            val cliOutcome = withTemporaryHudPassThrough {
+                executeOsCli(JSONObject().put("command", "swipe $startX $startY $endX $endY $durationMs"))
+            }
+            val ok = cliOutcome.succeeded
             return ToolExecutionOutcome(
-                succeeded = true,
-                outputText = "드래그 앤 드롭('$desc') 완료: ($startX,$startY) -> ($endX,$endY) [OS CLI 데몬 자동 폴백: swipe $startX $startY $endX $endY $durationMs]\n${cliOutcome.outputText}",
-                receipt = ActionReceipt(
+                succeeded = ok,
+                outputText = if (ok) {
+                    "드래그 앤 드롭('$desc') 완료: ($startX,$startY) -> ($endX,$endY) [OS CLI 데몬 자동 폴백: swipe $startX $startY $endX $endY $durationMs]\n${cliOutcome.outputText}"
+                } else {
+                    "드래그 앤 드롭('$desc') 실패 [OS CLI 데몬 폴백 실패]\n${cliOutcome.outputText}"
+                },
+                receipt = if (ok) ActionReceipt(
                     toolName = "drag_and_drop",
                     summaryKo = "드래그 앤 드롭: $desc (OS CLI 데몬 폴백)",
                     detailKo = "($startX,$startY) -> ($endX,$endY) · 홀드 ${holdMs}ms · OS CLI 폴백",
                     undoHintKo = "반대 방향 드래그로 원복할 수 있습니다."
-                )
+                ) else null
             )
         }
 
-        val ok = GestureController.dragAndDrop(
-            service = service,
-            startX = startX.toFloat(),
-            startY = startY.toFloat(),
-            endX = endX.toFloat(),
-            endY = endY.toFloat(),
-            holdMs = holdMs,
-            dragDurationMs = durationMs
-        )
+        val ok = withTemporaryHudPassThrough {
+            GestureController.dragAndDrop(
+                service = service,
+                startX = startX.toFloat(),
+                startY = startY.toFloat(),
+                endX = endX.toFloat(),
+                endY = endY.toFloat(),
+                holdMs = holdMs,
+                dragDurationMs = durationMs
+            )
+        }
 
         return ToolExecutionOutcome(
             succeeded = ok,
@@ -769,7 +854,9 @@ class AgentToolExecutionHarness @JvmOverloads constructor(
 
         val durationMs = args.optLong("duration_ms", 650L)
         val desc = args.optString("description", "연속 햅틱 궤적")
-        val ok = GestureController.executeWaypointTrajectory(service, waypoints, durationMs)
+        val ok = withTemporaryHudPassThrough {
+            GestureController.executeWaypointTrajectory(service, waypoints, durationMs)
+        }
 
         return ToolExecutionOutcome(
             succeeded = ok,
@@ -828,29 +915,43 @@ class AgentToolExecutionHarness @JvmOverloads constructor(
 
         val service = HansonAccessibilityService.instance
         if (service == null) {
+            var allOk = true
+            var lastOutput = ""
             for ((idx, pt) in points.withIndex()) {
-                executeOsCli(JSONObject().put("command", "tap ${pt.first.toInt()} ${pt.second.toInt()}"))
+                val cliOutcome = withTemporaryHudPassThrough {
+                    executeOsCli(JSONObject().put("command", "tap ${pt.first.toInt()} ${pt.second.toInt()}"))
+                }
+                lastOutput = cliOutcome.outputText
+                if (!cliOutcome.succeeded) allOk = false
                 if (idx < points.size - 1) {
                     try {
                         Thread.sleep(delayMs)
                     } catch (_: InterruptedException) {
                         Thread.currentThread().interrupt()
+                        allOk = false
+                        break
                     }
                 }
             }
             return ToolExecutionOutcome(
-                succeeded = true,
-                outputText = "연속 탭 버스트($desc, ${points.size}회) 완료 [OS CLI 데몬 자동 폴백]",
-                receipt = ActionReceipt(
+                succeeded = allOk,
+                outputText = if (allOk) {
+                    "연속 탭 버스트($desc, ${points.size}회) 완료 [OS CLI 데몬 자동 폴백]"
+                } else {
+                    "연속 탭 버스트($desc) 실패 [OS CLI 데몬 폴백 실패]\n$lastOutput"
+                },
+                receipt = if (allOk) ActionReceipt(
                     toolName = "click_sequence",
                     summaryKo = "연속 탭 버스트 (${points.size}회 · OS CLI 데몬 폴백)",
                     detailKo = "${points.size}개 지점 커널 tap 주입 (A11y 부재 폴백)",
                     undoHintKo = "이전 상태로 돌아가려면 BACK 키를 실행하세요."
-                )
+                ) else null
             )
         }
 
-        val ok = GestureController.clickSequence(service, points, delayMs)
+        val ok = withTemporaryHudPassThrough {
+            GestureController.clickSequence(service, points, delayMs)
+        }
 
         return ToolExecutionOutcome(
             succeeded = ok,
@@ -880,15 +981,20 @@ class AgentToolExecutionHarness @JvmOverloads constructor(
                 else -> if (key.all { it.isDigit() }) key else if (key.startsWith("KEYCODE_")) key else "KEYCODE_$key"
             }
             val cliOutcome = executeOsCli(JSONObject().put("command", "key $keycode"))
+            val ok = cliOutcome.succeeded
             return ToolExecutionOutcome(
-                succeeded = true,
-                outputText = "전역 시스템 키 실행 완료: $key (키코드: $keycode) [OS CLI 데몬 자동 폴백: key $keycode]\n${cliOutcome.outputText}",
-                receipt = ActionReceipt(
+                succeeded = ok,
+                outputText = if (ok) {
+                    "전역 시스템 키 실행 완료: $key (키코드: $keycode) [OS CLI 데몬 자동 폴백: key $keycode]\n${cliOutcome.outputText}"
+                } else {
+                    "전역 시스템 키 실행 실패: $key (키코드: $keycode) [OS CLI 데몬 폴백 실패]\n${cliOutcome.outputText}"
+                },
+                receipt = if (ok) ActionReceipt(
                     toolName = "press_key",
                     summaryKo = "전역 키: $key (OS CLI 데몬 폴백)",
                     detailKo = "커널 input keyevent $keycode 주입 (A11y 부재 폴백)",
                     undoHintKo = "반대 키 입력 또는 화면 복귀로 되돌릴 수 있습니다."
-                )
+                ) else null
             )
         }
 
@@ -910,11 +1016,17 @@ class AgentToolExecutionHarness @JvmOverloads constructor(
         val query = args.optString("app_name", "").trim()
         val pm = context.packageManager
 
-        val wantsGameScan = action == "list_games" ||
-            query.contains("게임") ||
-            query.lowercase().contains("game")
+        // Only run inventory/game scan for list/search actions; NEVER hijack action == "launch"
+        // even if the target app's name contains "game" / "게임" (e.g. "Play Games", "게임런처").
+        val isListOrSearchAction = action == "list_games" ||
+            action == "search" ||
+            action == "list" ||
+            action == "list_all"
 
-        if (wantsGameScan || action == "search" || action == "list" || action == "list_all") {
+        if (isListOrSearchAction) {
+            val wantsGameScan = action == "list_games" ||
+                query.contains("게임") ||
+                query.lowercase().contains("game")
             val report = scanInstalledGamesAndApps(
                 query = if (wantsGameScan || action == "list_all" || query == "전체" || query == "모두") "" else query,
                 prioritizeGames = wantsGameScan
@@ -1082,13 +1194,48 @@ class AgentToolExecutionHarness @JvmOverloads constructor(
     }
 
     private fun executeWait(args: JSONObject): ToolExecutionOutcome {
-        val ms = args.optLong("time_in_ms", 1500L).coerceIn(200L, 10000L)
+        val rawMs = when {
+            args.has("time_in_ms") -> args.optLong("time_in_ms", 1500L)
+            args.has("duration_ms") -> args.optLong("duration_ms", 1500L)
+            args.has("ms") -> args.optLong("ms", 1500L)
+            args.has("seconds") -> (args.optDouble("seconds", 1.5) * 1000.0).roundToInt().toLong()
+            else -> 1500L
+        }
+        val ms = rawMs.coerceIn(200L, 10000L)
         try {
             Thread.sleep(ms)
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
         }
         return ToolExecutionOutcome(true, "${ms}ms 대기 완료")
+    }
+
+    private fun executeObserveScreen(
+        args: JSONObject,
+        latestSnapshot: AtomicSnapshot?
+    ): ToolExecutionOutcome {
+        val includeScreenshot = args.optBoolean("include_screenshot", false)
+        val maxElements = args.optInt("max_elements", 40).coerceIn(5, 120)
+        val service = HansonAccessibilityService.instance
+        val snap = service?.captureSnapshotNow(includeScreenshot = includeScreenshot)
+            ?: latestSnapshot
+            ?: return a11yNotConnectedOutcome("observe_screen")
+
+        val compact = ContextorCompactor.buildCompactOutline(
+            snapshot = snap,
+            vault = resolveBlindVault(),
+            maxElements = maxElements
+        )
+        val header = buildString {
+            append("화면 관측 완료 (${snap.screenWidth}x${snap.screenHeight}, 패키지=${snap.activePackage.ifBlank { "unknown" }}")
+            if (snap.activeWindowTitle.isNotBlank()) append(", 창='${snap.activeWindowTitle}'")
+            if (snap.isSecureWindow) append(", FLAG_SECURE")
+            append(", 요소 ${snap.indexedElements.size}개)")
+        }
+        return ToolExecutionOutcome(
+            succeeded = true,
+            outputText = "$header\n$compact"
+        )
     }
 
     private fun executeOpenLink(args: JSONObject): ToolExecutionOutcome {
@@ -1230,7 +1377,7 @@ class AgentToolExecutionHarness @JvmOverloads constructor(
                 cm?.setPrimaryClip(ClipData.newPlainText("hanson_agent", value))
                 ToolExecutionOutcome(true, "클립보드에 텍스트를 복사했습니다: \"${value.take(40)}\"")
             }
-            "wifi_panel" -> {
+            "wifi_panel", "wifi" -> {
                 val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     Intent(Settings.Panel.ACTION_WIFI)
                 } else {
@@ -1239,7 +1386,7 @@ class AgentToolExecutionHarness @JvmOverloads constructor(
                 context.startActivity(intent)
                 ToolExecutionOutcome(true, "Wi-Fi 설정 패널을 열었습니다.")
             }
-            "bluetooth_panel" -> {
+            "bluetooth_panel", "bluetooth" -> {
                 context.startActivity(
                     Intent(Settings.ACTION_BLUETOOTH_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 )
@@ -1820,16 +1967,18 @@ class AgentToolExecutionHarness @JvmOverloads constructor(
             if (conn.responseCode in 200..299) {
                 val respStr = conn.inputStream.bufferedReader().use { it.readText() }
                 val json = JSONObject(respStr)
+                val daemonOk = json.optString("status") == "ok" &&
+                    (!json.has("exitCode") || json.optInt("exitCode", -1) == 0)
                 val out = json.optString("stdout").ifBlank { json.toString(2) }
                 return ToolExecutionOutcome(
-                    succeeded = true,
+                    succeeded = daemonOk,
                     outputText = "[Hanson OS CLI · UID 2000 Daemon]\n$out",
-                    receipt = ActionReceipt(
+                    receipt = if (daemonOk) ActionReceipt(
                         toolName = "os_cli_exec",
                         summaryKo = "OS CLI (UID 2000 :18890): $rawCmd",
                         detailKo = out.take(160),
                         undoHintKo = "모바일 OS CLI(hanson)에서 상태 복원 가능"
-                    )
+                    ) else null
                 )
             }
         } catch (_: Throwable) {
@@ -1839,16 +1988,17 @@ class AgentToolExecutionHarness @JvmOverloads constructor(
         // 3. Fallback: Execute via in-process HansonOsCliMain + Hidden Binder / Shell
         val resJson = com.hanson.mobileuse.oscli.HansonOsCliMain.executeCommandJson(action, rest)
         val stdout = resJson.optString("stdout").ifBlank { resJson.toString(2) }
-        val ok = resJson.optString("status") == "ok" || resJson.optInt("exitCode", 0) == 0
+        val ok = resJson.optString("status") == "ok" &&
+            (!resJson.has("exitCode") || resJson.optInt("exitCode", -1) == 0)
         return ToolExecutionOutcome(
             succeeded = ok,
             outputText = "[Hanson OS CLI]\n$stdout",
-            receipt = ActionReceipt(
+            receipt = if (ok) ActionReceipt(
                 toolName = "os_cli_exec",
                 summaryKo = "OS CLI 실행: $rawCmd",
                 detailKo = stdout.take(160),
                 undoHintKo = "시스템 설정 또는 hanson CLI로 되돌릴 수 있습니다."
-            )
+            ) else null
         )
     }
 
@@ -1989,20 +2139,26 @@ class AgentToolExecutionHarness @JvmOverloads constructor(
 
         val pt = resolveTargetPixel(args, snapshot)
         val clearExisting = args.optBoolean("clear_existing", true)
-        val pressEnter = args.optBoolean("press_enter", false)
+        val pressEnter = if (args.has("press_enter")) {
+            args.optBoolean("press_enter", false)
+        } else {
+            args.optBoolean("submit_enter", false)
+        }
 
         val ok = vault.withDecryptedSecretChars(
             keyOrHandle = rawHandle,
             approvedReceiptId = externalApprovalReceiptId,
             controlEpoch = controlEpoch
         ) { _, secretChars ->
-            GestureController.inputText(
-                service = service,
-                text = String(secretChars),
-                targetX = pt?.first?.toFloat(),
-                targetY = pt?.second?.toFloat(),
-                clearExisting = clearExisting
-            )
+            withTemporaryHudPassThrough {
+                GestureController.inputText(
+                    service = service,
+                    text = String(secretChars),
+                    targetX = pt?.first?.toFloat(),
+                    targetY = pt?.second?.toFloat(),
+                    clearExisting = clearExisting
+                )
+            }
         } ?: false
 
         if (ok && pressEnter) {
@@ -2254,6 +2410,7 @@ class AgentToolExecutionHarness @JvmOverloads constructor(
 
     private fun executeWorkspaceList(args: JSONObject): ToolExecutionOutcome {
         val subDir = args.optString("sub_dir", "").trim()
+            .ifBlank { args.optString("path", "").trim() }
         val maxDepth = if (args.has("max_depth")) args.optInt("max_depth", 4).coerceIn(1, 10) else 4
         return try {
             val entries = resolvedWorkspaceEngine.listFiles(subDir, maxDepth)

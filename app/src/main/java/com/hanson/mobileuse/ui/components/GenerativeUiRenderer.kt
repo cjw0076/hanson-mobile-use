@@ -30,7 +30,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -44,7 +43,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -403,7 +401,7 @@ object GenerativeUiStateHolder {
       <div class="title">카톡 디지털카드</div>
       <div class="desc">0.1초 딥링크 텔레포트</div>
     </div>
-    <div class="tile" onclick="triggerDeepLink('banktoss://', '토스 메인 직행')">
+    <div class="tile" onclick="triggerDeepLink('supertoss://', '토스 메인 직행')">
       <span class="badge">TELEPORT</span>
       <div class="title">토스 금융 직행</div>
       <div class="desc">중간 탐색 생략 호출</div>
@@ -789,162 +787,6 @@ fun GenerativeUiSurfaceCard(
                 )
             }
         }
-    }
-}
-
-/**
- * Ahaboard Lifestyle Card Data Model (F06, R2, M3).
- * Structured card hierarchy: hero media stage (16:9 or 1:1), editorial title, warm companion briefing, quick action chips.
- */
-data class AhaboardLifestyleCard(
-    val heroMediaUrl: String = "",
-    val editorialTitle: String = "",
-    val companionBriefing: String = "",
-    val actionChips: List<String> = emptyList(),
-    val mediaBlock: MultimodalMediaBlock? = null
-)
-
-@Composable
-fun AhaboardLifestyleCardView(
-    card: AhaboardLifestyleCard,
-    modifier: Modifier = Modifier,
-    onChipClick: ((String) -> Unit)? = null,
-    onExpandClick: (() -> Unit)? = null,
-    onRunCommand: (String) -> Unit = {}
-) {
-    SquircleCard(
-        modifier = modifier.fillMaxWidth(),
-        cornerRadius = 26.dp,
-        borderColor = ObsidianColors.GlassBorder,
-        containerColor = ObsidianColors.Surface,
-        contentPadding = PaddingValues(20.dp)
-    ) {
-        // 1. Hero media stage (16:9 or 1:1) with 20dp squircle clipping
-        val hasMedia = card.heroMediaUrl.isNotBlank() || card.mediaBlock != null
-        if (hasMedia) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .aspectRatio(16f / 9f)
-                    .clip(RoundedCornerShape(20.dp))
-                    .background(ObsidianColors.SurfaceHigh)
-                    .border(1.dp, ObsidianColors.GlassBorder, RoundedCornerShape(20.dp))
-            ) {
-                if (card.mediaBlock != null) {
-                    AhaboardMultimodalMediaView(
-                        block = card.mediaBlock,
-                        onExpandClick = onExpandClick,
-                        onRunCommand = onRunCommand
-                    )
-                } else {
-                    val localBmp = remember(card.heroMediaUrl) {
-                        if (card.heroMediaUrl.startsWith("/") || card.heroMediaUrl.startsWith("file://")) {
-                            runCatching { BitmapFactory.decodeFile(card.heroMediaUrl.removePrefix("file://")) }.getOrNull()
-                        } else null
-                    }
-                    if (localBmp != null) {
-                        Image(
-                            bitmap = localBmp.asImageBitmap(),
-                            contentDescription = card.editorialTitle,
-                            modifier = Modifier.fillMaxSize(),
-                            contentScale = ContentScale.Crop
-                        )
-                    } else {
-                        Box(
-                            modifier = Modifier.fillMaxSize(),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = "성수동 감성 매거진 · Vibe Companion",
-                                color = ObsidianColors.TextMuted,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Medium
-                            )
-                        }
-                    }
-                }
-            }
-            Spacer(modifier = Modifier.height(14.dp))
-        }
-
-        // 2. Editorial title (wraps naturally up to 2-3 lines, markdown links cleaned)
-        if (card.editorialTitle.isNotBlank()) {
-            val cleanTitle = card.editorialTitle
-                .replace(Regex("\\[([^\\]]+)\\]\\([^)]*\\)"), "$1")
-                .replace(Regex("[*#_`]"), "")
-                .trim()
-            Text(
-                text = cleanTitle,
-                color = ObsidianColors.TextPrimary,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.Bold,
-                maxLines = 2,
-                lineHeight = 22.sp
-            )
-            Spacer(modifier = Modifier.height(6.dp))
-        }
-
-        // 3. Warm companion briefing (markdown links and syntax cleanly stripped)
-        if (card.companionBriefing.isNotBlank()) {
-            val cleanBriefing = card.companionBriefing
-                .replace(Regex("\\[([^\\]]+)\\]\\([^)]*\\)"), "$1")
-                .replace(Regex("[*#_`]"), "")
-                .trim()
-            Text(
-                text = cleanBriefing,
-                color = ObsidianColors.TextSecondary,
-                fontSize = 13.5.sp,
-                lineHeight = 19.5.sp
-            )
-        }
-
-        // 4. Quick action chips
-        if (card.actionChips.isNotEmpty()) {
-            Spacer(modifier = Modifier.height(14.dp))
-            if (card.actionChips.size > 4) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    card.actionChips.forEach { chip ->
-                        EditorialActionChip(chip = chip, onClick = { onChipClick?.invoke(chip) })
-                    }
-                }
-            } else {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    card.actionChips.forEach { chip ->
-                        EditorialActionChip(chip = chip, onClick = { onChipClick?.invoke(chip) })
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun EditorialActionChip(
-    chip: String,
-    onClick: () -> Unit
-) {
-    Box(
-        modifier = Modifier
-            .clip(RoundedCornerShape(999.dp))
-            .background(ObsidianColors.SurfaceHigh)
-            .border(1.dp, ObsidianColors.GlassBorder, RoundedCornerShape(999.dp))
-            .clickable { onClick() }
-            .padding(horizontal = 14.dp, vertical = 7.dp)
-    ) {
-        Text(
-            text = chip,
-            color = ObsidianColors.TextPrimary,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.Medium
-        )
     }
 }
 
@@ -1343,6 +1185,12 @@ private fun InAppYouTubePlayerViewport(block: MultimodalMediaBlock) {
                     WebView(ctx).apply {
                         settings.javaScriptEnabled = true
                         settings.domStorageEnabled = true
+                        settings.allowFileAccess = false
+                        settings.allowContentAccess = false
+                        @Suppress("DEPRECATION")
+                        settings.allowFileAccessFromFileURLs = false
+                        @Suppress("DEPRECATION")
+                        settings.allowUniversalAccessFromFileURLs = false
                         settings.mediaPlaybackRequiresUserGesture = false
                         settings.loadWithOverviewMode = true
                         settings.useWideViewPort = true
@@ -2097,6 +1945,13 @@ private fun NativeCodeCanvasViewport(
             else -> ""
         }
     }
+    val instrumentedHtml = remember(htmlSource) {
+        if (htmlSource.isNotBlank()) {
+            GenerativeUiRendererDefaults.instrumentHtml(htmlSource)
+        } else {
+            ""
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -2156,31 +2011,42 @@ private fun NativeCodeCanvasViewport(
         ) {
             when (viewTab) {
                 0 -> {
-                    if (htmlSource.isNotBlank()) {
+                    if (instrumentedHtml.isNotBlank()) {
                         AndroidView(
                             modifier = Modifier.fillMaxSize(),
                             factory = { ctx ->
+                                val bridge = HansonJsBridge(
+                                    context = ctx.applicationContext,
+                                    onRunCommand = onRunCommand,
+                                    onError = { telemetry ->
+                                        GenerativeUiStateHolder.reportError(telemetry)
+                                    }
+                                )
                                 WebView(ctx).apply {
                                     settings.javaScriptEnabled = true
                                     settings.domStorageEnabled = true
+                                    settings.allowFileAccess = false
+                                    settings.allowContentAccess = false
+                                    @Suppress("DEPRECATION")
+                                    settings.allowFileAccessFromFileURLs = false
+                                    @Suppress("DEPRECATION")
+                                    settings.allowUniversalAccessFromFileURLs = false
                                     settings.loadWithOverviewMode = true
                                     settings.useWideViewPort = true
-                                    setBackgroundColor(android.graphics.Color.TRANSPARENT)
-                                    webChromeClient = WebChromeClient()
-                                    webViewClient = WebViewClient()
-                                    addJavascriptInterface(
-                                        HansonJsBridge(
-                                            context = ctx,
-                                            onRunCommand = onRunCommand,
-                                            onError = { telemetry ->
-                                                GenerativeUiStateHolder.reportError(telemetry)
-                                            }
-                                        ),
-                                        "HansonOS"
-                                    )
+                                    setBackgroundColor(AndroidColor.TRANSPARENT)
+                                    webChromeClient = HansonWebChromeClient(bridge)
+                                    webViewClient = HansonWebViewClient(bridge)
+                                    addJavascriptInterface(bridge, "HansonOS")
+
+                                    val achromaticPaint = Paint().apply {
+                                        colorFilter = ColorMatrixColorFilter(ColorMatrix().apply { setSaturation(0f) })
+                                    }
+                                    setLayerType(View.LAYER_TYPE_HARDWARE, achromaticPaint)
+
+                                    tag = instrumentedHtml.hashCode()
                                     loadDataWithBaseURL(
-                                        "https://local.hanson.agent/",
-                                        htmlSource,
+                                        "https://hanson.local/",
+                                        instrumentedHtml,
                                         "text/html",
                                         "UTF-8",
                                         null
@@ -2188,11 +2054,11 @@ private fun NativeCodeCanvasViewport(
                                 }
                             },
                             update = { wv ->
-                                if (wv.tag != htmlSource.hashCode()) {
-                                    wv.tag = htmlSource.hashCode()
+                                if (wv.tag != instrumentedHtml.hashCode()) {
+                                    wv.tag = instrumentedHtml.hashCode()
                                     wv.loadDataWithBaseURL(
-                                        "https://local.hanson.agent/",
-                                        htmlSource,
+                                        "https://hanson.local/",
+                                        instrumentedHtml,
                                         "text/html",
                                         "UTF-8",
                                         null

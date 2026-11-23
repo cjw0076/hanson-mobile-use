@@ -78,11 +78,28 @@ data class PermissionHubState(
     val unrestrictedAutonomousMode: Boolean = true,
     val items: List<PermissionStatusItem> = emptyList(),
     val grantedCount: Int = 0,
-    val totalCount: Int = 0
+    val totalCount: Int = 0,
+    val isAccessibilityReady: Boolean = false,
+    val isOverlayReady: Boolean = false
 ) {
     val readinessPercent: Int
-        get() = if (totalCount == 0) 100 else ((grantedCount * 100f) / totalCount).toInt().coerceIn(0, 100)
+        get() = if (totalCount == 0) 0 else ((grantedCount * 100f) / totalCount).toInt().coerceIn(0, 100)
+
+    /**
+     * Strict environment readiness for live GUI automation.
+     * Requires an active connected AccessibilityService instance — never inferred from readinessPercent.
+     */
+    val isGuiAutomationReady: Boolean
+        get() = isAccessibilityReady
 }
+
+data class OneTouchSetupResult(
+    val accessibilityReady: Boolean,
+    val overlayReady: Boolean,
+    val openedSettingsAction: String? = null,
+    val openedSettingsSuccess: Boolean = false,
+    val messageKo: String = ""
+)
 
 /**
  * Comprehensive Android Permission & Accessibility Control Hub.
@@ -186,11 +203,11 @@ class PermissionHubManager(private val context: Context) {
 
     fun refreshStatus() {
         val unrestricted = isUnrestrictedMode()
-        val a11yGranted = isAccessibilityEnabled()
+        val a11yGranted = isAccessibilityReady()
         val notifListenerGranted = isNotificationListenerEnabled()
-        val overlayGranted = Settings.canDrawOverlays(context)
+        val overlayGranted = isOverlayReady()
         val batteryGranted = isIgnoringBatteryOptimizations()
-        val writeSettingsGranted = Settings.System.canWrite(context)
+        val writeSettingsGranted = runCatching { Settings.System.canWrite(context) }.getOrDefault(false)
         val dndGranted = isNotificationPolicyGranted()
         val usageStatsGranted = isUsageStatsGranted()
         val postNotifGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -390,7 +407,7 @@ class PermissionHubManager(private val context: Context) {
                 tier = PermissionTier.TIER_5_BRIDGE_PRIVILEGED,
                 description = "Google Artemis Python 에이전트, ADB, Termux, 로컬 MCP 서버가 HTTP/JSON-RPC로 즉시 제어 가능",
                 apiNote = "GET /snapshot, /dump_xml · POST /action, /rpc",
-                isGranted = true
+                isGranted = a11yGranted && HansonAccessibilityService.engineState.value.bridgeRunning
             )
         )
 
@@ -399,40 +416,178 @@ class PermissionHubManager(private val context: Context) {
             unrestrictedAutonomousMode = unrestricted,
             items = items,
             grantedCount = granted,
-            totalCount = items.size
+            totalCount = items.size,
+            isAccessibilityReady = a11yGranted,
+            isOverlayReady = overlayGranted
+        )
+    }
+
+    /**
+     * Strict accessibility readiness check (P1-5):
+     * Requires BOTH `HansonAccessibilityService.engineState.value.isConnected` AND a live non-null
+     * `HansonAccessibilityService.instance`. NEVER fakes "연결됨" via `readinessPercent >= 80`
+     * or stale `Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES` string fallback.
+     */
+    fun isAccessibilityReady(): Boolean {
+        val engineState = HansonAccessibilityService.engineState.value
+        return engineState.isConnected && HansonAccessibilityService.instance != null
+    }
+
+    /**
+     * Diagnostic-only check for whether the app appears in Settings.Secure accessibility list.
+     * Never used to report active connection readiness.
+     */
+    fun isAccessibilityRegisteredInSettings(): Boolean {
+        return runCatching {
+            val enabledServices = Settings.Secure.getString(
+                context.contentResolver,
+                Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+            ).orEmpty()
+            enabledServices.contains(context.packageName)
+        }.getOrDefault(false)
+    }
+
+    fun isOverlayReady(): Boolean {
+        return runCatching { Settings.canDrawOverlays(context) }.getOrDefault(false)
+    }
+
+    /**
+     * Returns the next required Android system settings Intent when critical GUI permissions
+     * (Accessibility or Draw-Over-Apps Overlay) are missing, or `null` when both are granted.
+     */
+    fun buildNextMissingSystemSetupIntent(): Intent? {
+        if (!isAccessibilityReady()) {
+            return Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+        }
+        if (!isOverlayReady()) {
+            return Intent(
+                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                Uri.parse("package:${context.packageName}")
+            ).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+        }
+        return null
+    }
+
+    @JvmOverloads
+    fun openAccessibilitySettings(launcherContext: Context = context): Boolean {
+        return runCatching {
+            val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            launcherContext.startActivity(intent)
+            true
+        }.getOrDefault(false)
+    }
+
+    @JvmOverloads
+    fun openOverlayPermissionSettings(launcherContext: Context = context): Boolean {
+        val withPkgUri = Intent(
+            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+            Uri.parse("package:${context.packageName}")
+        ).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        if (runCatching { launcherContext.startActivity(withPkgUri); true }.getOrDefault(false)) {
+            return true
+        }
+        val genericOverlay = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        return runCatching { launcherContext.startActivity(genericOverlay); true }.getOrDefault(false)
+    }
+
+    /**
+     * One-Touch Setup (P1-5):
+     * Enables unrestricted mode, refreshes live permission status, and whenever Accessibility or
+     * Overlay permission is missing, cleanly opens `Settings.ACTION_ACCESSIBILITY_SETTINGS` or
+     * `Settings.ACTION_MANAGE_OVERLAY_PERMISSION` instead of silently doing nothing.
+     */
+    @JvmOverloads
+    fun triggerOneTouchSetup(
+        launcherContext: Context = context,
+        openMissingSettings: Boolean = true
+    ): OneTouchSetupResult {
+        setUnrestrictedMode(true)
+        val a11yReady = isAccessibilityReady()
+        val overlayReady = isOverlayReady()
+
+        if (!a11yReady) {
+            val opened = if (openMissingSettings) openAccessibilitySettings(launcherContext) else false
+            val extraOverlayNote = if (!overlayReady) " 이후 다른 앱 위에 표시(오버레이) 권한도 허용해 주세요." else ""
+            val msg = if (opened) {
+                "접근성 서비스가 아직 연결되지 않아 시스템 접근성 설정 화면을 열었어요. 'Hanson'을 활성화해 주세요.$extraOverlayNote"
+            } else {
+                "접근성 서비스가 꺼져 있어요. 설정 > 접근성 > 설치된 앱에서 'Hanson'을 활성화해 주세요.$extraOverlayNote"
+            }
+            return OneTouchSetupResult(
+                accessibilityReady = false,
+                overlayReady = overlayReady,
+                openedSettingsAction = Settings.ACTION_ACCESSIBILITY_SETTINGS,
+                openedSettingsSuccess = opened,
+                messageKo = msg
+            )
+        }
+
+        if (!overlayReady) {
+            val opened = if (openMissingSettings) openOverlayPermissionSettings(launcherContext) else false
+            val msg = if (opened) {
+                "타 앱 위 플로팅 HUD(오버레이) 권한이 꺼져 있어 설정 화면을 열었어요. 'Hanson'을 허용해 주세요."
+            } else {
+                "타 앱 위 플로팅 HUD(오버레이) 권한이 필요해요. 시스템 설정에서 '다른 앱 위에 표시'를 허용해 주세요."
+            }
+            return OneTouchSetupResult(
+                accessibilityReady = true,
+                overlayReady = false,
+                openedSettingsAction = Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                openedSettingsSuccess = opened,
+                messageKo = msg
+            )
+        }
+
+        return OneTouchSetupResult(
+            accessibilityReady = true,
+            overlayReady = true,
+            openedSettingsAction = null,
+            openedSettingsSuccess = false,
+            messageKo = "접근성 서비스와 오버레이 권한이 모두 정상 연결되어 있어요."
         )
     }
 
     private fun hasPerm(perm: String): Boolean {
-        return ContextCompat.checkSelfPermission(context, perm) == PackageManager.PERMISSION_GRANTED
+        return runCatching {
+            ContextCompat.checkSelfPermission(context, perm) == PackageManager.PERMISSION_GRANTED
+        }.getOrDefault(false)
     }
 
-    private fun isAccessibilityEnabled(): Boolean {
-        if (HansonAccessibilityService.isServiceActive()) return true
-        val enabledServices = Settings.Secure.getString(
-            context.contentResolver,
-            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
-        ).orEmpty()
-        return enabledServices.contains(context.packageName)
-    }
+    private fun isAccessibilityEnabled(): Boolean = isAccessibilityReady()
 
     private fun isNotificationListenerEnabled(): Boolean {
         if (RemoteInputSessionCache.listenerConnected.value) return true
-        val flat = Settings.Secure.getString(
-            context.contentResolver,
-            "enabled_notification_listeners"
-        ).orEmpty()
-        return flat.contains(context.packageName)
+        return runCatching {
+            val flat = Settings.Secure.getString(
+                context.contentResolver,
+                "enabled_notification_listeners"
+            ).orEmpty()
+            flat.contains(context.packageName)
+        }.getOrDefault(false)
     }
 
     private fun isIgnoringBatteryOptimizations(): Boolean {
-        val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return false
-        return pm.isIgnoringBatteryOptimizations(context.packageName)
+        return runCatching {
+            val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return false
+            pm.isIgnoringBatteryOptimizations(context.packageName)
+        }.getOrDefault(false)
     }
 
     private fun isNotificationPolicyGranted(): Boolean {
-        val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return false
-        return nm.isNotificationPolicyAccessGranted
+        return runCatching {
+            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return false
+            nm.isNotificationPolicyAccessGranted
+        }.getOrDefault(false)
     }
 
     private fun isUsageStatsGranted(): Boolean {

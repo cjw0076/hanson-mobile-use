@@ -51,7 +51,7 @@ SERVER_NAME = "hanson-mobile-use-mcp"
 SERVER_VERSION = "6.0.0"
 SUPPORTED_PROTOCOL_VERSIONS = ("2025-03-26", "2024-11-05")
 STUDIO_INSTRUCTIONS = (
-    "Hanson Mobile Agent Studio v6.0 MCP Server (12 tools; on-device engine 42 tools). "
+    "Hanson Mobile Agent Studio v6.0 MCP Server (12 tools; on-device engine 45 tools). "
     "Always call mobile_get_screen first to obtain 0-based [element_index] targets and Set-of-Marks visuals, "
     "and verify screen transitions after every action. "
     "v6.0 pairs Human-First Companion & Studio dual-mode UX with transparent Memory Bubbles, "
@@ -517,9 +517,14 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
                     "description": "Optional [index] of the EditText/search box to focus before typing.",
                 },
                 "clear_existing": {"type": "boolean", "default": False},
+                "press_enter": {
+                    "type": "boolean",
+                    "description": "Press ENTER / IME_ACTION_SEARCH after inserting text (canonical flag, default: true).",
+                    "default": True,
+                },
                 "submit_enter": {
                     "type": "boolean",
-                    "description": "Press ENTER / IME_ACTION_SEARCH after inserting text (default: true).",
+                    "description": "Legacy alias for press_enter (default: true).",
                     "default": True,
                 },
             },
@@ -588,10 +593,20 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
     },
     {
         "name": "mobile_open_url",
-        "description": "Opens an https:// URL or Android app deep link (intent://, youtube://, kakaotalk://) directly.",
+        "description": (
+            "Opens an allowed URL or Android app deep link directly via `open_link`. "
+            "Allowed URI schemes: https://, http://, kakaotalk://, youtube://, nmap://, "
+            "kakaomap://, baemin://, supertoss://, coupang://, instagram://, market://, geo:. "
+            "(Dangerous schemes such as file://, content://, javascript:, and intent:// are blocked.)"
+        ),
         "inputSchema": {
             "type": "object",
-            "properties": {"url": {"type": "string", "description": "Target URL or deep link URI."}},
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "Target URL or deep link URI using an allowed scheme (e.g. https://, kakaotalk://, youtube://).",
+                }
+            },
             "required": ["url"],
         },
     },
@@ -763,8 +778,18 @@ def execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
     if name == "mobile_input_text":
         text = str(args.get("text", ""))
         clear = bool(args.get("clear_existing", False))
-        submit = bool(args.get("submit_enter", True))
-        tool_args: Dict[str, Any] = {"text": text, "clear_existing": clear, "submit_enter": submit}
+        if "press_enter" in args and args["press_enter"] is not None:
+            press_enter = bool(args["press_enter"])
+        elif "submit_enter" in args and args["submit_enter"] is not None:
+            press_enter = bool(args["submit_enter"])
+        else:
+            press_enter = True
+        tool_args: Dict[str, Any] = {
+            "text": text,
+            "clear_existing": clear,
+            "press_enter": press_enter,
+            "submit_enter": press_enter,
+        }
         if args.get("element_index") is not None:
             tool_args["element_index"] = int(args["element_index"])
         res, _ = STATE.artemis_request(
@@ -790,13 +815,13 @@ def execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
             # Non-ASCII Korean fallback via shell-quoted cmd clipboard
             STATE.run_adb(["shell", "cmd", "clipboard", "set-text", shlex.quote(text)])
             rc, _, stderr = STATE.run_adb(["shell", "input", "keyevent", "279"])  # KEYCODE_PASTE
-        if submit:
+        if press_enter:
             STATE.run_adb(["shell", "input", "keyevent", "66"])
         return {
             "content": [
                 {
                     "type": "text",
-                    "text": f"Typed '{text}' (submit_enter={submit}) via adb"
+                    "text": f"Typed '{text}' (press_enter={press_enter}) via adb"
                     if rc == 0
                     else f"Input text fallback warning: {stderr}. Enable Hanson :18888 Accessibility bridge for native Korean ACTION_SET_TEXT.",
                 }
@@ -891,7 +916,11 @@ def execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
                 "content": [{"type": "text", "text": f"Security rejection: disallowed or malformed URL scheme '{url[:80]}'"}],
                 "isError": True,
             }
-        res, _ = STATE.artemis_request("/rpc", method="POST", payload={"cmd": "open_url", "params": {"url": safe_url}})
+        res, _ = STATE.artemis_request(
+            "/rpc",
+            method="POST",
+            payload={"cmd": "tool", "params": {"tool_name": "open_link", "args": {"url": safe_url}}},
+        )
         if res and res.get("success"):
             return {"content": [{"type": "text", "text": res.get("output") or f"Opened {safe_url}"}], "isError": False}
         rc, out, stderr = STATE.run_adb(["shell", "am", "start", "-a", "android.intent.action.VIEW", "-d", shlex.quote(safe_url)])
@@ -947,20 +976,22 @@ def execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
     if name == "mobile_device_setting":
         setting = str(args.get("setting", "")).strip()
         val = str(args.get("value", "")).strip()
+        artemis_setting = {"wifi": "wifi_panel", "bluetooth": "bluetooth_panel"}.get(setting.lower(), setting.lower())
         res, _ = STATE.artemis_request(
             "/rpc",
             method="POST",
-            payload={"cmd": "device_setting", "params": {"setting": setting, "value": val}},
+            payload={"cmd": "device_setting", "params": {"setting": artemis_setting, "value": val}},
         )
         if res and res.get("success"):
-            return {"content": [{"type": "text", "text": res.get("output") or f"Updated {setting}={val}"}], "isError": False}
+            return {"content": [{"type": "text", "text": res.get("output") or f"Updated {artemis_setting}={val}"}], "isError": False}
         if setting == "brightness" and val.isdigit():
             rc, _, stderr = STATE.run_adb(["shell", "settings", "put", "system", "screen_brightness", val])
             return {"content": [{"type": "text", "text": f"Set brightness={val} via adb" if rc == 0 else stderr}], "isError": rc != 0}
-        if setting in ("wifi", "bluetooth"):
+        adb_svc = setting.lower().replace("_panel", "")
+        if adb_svc in ("wifi", "bluetooth"):
             sub = "enable" if val.lower() in ("on", "true", "1", "enable") else "disable"
-            rc, _, stderr = STATE.run_adb(["shell", "svc", setting, sub])
-            return {"content": [{"type": "text", "text": f"svc {setting} {sub} via adb" if rc == 0 else stderr}], "isError": rc != 0}
+            rc, _, stderr = STATE.run_adb(["shell", "svc", adb_svc, sub])
+            return {"content": [{"type": "text", "text": f"svc {adb_svc} {sub} via adb" if rc == 0 else stderr}], "isError": rc != 0}
         return {
             "content": [{"type": "text", "text": f"Setting '{setting}' requires Hanson :18888 bridge active on the phone."}],
             "isError": True,

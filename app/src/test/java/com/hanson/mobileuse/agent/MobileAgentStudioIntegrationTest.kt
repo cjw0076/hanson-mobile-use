@@ -321,9 +321,9 @@ class MobileAgentStudioIntegrationTest {
     }
 
     @Test
-    fun toolSpecRegistry_exposes42ToolsWithBridgeMatchingWorkspaceSchemas() {
+    fun toolSpecRegistry_exposes45ToolsWithBridgeMatchingWorkspaceSchemas() {
         val specs = ToolSpecRegistry.allSpecs
-        assertEquals(42, specs.size)
+        assertEquals(45, specs.size)
 
         val expectedWorkspaceParams = mapOf(
             "workspace_list" to listOf("sub_dir", "max_depth"),
@@ -343,7 +343,7 @@ class MobileAgentStudioIntegrationTest {
         val geminiDeclarations = ToolSpecRegistry.toGeminiToolsJson()
             .getJSONObject(0)
             .getJSONArray("functionDeclarations")
-        assertEquals(42, geminiDeclarations.length())
-        assertEquals(42, ToolSpecRegistry.toGeminiInteractionsToolsJson().length())
+        assertEquals(45, geminiDeclarations.length())
+        assertEquals(45, ToolSpecRegistry.toGeminiInteractionsToolsJson().length())
     }
 }

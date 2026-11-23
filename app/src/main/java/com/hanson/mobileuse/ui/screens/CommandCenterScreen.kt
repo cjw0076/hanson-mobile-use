@@ -1,5 +1,8 @@
 package com.hanson.mobileuse.ui.screens
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
@@ -55,7 +58,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
-import java.io.File
 import java.util.Calendar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -83,6 +85,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.hanson.mobileuse.accessibility.AccessibilityEngineState
+import com.hanson.mobileuse.accessibility.HansonAccessibilityService
 import com.hanson.mobileuse.agent.ActionReceipt
 import com.hanson.mobileuse.agent.AgentRunSession
 import com.hanson.mobileuse.agent.AgentRunStatus
@@ -95,6 +98,7 @@ import com.hanson.mobileuse.agent.HumanMemoryBubble
 import com.hanson.mobileuse.agent.InteractiveMorphEngine
 import com.hanson.mobileuse.agent.InteractiveMorphSurface
 import com.hanson.mobileuse.agent.LiveChatMessage
+import com.hanson.mobileuse.agent.LiveVoicePhase
 import com.hanson.mobileuse.agent.LiveVoiceSessionManager
 import com.hanson.mobileuse.agent.MemoryTelemetryState
 import com.hanson.mobileuse.agent.MobileAiInfrastructureState
@@ -112,7 +116,7 @@ import com.hanson.mobileuse.agent.WatcherRule
 import com.hanson.mobileuse.notification.InterceptedNotification
 import com.hanson.mobileuse.ui.components.AhaboardDotGridBox
 import com.hanson.mobileuse.ui.components.AhaboardMultimodalMediaView
-import com.hanson.mobileuse.ui.components.ClipboardQuickActionBanner
+import com.hanson.mobileuse.ui.components.AhaboardResponseCard
 import com.hanson.mobileuse.ui.components.CodeBadge
 import com.hanson.mobileuse.ui.components.CompanionDrawerBottomSheet
 import com.hanson.mobileuse.ui.components.CompanionDrawerTab
@@ -126,7 +130,6 @@ import com.hanson.mobileuse.ui.components.GenerativeUiSpec
 import com.hanson.mobileuse.ui.components.GenerativeUiStateHolder
 import com.hanson.mobileuse.ui.components.GenerativeUiSurfaceCard
 import com.hanson.mobileuse.ui.components.GlassCard
-import com.hanson.mobileuse.ui.components.HumanExperienceModeHeaderBar
 import com.hanson.mobileuse.ui.components.HumanFriendlyComposerBar
 import com.hanson.mobileuse.ui.components.HumanTakeoverBannerCard
 import com.hanson.mobileuse.ui.components.InlineApprovalPromptCard
@@ -134,13 +137,10 @@ import com.hanson.mobileuse.ui.components.InteractiveMorphSurfaceCard
 import com.hanson.mobileuse.ui.components.LiveExecutionChecklistCard
 import com.hanson.mobileuse.ui.components.LivingPresenceHeroStage
 import com.hanson.mobileuse.ui.components.MemoryBubblesStripCard
-import com.hanson.mobileuse.ui.components.OneTapGuidedReadinessCard
-import com.hanson.mobileuse.ui.components.OneTapUndoReceiptBanner
 import com.hanson.mobileuse.ui.components.PickleAgentHubSheet
 import com.hanson.mobileuse.ui.components.PickleHubTab
 import com.hanson.mobileuse.ui.components.PinnedRoutinesAndShowMeCard
 import com.hanson.mobileuse.ui.components.PlanBlueprintActionBanner
-import com.hanson.mobileuse.ui.components.ProactiveDailyBriefCard
 import com.hanson.mobileuse.ui.components.SessionInboxDrawerSheet
 import com.hanson.mobileuse.ui.components.SlashAndMentionPaletteCard
 import com.hanson.mobileuse.ui.components.StudioComposerCard
@@ -234,7 +234,12 @@ fun CommandCenterScreen(
         editionMode: FirestoreEditionMode,
         userUid: String
     ) -> Unit = { _, _, _, _, _, _, _ -> },
-    onTriggerCloudSyncNow: () -> Unit = {}
+    onTriggerCloudSyncNow: () -> Unit = {},
+    showOnboardingInitially: Boolean = false,
+    onCompleteOnboarding: () -> Unit = {},
+    lastCloudApiError: String? = null,
+    onSaveAiConnection: ((apiKey: String?, customBaseUrl: String?, selectedModel: String?) -> Unit)? = null,
+    onToggleVoice: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
@@ -247,6 +252,7 @@ fun CommandCenterScreen(
     var selectedModeIdx by rememberSaveable { mutableIntStateOf(0) }
     var showOverflowMenu by remember { mutableStateOf(false) }
     var showApiKeySheet by rememberSaveable { mutableStateOf(false) }
+    var showOnboardingWizard by rememberSaveable { mutableStateOf(showOnboardingInitially) }
     var selectedDetailMessage by remember { mutableStateOf<LiveChatMessage?>(null) }
 
     var showSessionDrawer by rememberSaveable { mutableStateOf(false) }
@@ -290,9 +296,45 @@ fun CommandCenterScreen(
         session.status == AgentRunStatus.AWAITING_APPROVAL ||
         session.status == AgentRunStatus.AWAITING_TAKEOVER
 
-    val isEnvConnected = a11yState.isConnected ||
-        permissionState.readinessPercent >= 80 ||
-        permissionState.items.any { it.id.contains("a11y", ignoreCase = true) && it.isGranted }
+    val isEnvConnected = a11yState.isConnected && HansonAccessibilityService.instance != null
+
+    val resolvedSaveAiConnection: (String?, String?, String?) -> Unit = { newKey, newUrl, newModel ->
+        if (onSaveAiConnection != null) {
+            onSaveAiConnection(newKey, newUrl, newModel)
+        } else {
+            val engine = com.hanson.mobileuse.agent.HansonRuntimeHolder.getAgentEngine(context)
+            val trimmedKey = newKey?.trim()
+            val trimmedUrl = newUrl?.trim()
+            val isBridgeUrl = !trimmedUrl.isNullOrBlank() && trimmedUrl.contains("18889")
+            val resolvedModel = when {
+                !newModel.isNullOrBlank() -> newModel.trim()
+                isBridgeUrl -> "cli-subscription-bridge"
+                trimmedUrl == "" && engine.config.value.modelName == "cli-subscription-bridge" ->
+                    GeminiMultimodalClient.DEFAULT_MODEL
+                else -> null
+            }
+            engine.updateConfig(
+                apiKey = trimmedKey?.takeIf { it.isNotEmpty() },
+                modelName = resolvedModel,
+                customBaseUrl = trimmedUrl
+            )
+            val effectiveKey = trimmedKey?.takeIf { it.isNotEmpty() } ?: engine.config.value.apiKey
+            LiveVoiceSessionManager.configureGeminiLiveCredentials(effectiveKey)
+        }
+    }
+
+    val resolvedToggleVoice: () -> Unit = {
+        if (onToggleVoice != null) {
+            onToggleVoice()
+        } else if (LiveVoiceSessionManager.state.value.isActive) {
+            LiveVoiceSessionManager.stopLiveSession()
+        } else {
+            LiveVoiceSessionManager.startLiveSession(
+                context = context.applicationContext,
+                apiKey = apiKey.takeIf { it.isNotBlank() }
+            )
+        }
+    }
 
     val hudShowing by com.hanson.mobileuse.service.FloatingHudService.isShowing.collectAsState()
     val hudReady = hudShowing || runCatching { Settings.canDrawOverlays(context) }.getOrDefault(false)
@@ -379,12 +421,7 @@ fun CommandCenterScreen(
                 activeMode = uxMode,
                 onSelectMode = onSelectUxMode,
                 isVoiceListening = isVoiceListening,
-                onToggleVoice = {
-                    LiveVoiceSessionManager.toggleLiveVoiceSession(context) { spoken ->
-                        activeMorphSurface = InteractiveMorphEngine.synthesizeFromPrompt(spoken, memoryBubbles)
-                        onSendChatMessage(spoken)
-                    }
-                },
+                onToggleVoice = resolvedToggleVoice,
                 onToggleContrast = { ObsidianColors.toggleTheme() },
                 onOpenPickleHub = {
                     pickleHubInitialTab = PickleHubTab.VAULT
@@ -435,6 +472,20 @@ fun CommandCenterScreen(
                         onClick = {
                             showOverflowMenu = false
                             onSendChatMessage("적재적소 멀티모델 모드로 바꿔줘")
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                "✨ 처음 시작 가이드 (3단계 설정)",
+                                color = ObsidianColors.TextPrimary,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        },
+                        onClick = {
+                            showOverflowMenu = false
+                            showOnboardingWizard = true
                         }
                     )
                     DropdownMenuItem(
@@ -527,6 +578,87 @@ fun CommandCenterScreen(
                 },
                 onStop = onStopAgent
             )
+
+            // 2.5 P0-3 Transparent Cloud/Bridge Error Alert Banner (Monochrome Paper/Carbon)
+            val activeApiError = lastCloudApiError?.trim()?.takeIf { it.isNotEmpty() }
+            AnimatedVisibility(visible = activeApiError != null) {
+                if (activeApiError != null) {
+                    val errorHeadline = classifyCloudApiErrorTitle(activeApiError)
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 6.dp)
+                            .clip(RoundedCornerShape(18.dp))
+                            .background(ObsidianColors.SurfaceHigh)
+                            .border(1.5.dp, ObsidianColors.Error, RoundedCornerShape(18.dp))
+                            .padding(horizontal = 14.dp, vertical = 11.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(999.dp))
+                                    .background(ObsidianColors.Accent)
+                                    .padding(horizontal = 9.dp, vertical = 3.dp)
+                            ) {
+                                Text(
+                                    text = "⚠ $errorHeadline",
+                                    color = ObsidianColors.OnAccent,
+                                    fontSize = 10.5.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    maxLines = 1
+                                )
+                            }
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(999.dp))
+                                        .background(ObsidianColors.Surface)
+                                        .border(1.dp, ObsidianColors.GlassBorder, RoundedCornerShape(999.dp))
+                                        .clickable { showOnboardingWizard = true }
+                                        .padding(horizontal = 9.dp, vertical = 5.dp)
+                                ) {
+                                    Text(
+                                        text = "가이드",
+                                        color = ObsidianColors.TextPrimary,
+                                        fontSize = 10.5.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(999.dp))
+                                        .background(ObsidianColors.Accent)
+                                        .clickable { showApiKeySheet = true }
+                                        .padding(horizontal = 11.dp, vertical = 5.dp)
+                                ) {
+                                    Text(
+                                        text = "AI 연결 설정",
+                                        color = ObsidianColors.OnAccent,
+                                        fontSize = 10.5.sp,
+                                        fontWeight = FontWeight.ExtraBold
+                                    )
+                                }
+                            }
+                        }
+                        Text(
+                            text = activeApiError,
+                            color = ObsidianColors.TextPrimary,
+                            fontSize = 11.5.sp,
+                            lineHeight = 16.sp,
+                            maxLines = 3,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
 
             if (uxMode == UserExperienceMode.SIMPLE_HUMAN) {
                 // Setup readiness is cleanly presented inside ContextualFocusDeckCard (slide 1/N) without stacking boxes.
@@ -634,10 +766,10 @@ fun CommandCenterScreen(
                                             BoardMode.INSTANT -> Unit
                                             BoardMode.BOARD -> GenerativeUiStateHolder.restoreDefaultCockpit()
                                             BoardMode.VOICE -> {
-                                                onToggleTts()
-                                                LiveVoiceSessionManager.toggleLiveVoiceSession(context) { spoken ->
-                                                    onSendChatMessage(spoken)
+                                                if (!ttsEnabled) {
+                                                    onToggleTts()
                                                 }
+                                                resolvedToggleVoice()
                                             }
                                         }
                                     },
@@ -721,7 +853,8 @@ fun CommandCenterScreen(
                 }
 
                 if (uxMode == UserExperienceMode.SIMPLE_HUMAN) {
-                    val isIdleHome = chatMessages.isEmpty() && activeMorphSurface == null && !isKeyboardOpen
+                    val hasNoUserMessages = chatMessages.none { it.sender == ChatSender.USER }
+                    val isIdleHome = hasNoUserMessages && activeMorphSurface == null && !isKeyboardOpen
                     item(key = "human_living_orb_hero") {
                         LivingPresenceHeroStage(
                             greeting = presenceGreeting,
@@ -767,7 +900,7 @@ fun CommandCenterScreen(
                                 )
                             }
                         }
-                    } else if (chatMessages.isEmpty()) {
+                    } else if (hasNoUserMessages || clipboardSuggestions.isNotEmpty()) {
                         item(key = "human_contextual_focus_deck") {
                             ContextualFocusDeckCard(
                                 brief = dailyBrief,
@@ -776,7 +909,7 @@ fun CommandCenterScreen(
                                 hudReady = hudReady,
                                 aiReady = hasCloudToken,
                                 onRunGoal = { goalPrompt ->
-                                    activeMorphSurface = InteractiveMorphEngine.synthesizeFromPrompt(goalPrompt, memoryBubbles)
+                                    activeMorphSurface = null
                                     onSendChatMessage(goalPrompt)
                                 },
                                 onRunClipboard = { suggestion ->
@@ -899,33 +1032,81 @@ fun CommandCenterScreen(
                                 )
                             }
                         } else {
+                            val isErrorMessage = !msg.succeeded
                             GlassCard(
                                 modifier = Modifier
                                     .fillMaxWidth(0.96f)
                                     .clickable { selectedDetailMessage = msg },
                                 cornerRadius = 26.dp,
                                 containerColor = ObsidianColors.Surface,
-                                borderColor = ObsidianColors.GlassBorder,
+                                borderColor = if (isErrorMessage) ObsidianColors.Error else ObsidianColors.GlassBorder,
                                 tactileBottomLip = false,
                                 contentPadding = PaddingValues(20.dp)
                             ) {
-                                if (msg.structuredCard?.headerTitle != null) {
+                                if (isErrorMessage) {
+                                    val msgErrorTitle = classifyCloudApiErrorTitle(
+                                        listOf(msg.subtitle, msg.toolBadge.orEmpty(), msg.text).joinToString(" ")
+                                    )
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(999.dp))
+                                                .background(ObsidianColors.Accent)
+                                                .padding(horizontal = 9.dp, vertical = 3.dp)
+                                        ) {
+                                            Text(
+                                                text = "⚠ $msgErrorTitle",
+                                                color = ObsidianColors.OnAccent,
+                                                fontSize = 10.sp,
+                                                fontWeight = FontWeight.ExtraBold
+                                            )
+                                        }
+                                        if (!msg.toolBadge.isNullOrBlank()) {
+                                            CodeBadge(msg.toolBadge)
+                                        }
+                                    }
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                }
+
+                                val isWebCitationCard = msg.structuredCard?.templateType == StructuredUiTemplateType.CURATED_LIST &&
+                                    msg.structuredCard.items.isNotEmpty() &&
+                                    msg.structuredCard.items.all { it.actionUrlOrCmd.startsWith("https://", ignoreCase = true) }
+
+                                val openCitationUrl: (com.hanson.mobileuse.agent.StructuredUiItem) -> Unit = { item ->
+                                    val actionUrl = item.actionUrlOrCmd.trim()
+                                    if (actionUrl.startsWith("http://", ignoreCase = true) ||
+                                        actionUrl.startsWith("https://", ignoreCase = true)
+                                    ) {
+                                        runCatching {
+                                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(actionUrl)).apply {
+                                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                            }
+                                            context.startActivity(intent)
+                                        }
+                                    } else {
+                                        selectedDetailMessage = msg
+                                    }
+                                }
+
+                                if (msg.structuredCard?.headerTitle != null && !isWebCitationCard) {
                                     Text(
                                         text = msg.structuredCard.headerTitle,
                                         color = ObsidianColors.TextPrimary,
                                         fontSize = 14.5.sp,
                                         fontWeight = FontWeight.Bold
                                     )
-                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Spacer(modifier = Modifier.height(6.dp))
                                 }
 
-                                // Human-Friendly Core Summary
-                                Text(
-                                    text = msg.text,
-                                    color = ObsidianColors.TextPrimary,
-                                    fontSize = 13.5.sp,
-                                    fontWeight = if (msg.structuredCard != null || msg.mediaBlock != null) FontWeight.SemiBold else FontWeight.Normal,
-                                    lineHeight = 20.sp
+                                // Ahaboard-Style Structured Board & Rich Markdown Renderer (ZERO literal `**` or `*`)
+                                AhaboardResponseCard(
+                                    rawText = msg.text,
+                                    citations = if (isWebCitationCard) msg.structuredCard?.items.orEmpty() else emptyList(),
+                                    onCitationClick = openCitationUrl
                                 )
 
                                 // Ahaboard Inline Multimodal Media Block (GLB 3D / MP4 Video / GIF Loop / Image / Code Widget)
@@ -938,14 +1119,12 @@ fun CommandCenterScreen(
                                     )
                                 }
 
-                                // Pre-Structured UI Card (if present)
-                                if (msg.structuredCard != null) {
+                                // Non-citation Structured UI Card (e.g. METRIC_GRID, COMPARISON_TABLE)
+                                if (msg.structuredCard != null && !isWebCitationCard) {
                                     Spacer(modifier = Modifier.height(10.dp))
                                     StructuredUiCardRenderer(
                                         card = msg.structuredCard,
-                                        onItemClick = { item ->
-                                            selectedDetailMessage = msg
-                                        }
+                                        onItemClick = openCitationUrl
                                     )
                                 }
 
@@ -955,9 +1134,25 @@ fun CommandCenterScreen(
                                 Spacer(modifier = Modifier.height(6.dp))
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.End,
+                                    horizontalArrangement = if (isErrorMessage) Arrangement.SpaceBetween else Arrangement.End,
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
+                                    if (isErrorMessage) {
+                                        Box(
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(999.dp))
+                                                .background(ObsidianColors.Accent)
+                                                .clickable { showApiKeySheet = true }
+                                                .padding(horizontal = 10.dp, vertical = 4.dp)
+                                        ) {
+                                            Text(
+                                                text = "AI 연결 설정",
+                                                color = ObsidianColors.OnAccent,
+                                                fontSize = 10.5.sp,
+                                                fontWeight = FontWeight.ExtraBold
+                                            )
+                                        }
+                                    }
                                     Text(
                                         text = "상세 보기 ↗",
                                         color = ObsidianColors.TextSecondary,
@@ -971,16 +1166,25 @@ fun CommandCenterScreen(
                 }
             }
 
-            // 4.5 Live Voice Conversation Bar
-            if (isVoiceListening) {
+            // 4.5 Live Voice Conversation Bar (also surfaces voice errors such as missing mic permission)
+            val voiceErrorText = voiceState.errorMessage?.takeIf { it.isNotBlank() }
+            if (isVoiceListening || (voiceState.phase == LiveVoicePhase.ERROR && voiceErrorText != null)) {
+                val isVoiceErr = voiceState.phase == LiveVoicePhase.ERROR && !isVoiceListening
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp, vertical = 4.dp)
                         .clip(RoundedCornerShape(14.dp))
                         .background(ObsidianColors.Surface)
-                        .border(1.dp, ObsidianColors.Accent, RoundedCornerShape(14.dp))
-                        .clickable { LiveVoiceSessionManager.bargeInAndListen() }
+                        .border(
+                            1.dp,
+                            if (isVoiceErr) ObsidianColors.Error else ObsidianColors.Accent,
+                            RoundedCornerShape(14.dp)
+                        )
+                        .clickable {
+                            if (isVoiceErr) resolvedToggleVoice()
+                            else LiveVoiceSessionManager.bargeInAndListen()
+                        }
                         .padding(horizontal = 14.dp, vertical = 8.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
@@ -992,7 +1196,7 @@ fun CommandCenterScreen(
                             fontSize = 11.5.sp,
                             fontWeight = FontWeight.ExtraBold
                         )
-                        val liveTranscript = voiceState.partialTranscript.ifBlank {
+                        val liveTranscript = voiceErrorText ?: voiceState.partialTranscript.ifBlank {
                             voiceState.lastSpokenResponse.ifBlank {
                                 "말씀하시면 화면을 함께 보고 대화하며 제어합니다"
                             }
@@ -1009,11 +1213,11 @@ fun CommandCenterScreen(
                         modifier = Modifier
                             .clip(RoundedCornerShape(999.dp))
                             .background(ObsidianColors.Accent)
-                            .clickable { LiveVoiceSessionManager.stopLiveVoiceSession() }
+                            .clickable { LiveVoiceSessionManager.stopLiveSession() }
                             .padding(horizontal = 10.dp, vertical = 5.dp)
                     ) {
                         Text(
-                            text = "종료",
+                            text = if (isVoiceErr) "닫기" else "종료",
                             color = ObsidianColors.OnAccent,
                             fontSize = 10.5.sp,
                             fontWeight = FontWeight.Bold
@@ -1063,12 +1267,7 @@ fun CommandCenterScreen(
                         foregroundAppLabel = foregroundAppLabel,
                         onToggleAttachScreen = { attachScreenContext = !attachScreenContext },
                         isVoiceListening = isVoiceListening,
-                        onToggleVoice = {
-                            LiveVoiceSessionManager.toggleLiveVoiceSession(context) { spoken ->
-                                activeMorphSurface = InteractiveMorphEngine.synthesizeFromPrompt(spoken, memoryBubbles)
-                                onSendChatMessage(spoken)
-                            }
-                        },
+                        onToggleVoice = resolvedToggleVoice,
                         isRunning = isAgentBusy,
                         onSend = {
                             val rawPrompt = promptInput.trim()
@@ -1080,12 +1279,10 @@ fun CommandCenterScreen(
                                 promptInput = ""
                                 attachScreenContext = false
                                 focusManager.clearFocus()
-                                val synthesized = InteractiveMorphEngine.synthesizeFromPrompt(rawPrompt, memoryBubbles)
-                                if (synthesized != null) {
-                                    activeMorphSurface = synthesized
-                                } else {
-                                    onSendChatMessage(composed)
-                                }
+                                // B2: Always forward user prompts to the real AI engine (never hijack into mock morph cards).
+                                // Interactive morph cards remain explicitly opt-in via the "✦ UI 변형" dock button.
+                                activeMorphSurface = null
+                                onSendChatMessage(composed)
                             }
                         },
                         onStop = onStopAgent
@@ -1270,16 +1467,18 @@ fun CommandCenterScreen(
                 initialKey = apiKey,
                 onDismiss = { showApiKeySheet = false },
                 onSaveKey = { newKey ->
-                    runCatching {
-                        File(context.filesDir, "hanson_api_keys.txt").writeText(newKey)
+                    val trimmedKey = newKey.trim()
+                    if (trimmedKey.isNotEmpty()) {
+                        resolvedSaveAiConnection(trimmedKey, null, null)
                     }
-                    runtimeEngine.updateConfig(apiKey = newKey)
                     showApiKeySheet = false
                 },
                 initialCustomBaseUrl = runtimeEngine.config.value.customBaseUrl,
                 currentModelName = modelName,
                 onSaveCustomBaseUrl = { newUrl ->
-                    runtimeEngine.updateConfig(customBaseUrl = newUrl)
+                    val trimmedUrl = newUrl.trim()
+                    val bridgeModel = if (trimmedUrl.contains("18889")) "cli-subscription-bridge" else null
+                    resolvedSaveAiConnection(null, trimmedUrl, bridgeModel)
                 }
             )
         }
@@ -1361,12 +1560,50 @@ fun CommandCenterScreen(
                 onTriggerCloudSyncNow = onTriggerCloudSyncNow
             )
         }
+        if (showOnboardingWizard) {
+            val runtimeEngine = remember(context) {
+                com.hanson.mobileuse.agent.HansonRuntimeHolder.getAgentEngine(context)
+            }
+            val notifReady = permissionState.items.any {
+                it.id.contains("notif", ignoreCase = true) && it.isGranted
+            }
+            com.hanson.mobileuse.ui.components.ConsumerOnboardingWizardSheet(
+                initialApiKey = apiKey,
+                initialCustomBaseUrl = runtimeEngine.config.value.customBaseUrl,
+                a11yReady = isEnvConnected,
+                hudReady = hudReady,
+                notifReady = notifReady,
+                onApplyStarterPreferences = { pickedList ->
+                    val existingFacts = memoryBubbles.map { it.factKo }.toSet()
+                    pickedList.forEach { opt ->
+                        if (opt.factKo !in existingFacts) {
+                            onAddBubble(opt.factKo)
+                        }
+                    }
+                },
+                onSaveAiConnection = { newKey, newUrl, selectedModel ->
+                    resolvedSaveAiConnection(
+                        newKey.takeIf { it.isNotBlank() },
+                        newUrl,
+                        selectedModel
+                    )
+                },
+                onOneTouchSetup = onOneTouchAutoSetup,
+                onFinish = { demoPrompt ->
+                    showOnboardingWizard = false
+                    onCompleteOnboarding()
+                    if (!demoPrompt.isNullOrBlank()) {
+                        activeMorphSurface = InteractiveMorphEngine.synthesizeFromPrompt(demoPrompt, memoryBubbles)
+                    }
+                },
+                onDismiss = {
+                    showOnboardingWizard = false
+                    onCompleteOnboarding()
+                }
+            )
+        }
     }
 }
-
-/**
- * Renders pre-structured Human UI Card templates inside an assistant chat bubble.
- */
 @Composable
 private fun StructuredUiCardRenderer(
     card: StructuredUiCard,
@@ -1454,7 +1691,7 @@ private fun StructuredUiCardRenderer(
                             text = item.subtitle,
                             color = ObsidianColors.TextSecondary,
                             fontSize = 11.sp,
-                            maxLines = 2,
+                            maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
                     }
@@ -1500,7 +1737,9 @@ private fun ChatDetailModalDialog(
     onRunFollowUp: (String) -> Unit
 ) {
     val detail = msg.detailPayload
+    val modalContext = LocalContext.current
     var isDisclosureExpanded by remember { mutableStateOf(false) }
+    var copiedItemNoticeKo by remember { mutableStateOf<String?>(null) }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)
 
     ModalBottomSheet(
@@ -1589,13 +1828,7 @@ private fun ChatDetailModalDialog(
                         fontWeight = FontWeight.Bold
                     )
                     Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        text = msg.text,
-                        color = ObsidianColors.TextPrimary,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Normal,
-                        lineHeight = 21.sp
-                    )
+                    AhaboardResponseCard(rawText = msg.text)
                     val sourceUrl = detail?.sourceUrl.orEmpty()
                     if (sourceUrl.startsWith("http")) {
                         Spacer(modifier = Modifier.height(10.dp))
@@ -1633,13 +1866,41 @@ private fun ChatDetailModalDialog(
                     StructuredUiCardRenderer(
                         card = msg.structuredCard,
                         onItemClick = { item ->
-                            if (item.actionUrlOrCmd.startsWith("http")) {
-                                onOpenUrl(item.actionUrlOrCmd)
-                            } else {
-                                onRunFollowUp("${item.title} 자세히 알려줘")
+                            val action = item.actionUrlOrCmd.trim()
+                            when {
+                                action.startsWith("http://", ignoreCase = true) ||
+                                    action.startsWith("https://", ignoreCase = true) -> {
+                                    onOpenUrl(action)
+                                }
+                                action.isEmpty() -> {
+                                    // P0-5: Never auto-send synthetic follow-up prompts when actionUrlOrCmd is empty.
+                                    val copyPayload = listOf(item.title, item.subtitle)
+                                        .filter { it.isNotBlank() }
+                                        .joinToString("\n")
+                                    if (copyPayload.isNotBlank()) {
+                                        runCatching {
+                                            val cm = modalContext.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                            cm?.setPrimaryClip(ClipData.newPlainText("HansonItem", copyPayload))
+                                        }
+                                        copiedItemNoticeKo = "항목 내용을 복사했어요"
+                                    } else {
+                                        onDismiss()
+                                    }
+                                }
+                                else -> {
+                                    onRunFollowUp(action)
+                                }
                             }
                         }
                     )
+                    if (!copiedItemNoticeKo.isNullOrBlank()) {
+                        Text(
+                            text = copiedItemNoticeKo!!,
+                            color = ObsidianColors.TextMuted,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
                 }
 
                 // 3. Collapsible Technical Disclosure Accordion
@@ -1773,5 +2034,23 @@ private fun ChatDetailModalDialog(
                 }
             }
         }
+    }
+}
+
+private fun classifyCloudApiErrorTitle(rawError: String): String {
+    val lower = rawError.lowercase()
+    return when {
+        lower.contains("402") || lower.contains("크레딧") || lower.contains("credit") || lower.contains("잔액") ->
+            "API 크레딧 소진(402)"
+        lower.contains("401") || lower.contains("403") || lower.contains("인증") || lower.contains("invalid api key") ->
+            "API 키 인증 오류"
+        lower.contains("429") || lower.contains("rate") || lower.contains("한도") || lower.contains("quota") ->
+            "API 요청 한도(429)"
+        lower.contains("18889") || lower.contains("브리지") || lower.contains("bridge") ->
+            "노트북 브리지 미연결"
+        lower.contains("미설정") || lower.contains("미입력") || lower.contains("키가 없") || lower.contains("no api key") ->
+            "API 키 미설정"
+        else ->
+            "AI 연결 오류"
     }
 }
