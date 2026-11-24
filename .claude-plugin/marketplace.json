@@ -1,0 +1,25 @@
+{
+  "name": "hanson-mobile-use-marketplace",
+  "owner": {
+    "name": "Hanson Mobile-Use Contributors"
+  },
+  "description": "Official Claude Code & npx skills marketplace catalog for Hanson Mobile-Use AI (Android + iOS progressive-disclosure phone harness, Korean/Global app cards, and 12-tool MCP server).",
+  "plugins": [
+    {
+      "name": "hanson-mobile-use",
+      "source": "./",
+      "description": "Control Android & iOS phones with zero-dep Python scripts, :18888 native Accessibility + Korean IME + A2UI v1.0 + Proactive Secretary + local iOS Portal HTTP / macOS Mirroring.",
+      "version": "6.7.0",
+      "category": "mobile-automation",
+      "tags": [
+        "android",
+        "ios",
+        "mobile-harness",
+        "a2ui",
+        "proactive-secretary",
+        "korean-apps",
+        "mcp"
+      ]
+    }
+  ]
+}

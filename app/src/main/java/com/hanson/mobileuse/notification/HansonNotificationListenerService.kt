@@ -187,14 +187,85 @@ class HansonNotificationListenerService : NotificationListenerService() {
         val postTime = latestStyleMessage?.timestamp?.takeIf { it > 0 }
             ?: sbn.postTime.takeIf { it > 0 }
             ?: System.currentTimeMillis()
+        val finalSender = resolvedSender.ifBlank { appLabel }
+        val finalRoom = resolvedRoom.ifBlank { finalSender }
+
+        // Append ALL unseen messages from MessagingStyle (not just lastOrNull) into rolling thread buffer
+        val styleMessages = messagingStyle?.messages.orEmpty()
+        val selfUser = messagingStyle?.user
+        val selfUserName = selfUser?.name?.toString()?.trim().orEmpty()
+        if (styleMessages.isNotEmpty()) {
+            val batch = styleMessages.mapNotNull { msg ->
+                val msgText = msg.text?.toString()?.trim().orEmpty()
+                if (msgText.isEmpty()) return@mapNotNull null
+                val msgSender = msg.person?.name?.toString()?.trim().orEmpty().ifBlank { finalSender }
+                val msgTs = msg.timestamp.takeIf { it > 0L } ?: postTime
+
+                val isSelfAuthored = (msg.person != null && selfUser != null && msg.person == selfUser) ||
+                    (selfUserName.isNotEmpty() && msgSender.equals(selfUserName, ignoreCase = true)) ||
+                    msgSender == "나" ||
+                    msgSender.equals("Me", ignoreCase = true)
+                if (isSelfAuthored) {
+                    runCatching {
+                        com.hanson.mobileuse.agent.CommitmentDebtTrackerEngine.onSelfMessageObserved(
+                            context = applicationContext,
+                            packageName = pkg,
+                            roomOrTitle = finalRoom,
+                            counterparty = finalRoom,
+                            selfText = msgText,
+                            timestampMs = msgTs
+                        )
+                    }
+                }
+
+                ThreadedNotificationMessage(
+                    packageName = pkg,
+                    roomKey = finalRoom,
+                    sender = msgSender,
+                    text = msgText,
+                    timestampMs = msgTs
+                )
+            }
+            if (batch.isNotEmpty()) {
+                NotificationThreadBuffer.appendMessages(
+                    packageName = pkg,
+                    roomKey = finalRoom,
+                    items = batch,
+                    nowMs = postTime
+                )
+            } else {
+                NotificationThreadBuffer.appendMessage(
+                    packageName = pkg,
+                    roomKey = finalRoom,
+                    sender = finalSender,
+                    text = resolvedText,
+                    timestampMs = postTime,
+                    nowMs = postTime
+                )
+            }
+        } else {
+            NotificationThreadBuffer.appendMessage(
+                packageName = pkg,
+                roomKey = finalRoom,
+                sender = finalSender,
+                text = resolvedText,
+                timestampMs = postTime,
+                nowMs = postTime
+            )
+        }
+        val threadContext = NotificationThreadBuffer.getThreadContext(
+            packageName = pkg,
+            roomKey = finalRoom,
+            nowMs = postTime
+        )
 
         val intercepted = InterceptedNotification(
             sessionId = sessionId,
             notificationKey = sbn.key ?: sessionId,
             packageName = pkg,
             appLabel = appLabel,
-            sender = resolvedSender.ifBlank { appLabel },
-            roomOrTitle = resolvedRoom.ifBlank { resolvedSender.ifBlank { appLabel } },
+            sender = finalSender,
+            roomOrTitle = finalRoom,
             messageText = resolvedText,
             subText = subText,
             timestampMs = postTime,
@@ -204,6 +275,42 @@ class HansonNotificationListenerService : NotificationListenerService() {
         )
 
         RemoteInputSessionCache.put(intercepted)
+
+        // Local-only VIP contact touch & opt-in Notification-Storm Focus Shield
+        runCatching {
+            com.hanson.mobileuse.agent.RelationshipCareCadenceEngine.ensureInitialized(applicationContext)
+            com.hanson.mobileuse.agent.RelationshipCareCadenceEngine.recordContactTouch(
+                contactName = finalSender,
+                messageText = resolvedText,
+                timestampMs = postTime
+            )
+        }
+        if (notifyReactiveRules) {
+            runCatching {
+                val shieldDecision = NotificationStormShieldEngine.evaluateIncoming(
+                    packageName = pkg,
+                    roomKey = finalRoom,
+                    sender = finalSender,
+                    text = resolvedText,
+                    nowMs = postTime
+                )
+                if (shieldDecision.shouldSnooze && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    val snoozeMs = NotificationStormShieldEngine.config.value.snoozeDurationMs
+                    runCatching { snoozeNotification(sbn.key, snoozeMs) }
+                }
+            }
+        }
+
+        // Feed every non-ongoing, non-summary notification into the lightweight ProactiveSecretaryEngine
+        // WITHOUT initializing heavy MobileUseAgentEngine on unrelated notifications.
+        runCatching {
+            com.hanson.mobileuse.agent.ProactiveSecretaryEngine.onNotificationPosted(
+                context = applicationContext,
+                notification = intercepted,
+                threadContext = threadContext,
+                emitHighPriorityAlert = notifyReactiveRules
+            )
+        }
 
         // Only initialize & invoke MobileUseAgentEngine when reactive/auto-reply rules actually exist.
         if (notifyReactiveRules && hasReactiveAutomationRules()) {
@@ -227,6 +334,7 @@ class HansonNotificationListenerService : NotificationListenerService() {
     }
 
     private fun resolveAppLabel(pkg: String): String {
+        com.hanson.mobileuse.agent.AppDetailPlaybookRegistry.resolveAppLabelKo(pkg)?.let { return it }
         return when (pkg) {
             "com.kakao.talk" -> "카카오톡"
             "com.samsung.android.messaging", "com.google.android.apps.messaging" -> "메시지(SMS)"

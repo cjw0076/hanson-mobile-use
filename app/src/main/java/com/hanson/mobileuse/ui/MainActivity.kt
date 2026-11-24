@@ -59,8 +59,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
+import androidx.lifecycle.lifecycleScope
 import com.hanson.mobileuse.accessibility.GestureController
 import com.hanson.mobileuse.accessibility.HansonAccessibilityService
+import com.hanson.mobileuse.agent.BatchDigestA2uiBuilder
 import com.hanson.mobileuse.agent.ChatSender
 import com.hanson.mobileuse.agent.ClipboardQuickSuggestion
 import com.hanson.mobileuse.agent.GeminiMultimodalClient
@@ -68,15 +70,24 @@ import com.hanson.mobileuse.agent.HansonRuntimeHolder
 import com.hanson.mobileuse.agent.LiveVoiceSessionManager
 import com.hanson.mobileuse.agent.MobileUseAgentEngine
 import com.hanson.mobileuse.agent.PermissionHubManager
+import com.hanson.mobileuse.agent.PrivacyAndQuotaProofLedger
+import com.hanson.mobileuse.agent.ProactiveProposalToA2uiBridge
+import com.hanson.mobileuse.agent.ProactiveSecretaryEngine
 import com.hanson.mobileuse.agent.QuickIntentKind
+import com.hanson.mobileuse.agent.ShareToChecklistEngine
 import com.hanson.mobileuse.agent.SmartClipboardAndShareIntentDetector
 import com.hanson.mobileuse.agent.UserDemonstrationRecorder
 import com.hanson.mobileuse.agent.VaultSecretCategory
 import com.hanson.mobileuse.agent.WatcherActionMode
+import com.hanson.mobileuse.notification.NotificationStormShieldEngine
 import com.hanson.mobileuse.notification.RemoteInputSessionCache
 import com.hanson.mobileuse.service.FloatingHudService
 import com.hanson.mobileuse.service.HansonForegroundService
+import com.hanson.mobileuse.service.HansonSecretaryWidgetProvider
 import com.hanson.mobileuse.service.HansonSystemNexusReceiverActivity
+import com.hanson.mobileuse.service.HansonVirtualDisplayManager
+import org.json.JSONArray
+import org.json.JSONObject
 import com.hanson.mobileuse.ui.screens.CommandCenterScreen
 import com.hanson.mobileuse.ui.screens.InspectorBridgeScreen
 import com.hanson.mobileuse.ui.screens.PermissionsHubScreen
@@ -86,7 +97,10 @@ import com.hanson.mobileuse.ui.theme.HansonObsidianTheme
 import com.hanson.mobileuse.ui.theme.ObsidianColors
 import com.hanson.mobileuse.workspace.AgentSessionStore
 import com.hanson.mobileuse.workspace.MobileWorkspaceEngine
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * 5 Navigation tabs matching Figma UI prototype (figma-ui-prototype/index.html lines 598-620).
@@ -223,8 +237,17 @@ class MainActivity : ComponentActivity() {
                 val clipboardSuggestions by clipboardSuggestionsFlow.collectAsState()
                 val cloudSyncState by agentEngine.resolvedCloudSync.state.collectAsState()
                 val lastCloudApiError by agentEngine.lastCloudApiError.collectAsState()
+                val proactiveProposals by ProactiveSecretaryEngine.proposals.collectAsState()
+                val secretarySettings by ProactiveSecretaryEngine.settings.collectAsState()
+                val privacyProof by PrivacyAndQuotaProofLedger.snapshot.collectAsState()
+                val vdisplaySnapshot by HansonVirtualDisplayManager.uiSnapshot.collectAsState()
+                val stormShieldConfig by NotificationStormShieldEngine.config.collectAsState()
                 val latestReversibleReceipt = remember(allReceipts) {
                     allReceipts.firstOrNull { it.canOneTapUndo }
+                }
+
+                LaunchedEffect(proactiveProposals, privacyProof.localZeroCostScans) {
+                    HansonSecretaryWidgetProvider.requestRefresh(applicationContext)
                 }
 
                 LaunchedEffect(Unit) {
@@ -549,6 +572,173 @@ class MainActivity : ComponentActivity() {
                                             },
                                             onToggleVoice = {
                                                 toggleVoiceSession()
+                                            },
+                                            proactiveProposals = proactiveProposals,
+                                            secretarySettings = secretarySettings,
+                                            onExecuteProactiveProposal = { proposalId, actionKey, replyText, snoozeMinutes ->
+                                                lifecycleScope.launch(Dispatchers.IO) {
+                                                    val (_, message) = agentEngine.executeProactiveProposal(
+                                                        proposalId = proposalId,
+                                                        actionKey = actionKey,
+                                                        replyText = replyText,
+                                                        snoozeMinutes = snoozeMinutes
+                                                    )
+                                                    if (message.isNotBlank()) {
+                                                        withContext(Dispatchers.Main) {
+                                                            Toast.makeText(
+                                                                this@MainActivity,
+                                                                message,
+                                                                Toast.LENGTH_SHORT
+                                                            ).show()
+                                                        }
+                                                    }
+                                                }
+                                            },
+                                            onPublishProposalToA2ui = { proposal ->
+                                                ProactiveProposalToA2uiBridge.publishToA2uiRegistry(proposal)
+                                                Toast.makeText(
+                                                    this@MainActivity,
+                                                    "'${proposal.titleKo}' 제안을 A2UI 카드로 펼쳤어요.",
+                                                    Toast.LENGTH_SHORT
+                                                ).show()
+                                            },
+                                            onScanProactiveSecretary = {
+                                                lifecycleScope.launch(Dispatchers.IO) {
+                                                    val found = agentEngine.runProactiveSecretaryScan()
+                                                    val msg = if (found.isNotEmpty()) {
+                                                        "선제안 비서가 ${found.size}건을 새로 찾았어요."
+                                                    } else {
+                                                        "지금은 새로 챙길 선제안이 없어요."
+                                                    }
+                                                    withContext(Dispatchers.Main) {
+                                                        Toast.makeText(
+                                                            this@MainActivity,
+                                                            msg,
+                                                            Toast.LENGTH_SHORT
+                                                        ).show()
+                                                    }
+                                                }
+                                            },
+                                            onUpdateSecretarySettings = { transform ->
+                                                ProactiveSecretaryEngine.updateSettings(transform)
+                                            },
+                                            onToggleSecretaryPackageMute = { pkg, muted ->
+                                                ProactiveSecretaryEngine.togglePackageMute(pkg, muted)
+                                            },
+                                            onA2uiSecretaryAction = { actionName, contextJson ->
+                                                lifecycleScope.launch(Dispatchers.IO) {
+                                                    val handled = agentEngine.handleA2uiSecretaryAction(
+                                                        actionName = actionName,
+                                                        contextJson = contextJson
+                                                    )
+                                                    if (handled) {
+                                                        withContext(Dispatchers.Main) {
+                                                            Toast.makeText(
+                                                                this@MainActivity,
+                                                                "선제안 비서 액션을 실행했어요.",
+                                                                Toast.LENGTH_SHORT
+                                                            ).show()
+                                                        }
+                                                    }
+                                                }
+                                            },
+                                            privacyProof = privacyProof,
+                                            stormShieldConfig = stormShieldConfig,
+                                            vdisplaySnapshot = vdisplaySnapshot,
+                                            onBatchApproveSafeProposals = { safeIds ->
+                                                lifecycleScope.launch(Dispatchers.IO) {
+                                                    val payload = JSONObject().put("proposalIds", JSONArray(safeIds))
+                                                    val ok = agentEngine.handleA2uiSecretaryAction(
+                                                        actionName = BatchDigestA2uiBuilder.ACTION_BATCH_APPROVE_SAFE,
+                                                        contextJson = payload
+                                                    )
+                                                    withContext(Dispatchers.Main) {
+                                                        Toast.makeText(
+                                                            this@MainActivity,
+                                                            if (ok) "안전한 선제안 항목을 일괄 승인했어요." else "일괄 승인할 안전 항목이 없어요.",
+                                                            Toast.LENGTH_SHORT
+                                                        ).show()
+                                                    }
+                                                }
+                                            },
+                                            onReduceRoomFrequency = { roomKey ->
+                                                ProactiveSecretaryEngine.reduceRoomFrequency(roomKey)
+                                                Toast.makeText(
+                                                    this@MainActivity,
+                                                    "'${roomKey}' 방 선제안 빈도를 낮췄어요.",
+                                                    Toast.LENGTH_SHORT
+                                                ).show()
+                                            },
+                                            onAlwaysAllowSafeCalendar = { roomKey ->
+                                                ProactiveSecretaryEngine.alwaysAllowSafeCalendarForRoom(roomKey)
+                                                Toast.makeText(
+                                                    this@MainActivity,
+                                                    "'${roomKey}' 방 안전 일정은 빠른 승인으로 설정했어요.",
+                                                    Toast.LENGTH_SHORT
+                                                ).show()
+                                            },
+                                            onToggleStormShield = { enabled ->
+                                                if (enabled) {
+                                                    NotificationStormShieldEngine.startFocusBlock()
+                                                    Toast.makeText(
+                                                        this@MainActivity,
+                                                        "알림 폭풍 집중 방패를 켰어요. VIP·긴급 알림만 통과합니다.",
+                                                        Toast.LENGTH_SHORT
+                                                    ).show()
+                                                } else {
+                                                    NotificationStormShieldEngine.stopFocusBlock()
+                                                    val digestProposal = ProactiveSecretaryEngine.flushFocusShieldDigest()
+                                                    HansonSecretaryWidgetProvider.requestRefresh(applicationContext)
+                                                    Toast.makeText(
+                                                        this@MainActivity,
+                                                        if (digestProposal != null) "집중 방패를 끄고 복귀 3줄 브리프를 정리했어요." else "알림 폭풍 집중 방패를 껐어요.",
+                                                        Toast.LENGTH_SHORT
+                                                    ).show()
+                                                }
+                                            },
+                                            onPlaySpokenDailyBrief = {
+                                                lifecycleScope.launch(Dispatchers.IO) {
+                                                    agentEngine.playSpokenDailyBrief(forceSpeak = true)
+                                                    withContext(Dispatchers.Main) {
+                                                        Toast.makeText(
+                                                            this@MainActivity,
+                                                            "60초 음성 브리핑을 재생해요.",
+                                                            Toast.LENGTH_SHORT
+                                                        ).show()
+                                                    }
+                                                }
+                                            },
+                                            onExportPortabilityMarkdown = {
+                                                val markdown = agentEngine.exportCrossLabPortabilityMarkdown()
+                                                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                                clipboard?.setPrimaryClip(ClipData.newPlainText("HansonPortableContext", markdown))
+                                                Toast.makeText(
+                                                    this@MainActivity,
+                                                    "탈-에코시스템 Markdown(${markdown.length}자)을 클립보드에 복사했어요.",
+                                                    Toast.LENGTH_SHORT
+                                                ).show()
+                                            },
+                                            onRequestVirtualDisplayTakeover = {
+                                                HansonVirtualDisplayManager.requestUserTakeover("사용자가 직접 조작을 시작했습니다.")
+                                                Toast.makeText(
+                                                    this@MainActivity,
+                                                    "직접 조작 모드로 전환했어요. 완료 후 제어 반환을 눌러주세요.",
+                                                    Toast.LENGTH_SHORT
+                                                ).show()
+                                            },
+                                            onReturnVirtualDisplayControl = {
+                                                HansonVirtualDisplayManager.returnControlFromUser()
+                                                Toast.makeText(
+                                                    this@MainActivity,
+                                                    "에이전트에 제어권을 반환했어요.",
+                                                    Toast.LENGTH_SHORT
+                                                ).show()
+                                            },
+                                            onResumeVirtualDisplayAgent = {
+                                                HansonVirtualDisplayManager.resumeAgentAfterTakeover()
+                                            },
+                                            onStopVirtualDisplay = {
+                                                HansonVirtualDisplayManager.stop()
                                             }
                                         )
                                     }
@@ -710,18 +900,54 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleExternalNexusIntent(incomingIntent: Intent?) {
+        if (incomingIntent == null) return
+        val safeVault = runCatching { agentEngine.resolvedVault }.getOrNull()
+
+        // 1. Direct Android ACTION_SEND share intent -> Share-to-Checklist A2UI Surface
+        if (incomingIntent.action == Intent.ACTION_SEND) {
+            val sharedText = (incomingIntent.getStringExtra(Intent.EXTRA_TEXT)
+                ?: incomingIntent.getStringExtra(Intent.EXTRA_SUBJECT))
+                ?.trim()
+                .orEmpty()
+            incomingIntent.removeExtra(Intent.EXTRA_TEXT)
+            incomingIntent.removeExtra(Intent.EXTRA_SUBJECT)
+            if (sharedText.isNotBlank()) {
+                val checklist = ShareToChecklistEngine.analyzeSharedContent(
+                    rawTextOrUrl = sharedText,
+                    vault = safeVault,
+                    publishToRegistry = true
+                )
+                if (checklist != null) {
+                    Toast.makeText(
+                        this,
+                        "공유된 내용으로 체크리스트 카드를 만들었어요: ${checklist.titleKo}",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+        }
+
+        // 2. Forwarded HansonSystemNexusReceiverActivity prompt -> Confirmation card + Share-to-Checklist A2UI
         val pendingPrompt = incomingIntent
-            ?.getStringExtra(HansonSystemNexusReceiverActivity.EXTRA_PENDING_EXTERNAL_PROMPT)
+            .getStringExtra(HansonSystemNexusReceiverActivity.EXTRA_PENDING_EXTERNAL_PROMPT)
             ?.trim()
             .orEmpty()
         if (pendingPrompt.isBlank()) return
         val preview = incomingIntent
-            ?.getStringExtra(HansonSystemNexusReceiverActivity.EXTRA_PENDING_EXTERNAL_PREVIEW)
+            .getStringExtra(HansonSystemNexusReceiverActivity.EXTRA_PENDING_EXTERNAL_PREVIEW)
             ?.trim()
             .orEmpty()
             .ifBlank { pendingPrompt.take(100) }
-        incomingIntent?.removeExtra(HansonSystemNexusReceiverActivity.EXTRA_PENDING_EXTERNAL_PROMPT)
-        incomingIntent?.removeExtra(HansonSystemNexusReceiverActivity.EXTRA_PENDING_EXTERNAL_PREVIEW)
+        incomingIntent.removeExtra(HansonSystemNexusReceiverActivity.EXTRA_PENDING_EXTERNAL_PROMPT)
+        incomingIntent.removeExtra(HansonSystemNexusReceiverActivity.EXTRA_PENDING_EXTERNAL_PREVIEW)
+
+        runCatching {
+            ShareToChecklistEngine.analyzeSharedContent(
+                rawTextOrUrl = preview,
+                vault = safeVault,
+                publishToRegistry = true
+            )
+        }
 
         val confirmCard = ClipboardQuickSuggestion(
             kind = QuickIntentKind.DIRECT_COMMAND,

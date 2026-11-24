@@ -65,7 +65,10 @@ STUDIO_INSTRUCTIONS = (
 
 DEFAULT_ARTEMIS_URL = os.environ.get("ARTEMIS_URL", "http://127.0.0.1:18888").rstrip("/")
 DEFAULT_ARTEMIS_TOKEN = os.environ.get("ARTEMIS_TOKEN", "").strip()
-DEFAULT_ANDROID_SERIAL = os.environ.get("ANDROID_SERIAL", "").strip()
+DEFAULT_ANDROID_SERIAL = (
+    os.environ.get("HANSON_MCP_DEVICE_SERIAL", "").strip()
+    or os.environ.get("ANDROID_SERIAL", "").strip()
+)
 
 PACKAGE_NAME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z0-9_]+)+$")
 KEYCODE_RE = re.compile(r"^[A-Za-z0-9_]{1,48}$")
@@ -185,13 +188,28 @@ class MobileBridgeState:
                     return cand
         return None
 
-    def run_adb(self, args: List[str], timeout: float = 12.0, binary: bool = False) -> Tuple[int, Any, str]:
+    def pin_device_serial(self, serial: str) -> str:
+        """Pin an ADB device serial for this MCP session (resets forward flag on change)."""
+        cleaned = (serial or "").strip()
+        if cleaned != self.android_serial:
+            self.android_serial = cleaned
+            self.adb_forwarded = False
+        return self.android_serial
+
+    def run_adb(
+        self,
+        args: List[str],
+        timeout: float = 12.0,
+        binary: bool = False,
+        serial_override: Optional[str] = None,
+    ) -> Tuple[int, Any, str]:
         adb = self.resolve_adb()
         if not adb:
             return 127, (b"" if binary else ""), "adb executable not found on PATH or ANDROID_HOME"
         cmd = [adb]
-        if self.android_serial:
-            cmd.extend(["-s", self.android_serial])
+        active_serial = (serial_override or "").strip() or self.android_serial or os.environ.get("HANSON_MCP_DEVICE_SERIAL", "").strip() or os.environ.get("ANDROID_SERIAL", "").strip()
+        if active_serial:
+            cmd.extend(["-s", active_serial])
         cmd.extend(args)
         try:
             proc = subprocess.run(
@@ -281,15 +299,16 @@ def _adb_capture_screen_fallback(include_screenshot: bool, max_elements: int) ->
         if m:
             w, h = int(m.group(1)), int(m.group(2))
 
-    STATE.run_adb(["shell", "uiautomator", "dump", "/sdcard/hanson_mcp_dump.xml"], timeout=8.0)
-    rc_xml, xml_text, err_xml = STATE.run_adb(["shell", "cat", "/sdcard/hanson_mcp_dump.xml"], timeout=6.0)
+    # Zero-/sdcard/ streaming dump via `exec-out uiautomator dump /dev/tty`
+    rc_xml, xml_raw, err_xml = STATE.run_adb(["exec-out", "uiautomator", "dump", "/dev/tty"], timeout=10.0)
+    xml_text = str(xml_raw or "")
 
     elements: List[Dict[str, Any]] = []
     active_pkg = ""
-    if rc_xml == 0 and "<hierarchy" in str(xml_text):
-        raw_xml = str(xml_text)
-        start = raw_xml.find("<hierarchy")
-        raw_xml = raw_xml[start:]
+    if rc_xml == 0 and "<hierarchy" in xml_text:
+        start = xml_text.find("<hierarchy")
+        end = xml_text.rfind("</hierarchy>")
+        raw_xml = xml_text[start : end + len("</hierarchy>")] if end > start else xml_text[start:]
         try:
             root = ET.fromstring(raw_xml)
             idx = 0
@@ -679,6 +698,8 @@ def _resolve_target_px(args: Dict[str, Any]) -> Tuple[Optional[int], Optional[in
 
 def execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
     args = args or {}
+    if isinstance(args.get("device_serial"), str) and args["device_serial"].strip():
+        STATE.pin_device_serial(args["device_serial"])
 
     if name == "mobile_get_screen":
         include_shot = bool(args.get("include_screenshot", True))

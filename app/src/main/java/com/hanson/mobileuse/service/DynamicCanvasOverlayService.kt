@@ -41,12 +41,14 @@ import androidx.savedstate.SavedStateRegistry
 import androidx.savedstate.SavedStateRegistryController
 import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
+import com.hanson.mobileuse.agent.A2uiJsonCodec
 import com.hanson.mobileuse.agent.A2uiSurfaceRegistry
 import com.hanson.mobileuse.agent.CoDrawingCanvasEngine
 import com.hanson.mobileuse.agent.CrossAppOverlayMode
 import com.hanson.mobileuse.agent.DynamicUiEventBus
 import com.hanson.mobileuse.agent.HansonRuntimeHolder
 import com.hanson.mobileuse.agent.LiveVoiceSessionManager
+import com.hanson.mobileuse.agent.MobileUseAgentEngine
 import com.hanson.mobileuse.ui.components.A2uiSurfaceCard
 import com.hanson.mobileuse.ui.components.CoDrawingInteractiveCanvas
 import com.hanson.mobileuse.ui.components.CoDrawingToolbarPill
@@ -295,20 +297,28 @@ class DynamicCanvasOverlayService : Service() {
                                             surface = a2uiSurface,
                                             compactOverlayMode = true,
                                             onUserAction = { userAction ->
-                                                when (userAction.name) {
-                                                    "open_citation", "open_url" -> {
-                                                        val rawUrl = userAction.context["url"]?.toString().orEmpty()
-                                                        openExternalHttpsUrl(rawUrl)
-                                                    }
-                                                    "speak_board", "speak" -> {
-                                                        val spoken = userAction.context["text"]?.toString()?.trim().orEmpty()
-                                                        if (spoken.isNotBlank()) {
-                                                            LiveVoiceSessionManager.speakAgentResponse(spoken)
-                                                        }
-                                                    }
-                                                    else -> {
+                                                if (MobileUseAgentEngine.isSupportedA2uiSecretaryAction(userAction.name)) {
+                                                    val ctxJson = A2uiJsonCodec.mapToJsonObject(userAction.context)
+                                                    serviceScope.launch(Dispatchers.IO) {
                                                         val engine = HansonRuntimeHolder.getAgentEngine(applicationContext)
-                                                        engine.sendChatMessage(userAction.toHumanPromptSummary())
+                                                        engine.handleA2uiSecretaryAction(userAction.name, ctxJson)
+                                                    }
+                                                } else {
+                                                    when (userAction.name) {
+                                                        "open_citation", "open_url" -> {
+                                                            val rawUrl = userAction.context["url"]?.toString().orEmpty()
+                                                            openExternalHttpsUrl(rawUrl)
+                                                        }
+                                                        "speak_board", "speak" -> {
+                                                            val spoken = userAction.context["text"]?.toString()?.trim().orEmpty()
+                                                            if (spoken.isNotBlank()) {
+                                                                LiveVoiceSessionManager.speakAgentResponse(spoken)
+                                                            }
+                                                        }
+                                                        else -> {
+                                                            val engine = HansonRuntimeHolder.getAgentEngine(applicationContext)
+                                                            engine.sendChatMessage(userAction.toHumanPromptSummary())
+                                                        }
                                                     }
                                                 }
                                             },

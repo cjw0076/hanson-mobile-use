@@ -1532,14 +1532,51 @@ class AgentToolExecutionHarness @JvmOverloads constructor(
     }
 
     private fun executeManageCalendar(args: JSONObject): ToolExecutionOutcome {
-        val action = args.optString("action", "list").lowercase()
+        val action = args.optString("action", "list").trim().lowercase()
         val title = args.optString("title", "새 일정")
         val offsetMin = args.optLong("offset_minutes_from_now", 60L)
-        val durationMin = args.optLong("duration_minutes", 60L)
+        val durationMin = args.optLong("duration_minutes", 60L).coerceAtLeast(1L)
         val desc = args.optString("description", "Hanson Mobile-Use 에이전트가 생성한 일정")
+        val location = args.optString("location", "").trim()
+        val reminderMinutes = args.optInt("reminder_minutes", -1)
 
-        val startMs = System.currentTimeMillis() + offsetMin * 60_000L
-        val endMs = startMs + durationMin * 60_000L
+        val explicitStartMs = if (args.has("start_time_ms") && !args.isNull("start_time_ms")) {
+            args.optLong("start_time_ms", -1L).takeIf { it > 0L }
+        } else {
+            null
+        }
+        val startMs = explicitStartMs ?: (System.currentTimeMillis() + offsetMin * 60_000L)
+        val explicitEndMs = if (args.has("end_time_ms") && !args.isNull("end_time_ms")) {
+            args.optLong("end_time_ms", -1L).takeIf { it > startMs }
+        } else {
+            null
+        }
+        val endMs = explicitEndMs ?: (startMs + durationMin * 60_000L)
+        val resolvedDurationMin = ((endMs - startMs) / 60_000L).coerceAtLeast(1L)
+
+        if (action == "check_conflicts") {
+            val hasOverride = ProactiveContextApiConnector.calendarEventsProviderOverride != null
+            if (!hasOverride &&
+                ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CALENDAR) != PackageManager.PERMISSION_GRANTED
+            ) {
+                return ToolExecutionOutcome(false, "READ_CALENDAR 권한이 필요합니다.")
+            }
+            val conflicts = ProactiveContextApiConnector.findCalendarConflicts(context, startMs, endMs)
+            if (conflicts.isEmpty()) {
+                return ToolExecutionOutcome(true, "해당 시간대에 겹치는 일정이 없습니다.")
+            }
+            val fmt = java.text.SimpleDateFormat("MM/dd HH:mm", java.util.Locale.KOREA)
+            val lines = conflicts.joinToString("\n") { ev ->
+                val s = fmt.format(java.util.Date(ev.startTimeMs))
+                val e = fmt.format(java.util.Date(ev.endTimeMs))
+                val locSuffix = if (ev.location.isNotBlank()) " @ ${ev.location}" else ""
+                "- [$s~$e] ${ev.title}$locSuffix"
+            }
+            return ToolExecutionOutcome(
+                succeeded = true,
+                outputText = "겹치는 일정 ${conflicts.size}건:\n$lines"
+            )
+        }
 
         if (action == "add" || action == "create") {
             val hasWriteCal = ContextCompat.checkSelfPermission(
@@ -1555,17 +1592,47 @@ class AgentToolExecutionHarness @JvmOverloads constructor(
                         put(CalendarContract.Events.DTEND, endMs)
                         put(CalendarContract.Events.TITLE, title)
                         put(CalendarContract.Events.DESCRIPTION, desc)
+                        if (location.isNotBlank()) {
+                            put(CalendarContract.Events.EVENT_LOCATION, location)
+                        }
                         put(CalendarContract.Events.CALENDAR_ID, calId)
                         put(CalendarContract.Events.EVENT_TIMEZONE, java.util.TimeZone.getDefault().id)
                     }
-                    context.contentResolver.insert(CalendarContract.Events.CONTENT_URI, values)
+                    val insertedUri = context.contentResolver.insert(CalendarContract.Events.CONTENT_URI, values)
+                    var reminderAttached = false
+                    if (reminderMinutes > 0) {
+                        val eventId = insertedUri?.lastPathSegment?.toLongOrNull()
+                        if (eventId != null) {
+                            reminderAttached = runCatching {
+                                val remValues = ContentValues().apply {
+                                    put(CalendarContract.Reminders.EVENT_ID, eventId)
+                                    put(CalendarContract.Reminders.MINUTES, reminderMinutes)
+                                    put(CalendarContract.Reminders.METHOD, CalendarContract.Reminders.METHOD_ALERT)
+                                }
+                                context.contentResolver.insert(CalendarContract.Reminders.CONTENT_URI, remValues) != null
+                            }.getOrDefault(false)
+                        }
+                    }
+                    val timingSummary = if (explicitStartMs != null) {
+                        val dtFmt = java.text.SimpleDateFormat("MM/dd HH:mm", java.util.Locale.KOREA)
+                            .format(java.util.Date(startMs))
+                        "$dtFmt 시작, ${resolvedDurationMin}분간"
+                    } else {
+                        "${offsetMin}분 후 시작, ${resolvedDurationMin}분간"
+                    }
+                    val locationPart = if (location.isNotBlank()) ", 장소: $location" else ""
+                    val reminderPart = if (reminderAttached) ", ${reminderMinutes}분 전 알림 설정" else ""
                     return ToolExecutionOutcome(
                         succeeded = true,
-                        outputText = "캘린더 일정 등록 완료: '$title' (${offsetMin}분 후 시작, ${durationMin}분간)",
+                        outputText = "캘린더 일정 등록 완료: '$title' ($timingSummary$locationPart$reminderPart)",
                         receipt = ActionReceipt(
                             toolName = "manage_calendar",
                             summaryKo = "캘린더 일정 추가: '$title'",
-                            detailKo = "$desc (${durationMin}분)",
+                            detailKo = buildString {
+                                append("$desc (${resolvedDurationMin}분)")
+                                if (location.isNotBlank()) append(" · $location")
+                                if (reminderAttached) append(" · ${reminderMinutes}분 전 알림")
+                            },
                             undoHintKo = "캘린더 앱에서 일정을 삭제할 수 있습니다."
                         )
                     )
@@ -1575,6 +1642,9 @@ class AgentToolExecutionHarness @JvmOverloads constructor(
                 data = CalendarContract.Events.CONTENT_URI
                 putExtra(CalendarContract.Events.TITLE, title)
                 putExtra(CalendarContract.Events.DESCRIPTION, desc)
+                if (location.isNotBlank()) {
+                    putExtra(CalendarContract.Events.EVENT_LOCATION, location)
+                }
                 putExtra(CalendarContract.EXTRA_EVENT_BEGIN_TIME, startMs)
                 putExtra(CalendarContract.EXTRA_EVENT_END_TIME, endMs)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)

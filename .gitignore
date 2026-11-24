@@ -45,6 +45,8 @@ app/hanson_personal_routines.json
 .env.*
 google-services.json
 serviceAccount*.json
+harness/local/*
+!harness/local/README.md
 
 
 

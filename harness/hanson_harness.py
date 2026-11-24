@@ -37,6 +37,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
@@ -56,6 +57,223 @@ AGENT_WORKSPACE = Path(os.environ.get("HANSON_AGENT_WORKSPACE") or (CONFIG_DIR /
 DEFAULT_ARTEMIS_URL = os.environ.get("ARTEMIS_URL", "http://127.0.0.1:18888").rstrip("/")
 DEFAULT_ARTEMIS_TOKEN = os.environ.get("ARTEMIS_TOKEN", "").strip()
 VALID_PLATFORMS = ("android", "ios", "auto")
+VALID_SECRETARY_ACTIONS = ("approve", "dismiss", "snooze", "reply", "open_map", "a2ui")
+VALID_ROTATIONS: Dict[str, int] = {
+    "portrait": 0,
+    "landscape": 1,
+    "reverse_portrait": 2,
+    "reverse_landscape": 3,
+    "auto": -1,
+}
+_SAFE_PACKAGE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+$")
+
+
+# =============================================================================
+# Progressive-Disclosure App Cards, Structured Step Errors & Relational Grounding
+# =============================================================================
+
+class HansonStepError(RuntimeError):
+    """Structured step failure carrying inline UI tree & diff debug context."""
+
+    def __init__(
+        self,
+        message: str,
+        ui_tree: Optional[List[Dict[str, Any]]] = None,
+        diff: Optional[Dict[str, Any]] = None,
+    ):
+        super().__init__(message)
+        self.message = message
+        self.ui_tree: List[Dict[str, Any]] = list(ui_tree or [])
+        self.diff: Dict[str, Any] = dict(diff or {})
+
+
+class HiddenElementError(HansonStepError):
+    """Raised when a matched UI node is hidden behind another view (hidden=True, offscreen=False)."""
+
+
+class Near:
+    """Directional spatial relation matcher (`below`, `above`, `left`, `right`, `any`)."""
+
+    VALID_DIRECTIONS = ("below", "above", "left", "right", "any")
+
+    def __init__(self, target: Any, direction: str = "below", max_distance: float = 360.0):
+        d = (direction or "below").strip().lower()
+        if d not in self.VALID_DIRECTIONS:
+            raise ValueError(f"Near direction must be one of {self.VALID_DIRECTIONS}, got {direction!r}")
+        self.target = target
+        self.direction = d
+        self.max_distance = float(max_distance)
+
+    def _matches_anchor(self, node: Dict[str, Any], all_nodes: List[Dict[str, Any]]) -> bool:
+        if isinstance(self.target, Predicate):
+            return self.target.matches(node, all_nodes=all_nodes)
+        if isinstance(self.target, dict):
+            return node is self.target or (
+                node.get("x") == self.target.get("x")
+                and node.get("y") == self.target.get("y")
+                and node.get("text") == self.target.get("text")
+            )
+        needle = str(self.target or "").lower()
+        if not needle:
+            return False
+        hay = " ".join(str(node.get(k) or "") for k in ("text", "desc", "id")).lower()
+        return needle in hay
+
+    def satisfied(self, candidate: Dict[str, Any], all_nodes: List[Dict[str, Any]]) -> bool:
+        cx, cy = float(candidate.get("x", 0)), float(candidate.get("y", 0))
+        anchors = [n for n in all_nodes if n is not candidate and self._matches_anchor(n, all_nodes)]
+        for anchor in anchors:
+            ax, ay = float(anchor.get("x", 0)), float(anchor.get("y", 0))
+            dx, dy = cx - ax, cy - ay
+            dist = (dx * dx + dy * dy) ** 0.5
+            if dist > self.max_distance:
+                continue
+            if self.direction == "any":
+                return True
+            if self.direction == "below" and dy > 0:
+                return True
+            if self.direction == "above" and dy < 0:
+                return True
+            if self.direction == "right" and dx > 0:
+                return True
+            if self.direction == "left" and dx < 0:
+                return True
+        return False
+
+
+def _node_bbox(node: Dict[str, Any]) -> Tuple[float, float, float, float]:
+    if all(k in node for k in ("left", "top", "right", "bottom")):
+        return float(node["left"]), float(node["top"]), float(node["right"]), float(node["bottom"])
+    x, y = float(node.get("x", 0)), float(node.get("y", 0))
+    w, h = float(node.get("w", 0)), float(node.get("h", 0))
+    return x - w / 2.0, y - h / 2.0, x + w / 2.0, y + h / 2.0
+
+
+class Predicate:
+    """Typed composable UI node matcher with `Near` spatial and `parent_of` hierarchy rules."""
+
+    def __init__(
+        self,
+        *,
+        text: Optional[str] = None,
+        text_contains: Optional[str] = None,
+        desc_contains: Optional[str] = None,
+        id_contains: Optional[str] = None,
+        class_contains: Optional[str] = None,
+        clickable: Optional[bool] = None,
+        scrollable: Optional[bool] = None,
+        editable: Optional[bool] = None,
+        exclude_offscreen: bool = False,
+        near: Optional[Near] = None,
+        parent_of: Optional[Any] = None,
+    ):
+        self.text = text
+        self.text_contains = text_contains
+        self.desc_contains = desc_contains
+        self.id_contains = id_contains
+        self.class_contains = class_contains
+        self.clickable = clickable
+        self.scrollable = scrollable
+        self.editable = editable
+        self.exclude_offscreen = exclude_offscreen
+        self.near = near
+        self.parent_of = parent_of
+
+    def _matches_child(self, child: Dict[str, Any], all_nodes: List[Dict[str, Any]]) -> bool:
+        if isinstance(self.parent_of, Predicate):
+            return self.parent_of.matches(child, all_nodes=all_nodes)
+        needle = str(self.parent_of or "").lower()
+        hay = " ".join(str(child.get(k) or "") for k in ("text", "desc", "id")).lower()
+        return bool(needle) and needle in hay
+
+    def matches(self, node: Dict[str, Any], all_nodes: Optional[List[Dict[str, Any]]] = None) -> bool:
+        nodes = all_nodes if all_nodes is not None else [node]
+        ntext = str(node.get("text") or "")
+        ndesc = str(node.get("desc") or "")
+        nid = str(node.get("id") or "")
+        ncls = str(node.get("class") or "")
+
+        if self.text is not None and ntext.lower() != self.text.lower():
+            return False
+        if self.text_contains is not None and self.text_contains.lower() not in ntext.lower():
+            return False
+        if self.desc_contains is not None and self.desc_contains.lower() not in ndesc.lower():
+            return False
+        if self.id_contains is not None and self.id_contains.lower() not in nid.lower():
+            return False
+        if self.class_contains is not None and self.class_contains.lower() not in ncls.lower():
+            return False
+        if self.clickable is not None and bool(node.get("clickable", False)) != self.clickable:
+            return False
+        if self.scrollable is not None and bool(node.get("scrollable", False)) != self.scrollable:
+            return False
+        if self.editable is not None and bool(node.get("editable", False)) != self.editable:
+            return False
+        if self.exclude_offscreen and bool(node.get("offscreen", False)):
+            return False
+        if self.near is not None and not self.near.satisfied(node, nodes):
+            return False
+        if self.parent_of is not None:
+            pl, pt, pr, pb = _node_bbox(node)
+            p_area = max(0.0, pr - pl) * max(0.0, pb - pt)
+            p_idx = node.get("index")
+            has_matching_child = False
+            for other in nodes:
+                if other is node:
+                    continue
+                if not self._matches_child(other, nodes):
+                    continue
+                if p_idx is not None and other.get("parent_index") == p_idx:
+                    has_matching_child = True
+                    break
+                cl, ct, cr, cb = _node_bbox(other)
+                c_area = max(0.0, cr - cl) * max(0.0, cb - ct)
+                if pl <= cl and pt <= ct and pr >= cr and pb >= cb and p_area >= c_area:
+                    has_matching_child = True
+                    break
+            if not has_matching_child:
+                return False
+        return True
+
+    def filter(self, nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return [n for n in nodes if self.matches(n, all_nodes=nodes)]
+
+
+def load_app_card(package_name: str, harness_dir: Optional[Path] = None) -> Optional[Dict[str, str]]:
+    """Load an Android app card, letting `harness/local/apps/<pkg>/CARD.md` override shipped cards."""
+    pkg = (package_name or "").strip()
+    if not _SAFE_PACKAGE_RE.match(pkg):
+        raise ValueError(f"Invalid Android package name for app card lookup: {package_name!r}")
+    root = Path(harness_dir) if harness_dir is not None else _HERE
+    local_card = root / "local" / "apps" / pkg / "CARD.md"
+    if local_card.is_file():
+        return {
+            "package": pkg,
+            "source": "local",
+            "path": str(local_card),
+            "content": local_card.read_text(encoding="utf-8"),
+        }
+    shipped_card = root / "apps" / "android" / pkg / "CARD.md"
+    if shipped_card.is_file():
+        return {
+            "package": pkg,
+            "source": "shipped",
+            "path": str(shipped_card),
+            "content": shipped_card.read_text(encoding="utf-8"),
+        }
+    return None
+
+
+def pick_launchable_package(
+    candidates: List[str],
+    resolver: Callable[[str], Optional[str]],
+) -> Tuple[Optional[str], Optional[str]]:
+    """Pre-absorbed phone-harness PR #204: skip non-launcher packages and return first launchable (pkg, component)."""
+    for pkg in candidates:
+        comp = resolver(pkg)
+        if comp and "/" in comp:
+            return pkg, comp
+    return None, None
 
 
 def _resolve_adb_bin() -> str:
@@ -323,6 +541,8 @@ class HansonPhoneClient:
     def ui(self) -> List[Dict[str, Any]]:
         if self.is_artemis_ready():
             data = self._artemis_request("GET", "/elements", timeout=8.0)
+            screen_w = int(data.get("screenWidth") or 0)
+            screen_h = int(data.get("screenHeight") or 0)
             nodes = []
             for el in data.get("elements") or []:
                 b = el.get("bounds") or {}
@@ -332,6 +552,12 @@ class HansonPhoneClient:
                 y2 = int(el.get("bottom", b.get("bottom", 0)))
                 cx = int(el.get("centerX", (x1 + x2) // 2))
                 cy = int(el.get("centerY", (y1 + y2) // 2))
+                offscreen = el.get("offscreen")
+                if offscreen is None and screen_w > 0 and screen_h > 0:
+                    offscreen = x2 <= 0 or y2 <= 0 or x1 >= screen_w or y1 >= screen_h
+                hidden = el.get("hidden")
+                if hidden is None:
+                    hidden = el.get("visibleToUser") is False
                 nodes.append({
                     "index": el.get("index"),
                     "text": el.get("text") or "",
@@ -339,6 +565,11 @@ class HansonPhoneClient:
                     "id": el.get("resourceId") or el.get("id") or "",
                     "class": el.get("className") or "",
                     "clickable": bool(el.get("clickable", False)),
+                    "scrollable": bool(el.get("scrollable", False)),
+                    "editable": bool(el.get("editable", False)),
+                    "offscreen": bool(offscreen),
+                    "hidden": bool(hidden),
+                    "left": x1, "top": y1, "right": x2, "bottom": y2,
                     "x": cx,
                     "y": cy,
                     "w": max(0, x2 - x1),
@@ -354,19 +585,30 @@ class HansonPhoneClient:
             raise RuntimeError(f"uiautomator dump unavailable: {raw.decode('utf-8', errors='replace').strip()[:160]}")
         xml_bytes = raw[start:raw.rfind(b">") + 1]
         root = ET.fromstring(xml_bytes)
+        parent_map = {child: parent for parent in root.iter() for child in parent}
+        el_to_idx: Dict[ET.Element, int] = {}
         nodes = []
         for idx, el in enumerate(root.iter("node")):
+            el_to_idx[el] = idx
             m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", el.get("bounds", ""))
             if not m:
                 continue
             x1, y1, x2, y2 = map(int, m.groups())
+            parent_el = parent_map.get(el)
+            cls_name = el.get("class", "")
             nodes.append({
                 "index": idx,
+                "parent_index": el_to_idx.get(parent_el) if parent_el is not None else None,
                 "text": el.get("text", ""),
                 "desc": el.get("content-desc", ""),
                 "id": el.get("resource-id", ""),
-                "class": el.get("class", ""),
+                "class": cls_name,
                 "clickable": el.get("clickable") == "true",
+                "scrollable": el.get("scrollable") == "true",
+                "editable": "EditText" in cls_name,
+                "offscreen": x2 <= 0 or y2 <= 0,
+                "hidden": el.get("visible-to-user") == "false",
+                "left": x1, "top": y1, "right": x2, "bottom": y2,
                 "x": (x1 + x2) // 2,
                 "y": (y1 + y2) // 2,
                 "w": max(0, x2 - x1),
@@ -501,15 +743,40 @@ class HansonPhoneClient:
     def app_switcher(self) -> None:
         self.press("recents")
 
+    def supports(self, capability: str) -> bool:
+        """Capability matrix (`stop_app`, `open_deep_link`, `grant_permission`, `vdisplay`, `codraw`, `secretary`, `ui_tree`, `deep_link_inspect`, `ios_portal`)."""
+        artemis_ok = self.is_artemis_ready()
+        matrix = {
+            "stop_app": True,
+            "open_deep_link": True,
+            "grant_permission": True,
+            "vdisplay": artemis_ok,
+            "codraw": artemis_ok,
+            "secretary": artemis_ok,
+            "ui_tree": True,
+            "deep_link_inspect": artemis_ok,
+            "ios_portal": False,
+        }
+        return bool(matrix.get((capability or "").strip().lower(), False))
+
     def capabilities(self) -> Dict[str, Any]:
+        artemis_ok = self.is_artemis_ready()
         return {
             "platform": "android",
             "host_platform": sys.platform,
             "supported": True,
-            "mode": "hanson_artemis" if self.is_artemis_ready() else "adb_fallback",
+            "mode": "hanson_artemis" if artemis_ok else "adb_fallback",
+            "supports": {
+                cap: self.supports(cap)
+                for cap in (
+                    "stop_app", "open_deep_link", "grant_permission",
+                    "vdisplay", "codraw", "secretary",
+                    "ui_tree", "deep_link_inspect", "ios_portal",
+                )
+            },
             "checks": {
                 "adb_binary": shutil.which(ADB_BIN) is not None,
-                "artemis_ready": self.is_artemis_ready(),
+                "artemis_ready": artemis_ok,
                 "scrcpy": shutil.which("scrcpy") is not None,
             },
         }
@@ -534,6 +801,14 @@ class HansonPhoneClient:
         out = self._sh("pm list packages" + ("" if include_system else " -3"), timeout=15)
         return sorted(ln[len("package:"):].strip() for ln in out.splitlines() if ln.startswith("package:"))
 
+    def _resolve_launcher_component(self, pkg: str) -> Optional[str]:
+        out = self._sh(f"cmd package resolve-activity --brief -c android.intent.category.LAUNCHER {shlex.quote(pkg)}")
+        for ln in reversed(out.splitlines()):
+            cand = ln.strip()
+            if "/" in cand and not cand.lower().startswith("no activity"):
+                return cand
+        return None
+
     def open_app(self, name: str) -> str:
         if self.is_artemis_ready():
             res = self._artemis_request("POST", "/action", {"cmd": "launch_app", "app_name": name}, timeout=12.0)
@@ -542,18 +817,87 @@ class HansonPhoneClient:
         self._lock_gate()
         pkgs = self.list_apps(include_system=True)
         want = re.sub(r"[^a-z0-9]+", "", name.lower())
-        pkg = name if name in pkgs else next((p for p in _APP_IDS.get(want, ()) if p in pkgs), None)
-        if pkg is None:
-            hits = [p for p in pkgs if want and want in p.lower().replace(".", "")]
-            pkg = sorted(hits, key=len)[0] if hits else None
-        if pkg is None:
+        candidates: List[str] = []
+        if name in pkgs:
+            candidates.append(name)
+        for p in _APP_IDS.get(want, ()):
+            if p in pkgs and p not in candidates:
+                candidates.append(p)
+        if want:
+            hits = sorted(
+                (p for p in pkgs if want in p.lower().replace(".", "") and p not in candidates),
+                key=len,
+            )
+            candidates.extend(hits)
+        if not candidates:
             raise RuntimeError(f"No installed Android app matches {name!r}")
-        out = self._sh(f"cmd package resolve-activity --brief -c android.intent.category.LAUNCHER {shlex.quote(pkg)}")
-        comp = next((ln.strip() for ln in reversed(out.splitlines()) if "/" in ln), None)
-        if not comp:
-            raise RuntimeError(f"{pkg} has no launchable activity")
+        pkg, comp = pick_launchable_package(candidates, self._resolve_launcher_component)
+        if not pkg or not comp:
+            raise RuntimeError(f"No launchable Android activity found among candidates for {name!r}: {candidates[:5]}")
         self._sh(f"am start --user 0 -W -n {shlex.quote(comp)}")
         return pkg
+
+    def input_reset(self) -> Dict[str, Any]:
+        """Pre-absorbed phone-harness PR #214: clear stuck touch/key/IME state cleanly."""
+        if self.is_artemis_ready():
+            try:
+                res = self._artemis_request("POST", "/action", {"cmd": "input_reset"}, timeout=4.0)
+                if res.get("success") or res.get("status") == "ok":
+                    return res
+            except Exception:
+                pass
+        self._lock_gate()
+        self._sh("input motionevent CANCEL 0 0 || true", timeout=8)
+        self._sh("input keyevent KEYCODE_ESCAPE", timeout=8)
+        return {"status": "ok", "mode": "adb_reset"}
+
+    def rotate(self, orientation: str = "portrait") -> str:
+        """Pre-absorbed phone-harness PR #209: set Android screen orientation cleanly."""
+        key = (orientation or "portrait").strip().lower()
+        if key not in VALID_ROTATIONS:
+            raise ValueError(f"orientation must be one of {sorted(VALID_ROTATIONS)}, got {orientation!r}")
+        code = VALID_ROTATIONS[key]
+        self._lock_gate()
+        if code == -1:
+            self._sh("settings put system accelerometer_rotation 1", timeout=8)
+        else:
+            self._sh(f"settings put system accelerometer_rotation 0 && settings put system user_rotation {code}", timeout=8)
+        return key
+
+    def wait_for_notification(
+        self,
+        query: str,
+        timeout: float = 10.0,
+        interval: float = 0.4,
+    ) -> Optional[Dict[str, Any]]:
+        """Pre-absorbed phone-harness PR #213: wait until a notification matches `query`."""
+        needle = (query or "").strip().lower()
+        if not needle:
+            raise ValueError("query must be non-empty")
+        deadline = time.time() + max(0.0, float(timeout))
+        while True:
+            if self.is_artemis_ready():
+                try:
+                    res = self._artemis_request(
+                        "POST",
+                        "/rpc",
+                        {"cmd": "notifications", "params": {"only_replyable": False, "limit": 25}},
+                        timeout=4.0,
+                    )
+                    output = str(res.get("output") or "")
+                    for line in output.splitlines():
+                        if needle in line.lower():
+                            return {"matched": True, "text": line.strip(), "source": "hanson_artemis"}
+                except Exception:
+                    pass
+            else:
+                out = self._sh("dumpsys notification --noredact", timeout=10)
+                for line in out.splitlines():
+                    if needle in line.lower():
+                        return {"matched": True, "text": line.strip()[:240], "source": "adb_dumpsys"}
+            if time.time() >= deadline:
+                return None
+            time.sleep(max(0.05, float(interval)))
 
     def preflight(self) -> Dict[str, Any]:
         if self.is_artemis_ready():
@@ -625,6 +969,208 @@ class HansonPhoneClient:
 
     def vdisplay_stop(self) -> Dict[str, Any]:
         return self._artemis_request("POST", "/vdisplay/stop", {})
+
+    def vdisplay_launch(
+        self,
+        package_name: str,
+        activity: str = "",
+        display_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {"package": package_name.strip()}
+        if activity.strip():
+            payload["activity"] = activity.strip()
+        if display_id is not None:
+            payload["displayId"] = int(display_id)
+        return self._artemis_request("POST", "/vdisplay/launch", payload)
+
+    def vdisplay_input(
+        self,
+        action: str,
+        x: Optional[int] = None,
+        y: Optional[int] = None,
+        x2: Optional[int] = None,
+        y2: Optional[int] = None,
+        text: str = "",
+        key: str = "",
+        duration_ms: int = 300,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {"action": (action or "").strip().lower(), "durationMs": int(duration_ms)}
+        if x is not None:
+            payload["x"] = int(x)
+        if y is not None:
+            payload["y"] = int(y)
+        if x2 is not None:
+            payload["x2"] = int(x2)
+        if y2 is not None:
+            payload["y2"] = int(y2)
+        if text:
+            payload["text"] = text
+        if key:
+            payload["key"] = key
+        return self._artemis_request("POST", "/vdisplay/input", payload)
+
+    def vdisplay_mode(self, mode: str = "background") -> Dict[str, Any]:
+        norm = (mode or "background").strip().lower()
+        if norm not in ("foreground", "background", "idle"):
+            raise ValueError(f"vdisplay mode must be foreground|background|idle, got {mode!r}")
+        return self._artemis_request("POST", "/vdisplay/mode", {"mode": norm})
+
+    def discover_deep_links(self, package_name: str) -> Dict[str, Any]:
+        pkg = (package_name or "").strip()
+        if not _SAFE_PACKAGE_RE.match(pkg):
+            raise ValueError(f"Invalid Android package name: {package_name!r}")
+        qs = urllib.parse.urlencode({"package": pkg})
+        return self._artemis_request("GET", f"/portal/deep-links?{qs}")
+
+    def resolve_deep_link(self, uri: str) -> Dict[str, Any]:
+        clean = (uri or "").strip()
+        if not clean:
+            raise ValueError("uri must be non-empty")
+        return self._artemis_request("POST", "/portal/deep-link/resolve", {"uri": clean})
+
+    # --- Proactive Chief-of-Staff AI Secretary (:18888/secretary/*) ---
+
+    def secretary_proposals(self, status: str = "PENDING", limit: int = 20) -> Dict[str, Any]:
+        norm_status = (status or "PENDING").strip().upper()
+        norm_limit = max(1, min(int(limit), 200))
+        query = urllib.parse.urlencode({"status": norm_status, "limit": norm_limit})
+        return self._artemis_request("GET", f"/secretary/proposals?{query}")
+
+    def secretary_scan(
+        self,
+        include_weather: bool = False,
+        lat: Optional[float] = None,
+        lon: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {"include_weather": bool(include_weather)}
+        if lat is not None and lon is not None:
+            payload["lat"] = float(lat)
+            payload["lon"] = float(lon)
+        return self._artemis_request("POST", "/secretary/scan", payload, timeout=15.0)
+
+    def secretary_act(
+        self,
+        proposal_id: str,
+        action: str = "approve",
+        reply_text: str = "",
+        snooze_minutes: int = 60,
+    ) -> Dict[str, Any]:
+        pid = (proposal_id or "").strip()
+        if not pid:
+            raise ValueError("proposal_id must be non-empty")
+        act = (action or "approve").strip().lower()
+        if act not in VALID_SECRETARY_ACTIONS:
+            raise ValueError(f"action must be one of {VALID_SECRETARY_ACTIONS}, got {action!r}")
+        payload: Dict[str, Any] = {
+            "proposal_id": pid,
+            "action": act,
+            "reply_text": str(reply_text or ""),
+            "snooze_minutes": max(1, int(snooze_minutes)),
+        }
+        return self._artemis_request("POST", "/secretary/act", payload)
+
+    def secretary_push_signal(
+        self,
+        package_name: str,
+        sender: str,
+        text: str,
+        app_label: str = "",
+        room: str = "",
+        can_quick_reply: bool = False,
+        timestamp_ms: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        pkg = (package_name or "").strip()
+        if not pkg:
+            raise ValueError("package_name must be non-empty")
+        ts = int(timestamp_ms) if timestamp_ms is not None else int(time.time() * 1000)
+        payload: Dict[str, Any] = {
+            "package_name": pkg,
+            "app_label": (app_label or pkg).strip(),
+            "sender": str(sender or "").strip(),
+            "room": str(room or "").strip(),
+            "text": str(text or ""),
+            "can_quick_reply": bool(can_quick_reply),
+            "timestamp_ms": ts,
+        }
+        return self._artemis_request("POST", "/secretary/ingest", payload)
+
+
+HansonPhone = HansonPhoneClient
+
+
+def _default_secretary_client(client: Optional[Any] = None) -> HansonPhoneClient:
+    if isinstance(client, HansonPhoneClient):
+        return client
+    url = (
+        getattr(client, "companion_url", None)
+        or os.environ.get("ARTEMIS_URL")
+        or DEFAULT_ARTEMIS_URL
+    )
+    token = (
+        getattr(client, "companion_token", None)
+        or os.environ.get("ARTEMIS_TOKEN")
+        or DEFAULT_ARTEMIS_TOKEN
+    )
+    return HansonPhoneClient(artemis_url=str(url), artemis_token=str(token))
+
+
+def secretary_proposals(
+    status: str = "PENDING",
+    limit: int = 20,
+    *,
+    client: Optional[Any] = None,
+) -> Dict[str, Any]:
+    return _default_secretary_client(client).secretary_proposals(status=status, limit=limit)
+
+
+def secretary_scan(
+    include_weather: bool = False,
+    lat: Optional[float] = None,
+    lon: Optional[float] = None,
+    *,
+    client: Optional[Any] = None,
+) -> Dict[str, Any]:
+    return _default_secretary_client(client).secretary_scan(
+        include_weather=include_weather, lat=lat, lon=lon,
+    )
+
+
+def secretary_act(
+    proposal_id: str,
+    action: str = "approve",
+    reply_text: str = "",
+    snooze_minutes: int = 60,
+    *,
+    client: Optional[Any] = None,
+) -> Dict[str, Any]:
+    return _default_secretary_client(client).secretary_act(
+        proposal_id=proposal_id,
+        action=action,
+        reply_text=reply_text,
+        snooze_minutes=snooze_minutes,
+    )
+
+
+def secretary_push_signal(
+    package_name: str,
+    sender: str,
+    text: str,
+    app_label: str = "",
+    room: str = "",
+    can_quick_reply: bool = False,
+    timestamp_ms: Optional[int] = None,
+    *,
+    client: Optional[Any] = None,
+) -> Dict[str, Any]:
+    return _default_secretary_client(client).secretary_push_signal(
+        package_name=package_name,
+        sender=sender,
+        text=text,
+        app_label=app_label,
+        room=room,
+        can_quick_reply=can_quick_reply,
+        timestamp_ms=timestamp_ms,
+    )
 
 
 def resolve_platform(
@@ -718,29 +1264,80 @@ def build_script_namespace(client: Any) -> Dict[str, Any]:
         return [o for o in screen() if (o["text"].lower() == q if exact else q in o["text"].lower())]
 
     def tap_text(query, index=0, exact=False):
-        hits = find_text(query, exact=exact)
+        boxes = screen()
+        q = query.lower()
+        hits = [o for o in boxes if (o["text"].lower() == q if exact else q in o["text"].lower())]
         if not hits:
-            visible = [o["text"] for o in screen()][:25]
-            raise RuntimeError(f"no visible text matches {query!r}; saw: {visible}")
+            visible = [o["text"] for o in boxes][:25]
+            raise HansonStepError(
+                f"no visible text matches {query!r}; saw: {visible}",
+                ui_tree=boxes[:25],
+                diff={"query": query, "exact": exact, "visible_count": len(boxes)},
+            )
         hit = hits[index]
         tap(hit["x"], hit["y"])
         return hit
 
     def find_nodes(query=None, exact=False, clickable_only=False):
         nodes = ui()
+        if isinstance(query, Predicate):
+            hits = query.filter(nodes)
+            return [n for n in hits if n.get("clickable")] if clickable_only else hits
         if clickable_only:
-            nodes = [n for n in nodes if n["clickable"]]
+            nodes = [n for n in nodes if n.get("clickable")]
         if query is None:
             return nodes
         q = query.lower()
-        return [n for n in nodes if any((f.lower() == q if exact else q in f.lower()) for f in (n["text"], n["desc"], n["id"]) if f)]
+        return [n for n in nodes if any((f.lower() == q if exact else q in f.lower()) for f in (n.get("text", ""), n.get("desc", ""), n.get("id", "")) if f)]
+
+    def tap_node(node_or_pred, index=0):
+        nodes = ui()
+        if isinstance(node_or_pred, Predicate):
+            hits = node_or_pred.filter(nodes)
+            if not hits:
+                raise HansonStepError(
+                    f"no UI node matches Predicate; saw {len(nodes)} nodes",
+                    ui_tree=nodes[:25],
+                    diff={"matched": 0, "total_nodes": len(nodes)},
+                )
+            node = hits[index]
+        elif isinstance(node_or_pred, dict):
+            node = node_or_pred
+        else:
+            raise TypeError("tap_node expects a UI node dict or Predicate")
+        if node.get("hidden") and not node.get("offscreen"):
+            raise HiddenElementError(
+                f"Refusing tap on hidden (covered, non-offscreen) UI element: {node.get('text') or node.get('desc') or node.get('id') or node.get('index')}",
+                ui_tree=nodes[:25],
+                diff={"blocked_node": node},
+            )
+        tap(node["x"], node["y"])
+        return node
 
     def tap_ui(query, index=0, exact=False, clickable_only=False):
-        hits = find_nodes(query, exact=exact, clickable_only=clickable_only)
+        nodes = ui()
+        if isinstance(query, Predicate):
+            hits = query.filter(nodes)
+            if clickable_only:
+                hits = [n for n in hits if n.get("clickable")]
+        else:
+            pool = [n for n in nodes if n.get("clickable")] if clickable_only else nodes
+            q = str(query).lower()
+            hits = [n for n in pool if any((f.lower() == q if exact else q in f.lower()) for f in (n.get("text", ""), n.get("desc", ""), n.get("id", "")) if f)]
         if not hits:
-            visible = [n["text"] or n["desc"] or n["id"] for n in ui()][:25]
-            raise RuntimeError(f"no UI node matches {query!r}; saw: {visible}")
+            visible = [n.get("text") or n.get("desc") or n.get("id") for n in nodes][:25]
+            raise HansonStepError(
+                f"no UI node matches {query!r}; saw: {visible}",
+                ui_tree=nodes[:25],
+                diff={"query": repr(query), "total_nodes": len(nodes)},
+            )
         node = hits[index]
+        if node.get("hidden") and not node.get("offscreen"):
+            raise HiddenElementError(
+                f"Refusing tap on hidden (covered, non-offscreen) UI element matching {query!r}",
+                ui_tree=nodes[:25],
+                diff={"blocked_node": node},
+            )
         tap(node["x"], node["y"])
         return node
 
@@ -776,6 +1373,7 @@ def build_script_namespace(client: Any) -> Dict[str, Any]:
         if hit:
             return hit
         stale = 0
+        boosted_retry_used = False
         for _ in range(max_scrolls):
             res = scroll_screen(direction, amount, settle, at=at)
             hit = done(res["boxes"])
@@ -783,7 +1381,18 @@ def build_script_namespace(client: Any) -> Dict[str, Any]:
                 return hit
             if res["after"] != res["before"]:
                 stale = 0
+                boosted_retry_used = False
             else:
+                if not boosted_retry_used:
+                    boosted_retry_used = True
+                    stronger = min(0.95, float(amount) * 1.35)
+                    res2 = scroll_screen(direction, stronger, settle, at=at)
+                    hit2 = done(res2["boxes"])
+                    if hit2:
+                        return hit2
+                    if res2["after"] != res2["before"]:
+                        stale = 0
+                        continue
                 stale += 1
                 if stale >= 2:
                     return None
@@ -817,9 +1426,83 @@ def build_script_namespace(client: Any) -> Dict[str, Any]:
                     return {"items": order, "stop": "reached-end", "scrolls": i}
         return {"items": order, "stop": "max-scrolls", "scrolls": max_scrolls}
 
+    def _sec_proposals(status="PENDING", limit=20):
+        return (
+            client.secretary_proposals(status=status, limit=limit)
+            if hasattr(client, "secretary_proposals")
+            else secretary_proposals(status=status, limit=limit, client=client)
+        )
+
+    def _sec_scan(include_weather=False, lat=None, lon=None):
+        return (
+            client.secretary_scan(include_weather=include_weather, lat=lat, lon=lon)
+            if hasattr(client, "secretary_scan")
+            else secretary_scan(include_weather=include_weather, lat=lat, lon=lon, client=client)
+        )
+
+    def _sec_act(proposal_id, action="approve", reply_text="", snooze_minutes=60):
+        return (
+            client.secretary_act(
+                proposal_id=proposal_id,
+                action=action,
+                reply_text=reply_text,
+                snooze_minutes=snooze_minutes,
+            )
+            if hasattr(client, "secretary_act")
+            else secretary_act(
+                proposal_id=proposal_id,
+                action=action,
+                reply_text=reply_text,
+                snooze_minutes=snooze_minutes,
+                client=client,
+            )
+        )
+
+    def _sec_push_signal(
+        package_name,
+        sender,
+        text,
+        app_label="",
+        room="",
+        can_quick_reply=False,
+        timestamp_ms=None,
+    ):
+        return (
+            client.secretary_push_signal(
+                package_name=package_name,
+                sender=sender,
+                text=text,
+                app_label=app_label,
+                room=room,
+                can_quick_reply=can_quick_reply,
+                timestamp_ms=timestamp_ms,
+            )
+            if hasattr(client, "secretary_push_signal")
+            else secretary_push_signal(
+                package_name=package_name,
+                sender=sender,
+                text=text,
+                app_label=app_label,
+                room=room,
+                can_quick_reply=can_quick_reply,
+                timestamp_ms=timestamp_ms,
+                client=client,
+            )
+        )
+
+    def _supports(cap):
+        return client.supports(cap) if hasattr(client, "supports") else False
+
     ns: Dict[str, Any] = {
+        "device": client,
+        "supports": _supports,
+        "load_app_card": load_app_card,
+        "Predicate": Predicate,
+        "Near": Near,
+        "HansonStepError": HansonStepError,
+        "HiddenElementError": HiddenElementError,
         "screen": screen, "ui": ui, "screenshot": screenshot,
-        "find_text": find_text, "tap_text": tap_text, "find_nodes": find_nodes, "tap_ui": tap_ui,
+        "find_text": find_text, "tap_text": tap_text, "find_nodes": find_nodes, "tap_ui": tap_ui, "tap_node": tap_node,
         "tap": tap, "long_press": long_press, "drag": drag, "type_text": type_text, "press": press,
         "home": home, "back": back, "app_switcher": app_switcher,
         "open_app": open_app, "current_app": current_app, "list_apps": list_apps,
@@ -837,6 +1520,18 @@ def build_script_namespace(client: Any) -> Dict[str, Any]:
         "vdisplay_start": client.vdisplay_start,
         "vdisplay_snapshot": client.vdisplay_snapshot,
         "vdisplay_stop": client.vdisplay_stop,
+        "vdisplay_launch": getattr(client, "vdisplay_launch", None),
+        "vdisplay_input": getattr(client, "vdisplay_input", None),
+        "vdisplay_mode": getattr(client, "vdisplay_mode", None),
+        "discover_deep_links": getattr(client, "discover_deep_links", None),
+        "resolve_deep_link": getattr(client, "resolve_deep_link", None),
+        "input_reset": getattr(client, "input_reset", None),
+        "wait_for_notification": getattr(client, "wait_for_notification", None),
+        "rotate": getattr(client, "rotate", None),
+        "secretary_proposals": _sec_proposals,
+        "secretary_scan": _sec_scan,
+        "secretary_act": _sec_act,
+        "secretary_push_signal": _sec_push_signal,
     }
 
     # Auto-load reusable agent-written helpers from AGENT_WORKSPACE/agent_helpers.py
@@ -960,6 +1655,84 @@ def cmd_awake(client: HansonPhoneClient, mirror: bool = True, poke_every: int = 
     return 0
 
 
+def cmd_secretary(client: Any, args: List[str]) -> int:
+    """CLI handler for `secretary list|scan|act|push` against `:18888/secretary/*`."""
+    import argparse
+
+    sec_client = _default_secretary_client(client)
+    parser = argparse.ArgumentParser(
+        prog="hanson_harness.py secretary",
+        description="Proactive Chief-of-Staff AI Secretary commands (:18888/secretary/*)",
+    )
+    sub = parser.add_subparsers(dest="subcmd")
+
+    p_list = sub.add_parser("list", help="List secretary proposals")
+    p_list.add_argument("--status", default="PENDING", help="PENDING | ALL | APPROVED | DISMISSED | SNOOZED")
+    p_list.add_argument("--limit", type=int, default=20, help="Max proposals to fetch")
+
+    p_scan = sub.add_parser("scan", help="Trigger proactive calendar/thread/weather scan")
+    p_scan.add_argument("--weather", action="store_true", help="Include Open-Meteo weather check (opt-in)")
+    p_scan.add_argument("--lat", type=float, default=None, help="Latitude for weather check")
+    p_scan.add_argument("--lon", type=float, default=None, help="Longitude for weather check")
+
+    p_act = sub.add_parser("act", help="Act on a proactive proposal")
+    p_act.add_argument("proposal_id", help="Target proposal ID")
+    p_act.add_argument(
+        "--action",
+        default="approve",
+        choices=list(VALID_SECRETARY_ACTIONS),
+        help="Action to execute on the proposal",
+    )
+    p_act.add_argument("--reply", dest="reply_text", default="", help="Reply text (when --action reply)")
+    p_act.add_argument("--snooze-minutes", type=int, default=60, help="Snooze duration in minutes")
+
+    p_push = sub.add_parser("push", help="Push a signal to /secretary/ingest")
+    p_push.add_argument("--package", dest="package_name", required=True, help="Source package name")
+    p_push.add_argument("--sender", required=True, help="Sender name or service")
+    p_push.add_argument("--text", required=True, help="Message body text")
+    p_push.add_argument("--app-label", default="", help="Human-readable app label")
+    p_push.add_argument("--room", default="", help="Room, thread, or title")
+    p_push.add_argument("--quick-reply", action="store_true", help="Mark signal as quick-reply capable")
+    p_push.add_argument("--timestamp-ms", type=int, default=None, help="Event timestamp in epoch ms")
+
+    if not args or args[0] in ("-h", "--help"):
+        parser.print_help()
+        return 0
+
+    try:
+        ns = parser.parse_args(args)
+    except SystemExit as exc:
+        return int(exc.code) if isinstance(exc.code, int) else 2
+
+    if ns.subcmd == "list":
+        res = sec_client.secretary_proposals(status=ns.status, limit=ns.limit)
+    elif ns.subcmd == "scan":
+        res = sec_client.secretary_scan(include_weather=ns.weather, lat=ns.lat, lon=ns.lon)
+    elif ns.subcmd == "act":
+        res = sec_client.secretary_act(
+            proposal_id=ns.proposal_id,
+            action=ns.action,
+            reply_text=ns.reply_text,
+            snooze_minutes=ns.snooze_minutes,
+        )
+    elif ns.subcmd == "push":
+        res = sec_client.secretary_push_signal(
+            package_name=ns.package_name,
+            sender=ns.sender,
+            text=ns.text,
+            app_label=ns.app_label,
+            room=ns.room,
+            can_quick_reply=ns.quick_reply,
+            timestamp_ms=ns.timestamp_ms,
+        )
+    else:
+        parser.print_help()
+        return 2
+
+    print(json.dumps(res, ensure_ascii=False, indent=2))
+    return 0
+
+
 def _parse_cli_flags(argv: List[str]) -> Tuple[bool, Optional[str], List[str]]:
     safe_mode = False
     platform_arg: Optional[str] = None
@@ -993,10 +1766,14 @@ def main(argv: List[str]) -> int:
         return 2
 
     if args and args[0] in ("-h", "--help"):
-        print("Usage: python harness/hanson_harness.py [--safe] [--platform android|ios|auto] [doctor|pair|awake|preflight] | <<'PY'")
+        print("Usage: python harness/hanson_harness.py [--safe] [--platform android|ios|auto] [doctor|pair|awake|preflight|secretary <list|scan|act|push>] | <<'PY'")
         return 0
 
-    client = create_client(platform=resolved_platform)
+    client = create_client(
+        platform=resolved_platform,
+        artemis_url=os.environ.get("ARTEMIS_URL", DEFAULT_ARTEMIS_URL),
+        artemis_token=os.environ.get("ARTEMIS_TOKEN", DEFAULT_ARTEMIS_TOKEN),
+    )
 
     if args and args[0] == "doctor":
         return cmd_doctor(client)
@@ -1013,6 +1790,8 @@ def main(argv: List[str]) -> int:
     if args and args[0] == "preflight":
         print(json.dumps(client.preflight(), ensure_ascii=False, indent=2))
         return 0
+    if args and args[0] == "secretary":
+        return cmd_secretary(client, args[1:])
 
     code = Path(args[0]).read_text(encoding="utf-8") if args else sys.stdin.read()
     if safe_mode:

@@ -36,6 +36,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Protocol, Sequence, Tuple
@@ -47,8 +48,15 @@ if str(_HERE) not in sys.path:
 import hanson_script_guard as safety_guard  # noqa: E402
 
 APP_NAME = "iPhone Mirroring"
+MIRROR_APP_NAMES: Tuple[str, ...] = (
+    "iPhone Mirroring",
+    "iPhone 미러링",
+    "아이폰 미러링",
+)
 BUNDLE_ID = "com.apple.ScreenContinuity"
 APP_PATH = "/System/Applications/iPhone Mirroring.app"
+IOS_PORTAL_USB_PORTS: Tuple[int, ...] = tuple(range(8080, 8090))
+IOS_PORTAL_SIM_PORTS: Tuple[int, ...] = tuple(range(6643, 6653))
 
 _DIRECTIONS: Dict[str, Tuple[int, int]] = {
     "down": (0, 1),
@@ -102,7 +110,16 @@ _SHIFTED_CHARS: Dict[str, str] = {
 
 _INTERSTITIAL_CONNECT_BUTTONS = frozenset({
     "connect", "try again", "retry", "continue", "reconnect",
+    "연결", "다시 시도", "재시도", "계속", "다시 연결",
 })
+
+
+def is_mirror_window_owner(owner_name: str) -> bool:
+    """Pre-absorbed phone-harness PR #212: match English & Korean macOS iPhone Mirroring window titles."""
+    cleaned = (owner_name or "").strip().lower()
+    if not cleaned:
+        return False
+    return any(cleaned == name.lower() or name.lower() in cleaned for name in MIRROR_APP_NAMES)
 
 
 class UnsupportedIosOperationError(NotImplementedError):
@@ -354,12 +371,17 @@ class IosMirrorDriver(Protocol):
 class _MacOsMirrorDriver:
     """Lazy macOS iPhone Mirroring driver (Quartz + Vision + optional SkyLight background)."""
 
-    def __init__(self, background: Optional[bool] = None):
+    def __init__(self, background: Optional[bool] = None, no_focus_steal: Optional[bool] = None):
         caps = check_ios_capabilities(background_requested=background)
         if not caps["supported"]:
             raise IosHostCapabilityError(caps["guidance"])
         self.capabilities = caps
         self.background_mode = caps["mode"] == "background_skylight"
+        self.no_focus_steal = (
+            os.environ.get("HANSON_IOS_NO_FOCUS_STEAL", "0").strip().lower() in ("1", "true", "yes")
+            if no_focus_steal is None
+            else bool(no_focus_steal)
+        )
         self._quartz: Any = None
         self._vision: Any = None
         self._foundation: Any = None
@@ -421,7 +443,8 @@ class _MacOsMirrorDriver:
         best: Optional[Dict[str, Any]] = None
         for win in windows:
             owner = str(win.get("kCGWindowOwnerName", ""))
-            if owner != APP_NAME:
+            title = str(win.get("kCGWindowName", ""))
+            if not (is_mirror_window_owner(owner) or is_mirror_window_owner(title)):
                 continue
             if int(win.get("kCGWindowLayer", 0)) != 0:
                 continue
@@ -441,7 +464,9 @@ class _MacOsMirrorDriver:
                 best = cand
         return best
 
-    def _activate(self) -> None:
+    def _activate(self, force: bool = False) -> None:
+        if self.no_focus_steal and not force:
+            return
         self._load_frameworks()
         if self._appkit is not None:
             apps = self._appkit.NSRunningApplication.runningApplicationsWithBundleIdentifier_(BUNDLE_ID)
@@ -691,8 +716,31 @@ class HansonIosMirrorClient:
         self.companion_token = (companion_token or os.environ.get("HANSON_IOS_COMPANION_TOKEN", "")).strip()
         self._sleep = sleep_fn
 
+    def supports(self, capability: str) -> bool:
+        matrix = {
+            "stop_app": False,
+            "open_deep_link": False,
+            "grant_permission": False,
+            "vdisplay": False,
+            "codraw": bool(self.companion_url),
+            "secretary": bool(self.companion_url),
+            "ui_tree": False,
+            "deep_link_inspect": False,
+            "ios_portal": False,
+        }
+        return bool(matrix.get((capability or "").strip().lower(), False))
+
     def capabilities(self) -> Dict[str, Any]:
-        return check_ios_capabilities(background_requested=self._background)
+        caps = check_ios_capabilities(background_requested=self._background)
+        caps["supports"] = {
+            cap: self.supports(cap)
+            for cap in (
+                "stop_app", "open_deep_link", "grant_permission",
+                "vdisplay", "codraw", "secretary",
+                "ui_tree", "deep_link_inspect", "ios_portal",
+            )
+        }
+        return caps
 
     def _get_driver(self) -> IosMirrorDriver:
         if self._driver is None:
@@ -895,6 +943,324 @@ class HansonIosMirrorClient:
 
     def vdisplay_stop(self) -> Dict[str, Any]:
         raise UnsupportedIosOperationError("VirtualDisplay is an Android-only surface.")
+
+
+# =============================================================================
+# Local iOS Portal HTTP Backend (`mobilerun-ios` :8080-8089 & `ios-portal` :6643-6652)
+# =============================================================================
+
+_ALLOWED_IOS_DEEP_LINK_SCHEMES = frozenset({
+    "https", "http", "kakaotalk", "nmap", "kakaomap", "youtube",
+    "slack", "mailto", "tel", "sms", "settings", "app-settings",
+    "coupang", "baemin", "catchtable", "korailtalk", "mobilerun",
+})
+
+
+def _default_portal_http_request(
+    method: str,
+    url: str,
+    payload: Optional[Dict[str, Any]] = None,
+    timeout: float = 2.0,
+) -> Tuple[int, str]:
+    headers = {"Accept": "application/json, text/plain"}
+    data = None
+    if payload is not None:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        headers["Content-Type"] = "application/json; charset=utf-8"
+    req = urllib.request.Request(url, data=data, headers=headers, method=method.upper())
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return int(getattr(resp, "status", 200)), resp.read().decode("utf-8", errors="replace")
+
+
+def probe_local_ios_portal(
+    host: str = "127.0.0.1",
+    usb_ports: Sequence[int] = IOS_PORTAL_USB_PORTS,
+    sim_ports: Sequence[int] = IOS_PORTAL_SIM_PORTS,
+    request_fn: Optional[Callable[..., Tuple[int, str]]] = None,
+    timeout: float = 0.6,
+) -> Optional[Dict[str, Any]]:
+    """Auto-probe local `mobilerun-ios` (:8080-8089 `/version`) and Simulator `ios-portal` (:6643-6652 `/device/date`)."""
+    req = request_fn or _default_portal_http_request
+    for port in usb_ports:
+        base = f"http://{host}:{int(port)}"
+        try:
+            code, body = req("GET", f"{base}/version", None, timeout)
+            if code == 200 and "iosportal(" in (body or "").lower():
+                return {
+                    "backend": "local-ios-http",
+                    "target_kind": "usb_device",
+                    "base_url": base,
+                    "port": int(port),
+                    "probe_response": body.strip()[:120],
+                }
+        except Exception:
+            continue
+
+    for port in sim_ports:
+        base = f"http://{host}:{int(port)}"
+        try:
+            code, body = req("GET", f"{base}/device/date", None, timeout)
+            if code == 200 and (body or "").strip():
+                return {
+                    "backend": "local-ios-http",
+                    "target_kind": "simulator",
+                    "base_url": base,
+                    "port": int(port),
+                    "probe_response": body.strip()[:120],
+                }
+        except Exception:
+            continue
+
+    return None
+
+
+class HansonIosPortalClient:
+    """Local iOS Portal HTTP client (`backend="local-ios-http"`) unlocking real iOS Accessibility `ui()`.
+
+    Compatible with `droidrun/ios-portal` (Simulator `:6643-6652`) and `mobilerun-ios`
+    (USB device WDA portal `:8080-8089`), exposing Hanson's flat transport contract.
+    """
+
+    platform = "ios"
+    backend = "local-ios-http"
+
+    def __init__(
+        self,
+        base_url: Optional[str] = None,
+        target_kind: str = "usb_device",
+        request_fn: Optional[Callable[..., Tuple[int, str]]] = None,
+        sleep_fn: Callable[[float], None] = time.sleep,
+    ):
+        self._req = request_fn or _default_portal_http_request
+        self._sleep = sleep_fn
+        if base_url:
+            parsed = urllib.parse.urlparse(base_url.strip())
+            if parsed.scheme not in ("http", "https") or (parsed.scheme == "http" and parsed.hostname not in ("127.0.0.1", "localhost", "::1")):
+                raise ValueError(f"Refusing non-loopback plaintext iOS Portal URL: {base_url!r}")
+            self.base_url = base_url.strip().rstrip("/")
+            self.target_kind = target_kind
+        else:
+            found = probe_local_ios_portal(request_fn=self._req)
+            if not found:
+                raise IosHostCapabilityError(
+                    "No local iOS Portal HTTP server detected on 127.0.0.1:8080-8089 (/version) "
+                    "or 127.0.0.1:6643-6652 (/device/date)."
+                )
+            self.base_url = found["base_url"]
+            self.target_kind = found["target_kind"]
+
+    def _call(self, method: str, path: str, payload: Optional[Dict[str, Any]] = None, timeout: float = 8.0) -> Any:
+        code, body = self._req(method, f"{self.base_url}{path}", payload, timeout)
+        if not (200 <= int(code) < 300):
+            raise RuntimeError(f"iOS Portal {method} {path} failed with HTTP {code}: {body[:160]}")
+        stripped = (body or "").strip()
+        if not stripped:
+            return {"status": "ok"}
+        try:
+            return json.loads(stripped)
+        except Exception:
+            return {"status": "ok", "raw": stripped}
+
+    def supports(self, capability: str) -> bool:
+        matrix = {
+            "stop_app": True,
+            "open_deep_link": True,
+            "grant_permission": False,
+            "vdisplay": False,
+            "codraw": False,
+            "secretary": False,
+            "ui_tree": True,
+            "deep_link_inspect": False,
+            "ios_portal": True,
+        }
+        return bool(matrix.get((capability or "").strip().lower(), False))
+
+    def capabilities(self) -> Dict[str, Any]:
+        return {
+            "platform": "ios",
+            "backend": self.backend,
+            "target_kind": self.target_kind,
+            "base_url": self.base_url,
+            "supported": True,
+            "mode": self.backend,
+            "supports": {
+                cap: self.supports(cap)
+                for cap in (
+                    "stop_app", "open_deep_link", "grant_permission",
+                    "vdisplay", "codraw", "secretary",
+                    "ui_tree", "deep_link_inspect", "ios_portal",
+                )
+            },
+        }
+
+    def bounds(self) -> Dict[str, int]:
+        info = self._call("GET", "/device/info")
+        w = int(info.get("width") or info.get("screenWidth") or 390)
+        h = int(info.get("height") or info.get("screenHeight") or 844)
+        return {"x": 0, "y": 0, "w": w, "h": h}
+
+    def ui(self) -> List[Dict[str, Any]]:
+        """Return real iOS Accessibility hierarchy nodes from local iOS Portal HTTP."""
+        data = self._call("GET", "/vision/a11y")
+        raw_nodes = data.get("elements") if isinstance(data, dict) else (data if isinstance(data, list) else [])
+        nodes: List[Dict[str, Any]] = []
+        for idx, item in enumerate(raw_nodes or []):
+            if not isinstance(item, dict):
+                continue
+            frame = item.get("frame") or item.get("rect") or {}
+            x1 = int(item.get("left", frame.get("x", 0)))
+            y1 = int(item.get("top", frame.get("y", 0)))
+            w = int(item.get("w", frame.get("width", max(0, int(item.get("right", x1)) - x1))))
+            h = int(item.get("h", frame.get("height", max(0, int(item.get("bottom", y1)) - y1))))
+            x2, y2 = x1 + w, y1 + h
+            cx = int(item.get("x", x1 + w // 2))
+            cy = int(item.get("y", y1 + h // 2))
+            nodes.append({
+                "index": item.get("index", idx),
+                "text": str(item.get("text") or item.get("label") or item.get("value") or ""),
+                "desc": str(item.get("desc") or item.get("identifier") or item.get("accessibilityLabel") or ""),
+                "id": str(item.get("id") or item.get("identifier") or ""),
+                "class": str(item.get("class") or item.get("type") or "XCUIElement"),
+                "clickable": bool(item.get("clickable", item.get("enabled", True))),
+                "offscreen": bool(item.get("offscreen", False)),
+                "hidden": bool(item.get("hidden", item.get("visible") is False)),
+                "left": x1, "top": y1, "right": x2, "bottom": y2,
+                "x": cx, "y": cy, "w": w, "h": h,
+                "source": "ios_portal_a11y",
+            })
+        return nodes
+
+    def screen(self) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        for n in self.ui():
+            label = (n["text"] or n["desc"]).strip()
+            if label:
+                out.append({
+                    "text": label,
+                    "confidence": 1.0,
+                    "source": "ios_portal_a11y",
+                    "x": n["x"], "y": n["y"], "w": n["w"], "h": n["h"],
+                })
+        return out
+
+    def tap(self, x: float, y: float) -> None:
+        self._call("POST", "/gestures/tap", {"x": float(x), "y": float(y)})
+
+    def long_press(self, x: float, y: float, duration: float = 0.8) -> None:
+        self._call("POST", "/gestures/long-press", {"x": float(x), "y": float(y), "duration": float(duration)})
+
+    def drag(self, x1: float, y1: float, x2: float, y2: float, duration: float = 0.35) -> None:
+        self._call("POST", "/gestures/swipe", {
+            "x1": float(x1), "y1": float(y1), "x2": float(x2), "y2": float(y2), "duration": float(duration),
+        })
+
+    def scroll_no_fling(self, direction: str = "down", amount: float = 0.55, at: Optional[Any] = None) -> None:
+        b = self.bounds()
+        cx = float(at["x"] if isinstance(at, dict) else at[0]) if at is not None else b["w"] / 2.0
+        cy = float(at["y"] if isinstance(at, dict) else at[1]) if at is not None else b["h"] / 2.0
+        span = min(0.85, max(0.1, float(amount)))
+        if direction == "down":
+            self.drag(cx, cy + b["h"] * span * 0.4, cx, cy - b["h"] * span * 0.4, duration=0.45)
+        elif direction == "up":
+            self.drag(cx, cy - b["h"] * span * 0.4, cx, cy + b["h"] * span * 0.4, duration=0.45)
+        elif direction == "right":
+            self.drag(cx + b["w"] * span * 0.4, cy, cx - b["w"] * span * 0.4, cy, duration=0.45)
+        elif direction == "left":
+            self.drag(cx - b["w"] * span * 0.4, cy, cx + b["w"] * span * 0.4, cy, duration=0.45)
+        else:
+            raise ValueError(f"Unsupported scroll direction: {direction!r}")
+
+    def type_text(self, text: str) -> None:
+        self._call("POST", "/inputs/type", {"text": str(text)})
+
+    def press(self, key: str) -> None:
+        k = (key or "").strip().lower()
+        if k == "back":
+            self.back()
+        self._call("POST", "/inputs/key", {"key": k})
+
+    def home(self) -> None:
+        self._call("POST", "/inputs/key", {"key": "home"})
+
+    def app_switcher(self) -> None:
+        self._call("POST", "/inputs/key", {"key": "app_switcher"})
+
+    def back(self) -> None:
+        raise UnsupportedIosOperationError("back() is unsupported on iOS: tap an on-screen back button or swipe from left edge.")
+
+    def start_app(self, bundle_id: str) -> Dict[str, Any]:
+        bid = (bundle_id or "").strip()
+        if not bid:
+            raise ValueError("bundle_id must be non-empty")
+        return self._call("POST", "/apps/launch", {"bundleId": bid})
+
+    def open_app(self, name: str) -> str:
+        self.start_app(name)
+        return name
+
+    def open_deep_link(self, uri: str) -> Dict[str, Any]:
+        clean = (uri or "").strip()
+        scheme = urllib.parse.urlparse(clean).scheme.lower()
+        if scheme not in _ALLOWED_IOS_DEEP_LINK_SCHEMES:
+            raise ValueError(f"Blocked disallowed iOS deep-link scheme: {scheme!r}")
+        return self._call("POST", "/device/open-url", {"url": clean})
+
+    def clipboard(self, text: Optional[str] = None) -> str:
+        if text is not None:
+            self._call("POST", "/inputs/clipboard", {"text": str(text)})
+            return str(text)
+        res = self._call("GET", "/inputs/clipboard")
+        return str(res.get("text") or res.get("content") or "") if isinstance(res, dict) else str(res)
+
+    def preflight(self) -> Dict[str, Any]:
+        text = "\n".join(o["text"] for o in self.screen())
+        report = dict(safety_guard.evaluate_screen_preflight(text, package_name="ios.portal"))
+        report["platform"] = "ios"
+        report["backend"] = self.backend
+        return report
+
+    def wait_for_text(self, query: str, timeout: float = 10.0, exact: bool = False, interval: float = 0.4) -> Optional[Dict[str, Any]]:
+        deadline = time.time() + timeout
+        q = query.lower()
+        while True:
+            hits = [o for o in self.screen() if (o["text"].lower() == q if exact else q in o["text"].lower())]
+            if hits:
+                return hits[0]
+            if time.time() >= deadline:
+                return None
+            self._sleep(interval)
+
+    def wait_stable(self, timeout: float = 5.0, interval: float = 0.35, settle: int = 2) -> bool:
+        prev, same, deadline = None, 0, time.time() + timeout
+        while time.time() < deadline:
+            cur = frozenset(o["text"] for o in self.screen())
+            same = same + 1 if cur == prev else 0
+            if same >= settle - 1:
+                return True
+            prev = cur
+            self._sleep(interval)
+        return False
+
+    def push_board_event(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        raise UnsupportedIosOperationError("Use HansonIosMirrorClient with HANSON_IOS_COMPANION_URL for SSE board events.")
+
+    def codraw_ring(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        raise UnsupportedIosOperationError("Co-Drawing requires HansonMobileUseIOS Companion SSE.")
+
+    def codraw_arrow(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        raise UnsupportedIosOperationError("Co-Drawing requires HansonMobileUseIOS Companion SSE.")
+
+    def codraw_clear(self) -> Dict[str, Any]:
+        raise UnsupportedIosOperationError("Co-Drawing requires HansonMobileUseIOS Companion SSE.")
+
+    def vdisplay_start(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        raise UnsupportedIosOperationError("VirtualDisplay is Android-only.")
+
+    def vdisplay_snapshot(self) -> Dict[str, Any]:
+        raise UnsupportedIosOperationError("VirtualDisplay is Android-only.")
+
+    def vdisplay_stop(self) -> Dict[str, Any]:
+        raise UnsupportedIosOperationError("VirtualDisplay is Android-only.")
 
 
 if __name__ == "__main__":

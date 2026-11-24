@@ -86,6 +86,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.hanson.mobileuse.accessibility.AccessibilityEngineState
 import com.hanson.mobileuse.accessibility.HansonAccessibilityService
+import com.hanson.mobileuse.agent.A2uiJsonCodec
 import com.hanson.mobileuse.agent.A2uiSurfaceRegistry
 import com.hanson.mobileuse.agent.ActionReceipt
 import com.hanson.mobileuse.agent.AgentRunSession
@@ -103,10 +104,18 @@ import com.hanson.mobileuse.agent.LiveVoicePhase
 import com.hanson.mobileuse.agent.LiveVoiceSessionManager
 import com.hanson.mobileuse.agent.MemoryTelemetryState
 import com.hanson.mobileuse.agent.MobileAiInfrastructureState
+import com.hanson.mobileuse.agent.MobileUseAgentEngine
 import com.hanson.mobileuse.agent.PermissionHubState
 import com.hanson.mobileuse.agent.PersonalRoutine
+import com.hanson.mobileuse.agent.PrivacyAndQuotaProofLedger
+import com.hanson.mobileuse.agent.PrivacyProofSnapshot
 import com.hanson.mobileuse.agent.ProactiveDailyBriefEngine
+import com.hanson.mobileuse.agent.ProactiveProposal
+import com.hanson.mobileuse.agent.ProactiveProposalStatus
+import com.hanson.mobileuse.agent.ProactiveProposalToA2uiBridge
+import com.hanson.mobileuse.agent.ProactiveSecretaryEngine
 import com.hanson.mobileuse.agent.ScratchpadEntry
+import com.hanson.mobileuse.agent.SecretarySettings
 import com.hanson.mobileuse.agent.StructuredUiCard
 import com.hanson.mobileuse.agent.DynamicUiEventBus
 import com.hanson.mobileuse.agent.SseStreamPhase
@@ -117,7 +126,12 @@ import com.hanson.mobileuse.agent.VaultSecretCategory
 import com.hanson.mobileuse.agent.WatcherActionMode
 import com.hanson.mobileuse.agent.WatcherRule
 import com.hanson.mobileuse.notification.InterceptedNotification
+import com.hanson.mobileuse.notification.NotificationStormShieldEngine
+import com.hanson.mobileuse.notification.StormShieldConfig
 import com.hanson.mobileuse.service.DynamicCanvasOverlayService
+import com.hanson.mobileuse.service.HansonVirtualDisplayManager
+import com.hanson.mobileuse.service.VirtualDisplayTakeoverState
+import com.hanson.mobileuse.service.VirtualDisplayUiSnapshot
 import com.hanson.mobileuse.ui.components.A2uiSurfaceCard
 import com.hanson.mobileuse.ui.components.AhaboardDotGridBox
 import com.hanson.mobileuse.ui.components.AhaboardMultimodalMediaView
@@ -147,6 +161,9 @@ import com.hanson.mobileuse.ui.components.PickleAgentHubSheet
 import com.hanson.mobileuse.ui.components.PickleHubTab
 import com.hanson.mobileuse.ui.components.PinnedRoutinesAndShowMeCard
 import com.hanson.mobileuse.ui.components.PlanBlueprintActionBanner
+import com.hanson.mobileuse.ui.components.ProactiveSecretarySettingsSheet
+import com.hanson.mobileuse.ui.components.ProactiveSecretaryStripCard
+import com.hanson.mobileuse.ui.components.VirtualDisplayTakeoverCard
 import com.hanson.mobileuse.ui.components.SessionInboxDrawerSheet
 import com.hanson.mobileuse.ui.components.SlashAndMentionPaletteCard
 import com.hanson.mobileuse.ui.components.SseLiveDynamicUiSurface
@@ -158,6 +175,7 @@ import com.hanson.mobileuse.workspace.AgentWorkMode
 import com.hanson.mobileuse.workspace.ComposerCommandParser
 import com.hanson.mobileuse.workspace.SessionStoreState
 import com.hanson.mobileuse.workspace.WorkspaceUiState
+import org.json.JSONObject
 
 private enum class BoardMode(val titleKo: String, val subKo: String) {
     INSTANT("즉시 실행", "한 줄 지시 · 궤적 제어"),
@@ -246,7 +264,39 @@ fun CommandCenterScreen(
     onCompleteOnboarding: () -> Unit = {},
     lastCloudApiError: String? = null,
     onSaveAiConnection: ((apiKey: String?, customBaseUrl: String?, selectedModel: String?) -> Unit)? = null,
-    onToggleVoice: (() -> Unit)? = null
+    onToggleVoice: (() -> Unit)? = null,
+    proactiveProposals: List<ProactiveProposal> = emptyList(),
+    secretarySettings: SecretarySettings = SecretarySettings(),
+    onExecuteProactiveProposal: (proposalId: String, actionKey: String, replyText: String, snoozeMinutes: Long) -> Unit = { _, _, _, _ -> },
+    onPublishProposalToA2ui: (ProactiveProposal) -> Unit = { ProactiveProposalToA2uiBridge.publishToA2uiRegistry(it) },
+    onScanProactiveSecretary: () -> Unit = {},
+    onUpdateSecretarySettings: ((SecretarySettings) -> SecretarySettings) -> Unit = { ProactiveSecretaryEngine.updateSettings(it) },
+    onToggleSecretaryPackageMute: (packageName: String, muted: Boolean) -> Unit = { pkg, muted -> ProactiveSecretaryEngine.togglePackageMute(pkg, muted) },
+    onA2uiSecretaryAction: (actionName: String, contextJson: JSONObject?) -> Unit = { _, _ -> },
+    privacyProof: PrivacyProofSnapshot = PrivacyAndQuotaProofLedger.snapshot.value,
+    stormShieldConfig: StormShieldConfig = NotificationStormShieldEngine.config.value,
+    vdisplaySnapshot: VirtualDisplayUiSnapshot = HansonVirtualDisplayManager.uiSnapshot.value,
+    onBatchApproveSafeProposals: (List<String>) -> Unit = {},
+    onReduceRoomFrequency: (roomKey: String) -> Unit = { ProactiveSecretaryEngine.reduceRoomFrequency(it) },
+    onAlwaysAllowSafeCalendar: (roomKey: String) -> Unit = { ProactiveSecretaryEngine.alwaysAllowSafeCalendarForRoom(it) },
+    onToggleStormShield: (Boolean) -> Unit = { enabled ->
+        if (enabled) NotificationStormShieldEngine.startFocusBlock()
+        else NotificationStormShieldEngine.stopFocusBlock()
+    },
+    onPlaySpokenDailyBrief: () -> Unit = {},
+    onExportPortabilityMarkdown: () -> Unit = {},
+    onRequestVirtualDisplayTakeover: () -> Unit = {
+        HansonVirtualDisplayManager.requestUserTakeover("사용자가 직접 조작을 시작했습니다.")
+    },
+    onReturnVirtualDisplayControl: () -> Unit = {
+        HansonVirtualDisplayManager.returnControlFromUser()
+    },
+    onResumeVirtualDisplayAgent: () -> Unit = {
+        HansonVirtualDisplayManager.resumeAgentAfterTakeover()
+    },
+    onStopVirtualDisplay: () -> Unit = {
+        HansonVirtualDisplayManager.stop()
+    }
 ) {
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
@@ -272,6 +322,7 @@ fun CommandCenterScreen(
     var attachedContexts by remember { mutableStateOf<List<String>>(emptyList()) }
     var showCompanionDrawer by rememberSaveable { mutableStateOf(false) }
     var companionDrawerTab by rememberSaveable { mutableStateOf(CompanionDrawerTab.BUBBLES) }
+    var showSecretarySettingsSheet by rememberSaveable { mutableStateOf(false) }
     var activeMorphSurface by remember { mutableStateOf<InteractiveMorphSurface?>(null) }
     var morphPresetIndex by rememberSaveable { mutableIntStateOf(0) }
 
@@ -423,13 +474,18 @@ fun CommandCenterScreen(
         )
     }
 
+    val pendingSecretaryProposals = remember(proactiveProposals) {
+        proactiveProposals.filter { it.status == ProactiveProposalStatus.PENDING }
+    }
+
     val dailyBrief = remember(
         currentHour,
         notifications,
         watcherRules,
         scratchpadEntries,
         memoryBubbles,
-        personalRoutines
+        personalRoutines,
+        proactiveProposals
     ) {
         ProactiveDailyBriefEngine.buildBrief(
             hourOfDay = currentHour,
@@ -437,7 +493,8 @@ fun CommandCenterScreen(
             watcherRules = watcherRules,
             scratchpadEntries = scratchpadEntries,
             bubbles = memoryBubbles,
-            pinnedRoutines = personalRoutines
+            pinnedRoutines = personalRoutines,
+            proactiveProposals = proactiveProposals
         )
     }
 
@@ -459,6 +516,38 @@ fun CommandCenterScreen(
                 isMoreMenuExpanded = showOverflowMenu,
                 onDismissMoreMenu = { showOverflowMenu = false },
                 overflowMenuContent = {
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                text = if (pendingSecretaryProposals.isNotEmpty()) {
+                                    "선제안 비서 설정 (${pendingSecretaryProposals.size}건 대기)"
+                                } else {
+                                    "선제안 비서 설정"
+                                },
+                                color = ObsidianColors.TextPrimary,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.ExtraBold
+                            )
+                        },
+                        onClick = {
+                            showOverflowMenu = false
+                            showSecretarySettingsSheet = true
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                "지금 선제안 스캔",
+                                color = ObsidianColors.TextPrimary,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        },
+                        onClick = {
+                            showOverflowMenu = false
+                            onScanProactiveSecretary()
+                        }
+                    )
                     DropdownMenuItem(
                         text = {
                             Text(
@@ -981,6 +1070,38 @@ fun CommandCenterScreen(
                     }
                 }
 
+                // Live Visual Watch & Take Over VirtualDisplay Banner (Monochrome Paper/Carbon)
+                if (vdisplaySnapshot.status.active ||
+                    vdisplaySnapshot.takeoverState == VirtualDisplayTakeoverState.AWAITING_USER_TAKEOVER
+                ) {
+                    item(key = "vdisplay_live_takeover_card") {
+                        VirtualDisplayTakeoverCard(
+                            vdisplaySnapshot = vdisplaySnapshot,
+                            onRequestTakeover = onRequestVirtualDisplayTakeover,
+                            onReturnControl = onReturnVirtualDisplayControl,
+                            onResumeAgent = onResumeVirtualDisplayAgent,
+                            onStopVirtualDisplay = onStopVirtualDisplay
+                        )
+                    }
+                }
+
+                // Proactive Chief-of-Staff AI Secretary Strip (Visible in BOTH SIMPLE_HUMAN and STUDIO_PRO when pending proposals exist)
+                if (pendingSecretaryProposals.isNotEmpty()) {
+                    item(key = "proactive_secretary_strip") {
+                        ProactiveSecretaryStripCard(
+                            proposals = proactiveProposals,
+                            settings = secretarySettings,
+                            onExecuteAction = onExecuteProactiveProposal,
+                            onPublishToA2ui = onPublishProposalToA2ui,
+                            onScanNow = onScanProactiveSecretary,
+                            onOpenSettings = { showSecretarySettingsSheet = true },
+                            onBatchApproveSafe = onBatchApproveSafeProposals,
+                            onReduceRoomFrequency = onReduceRoomFrequency,
+                            onAlwaysAllowSafeCalendar = onAlwaysAllowSafeCalendar
+                        )
+                    }
+                }
+
                 if (isAgentBusy) {
                     item(key = "active_trajectory_card") {
                         GlassCard(
@@ -1229,26 +1350,33 @@ fun CommandCenterScreen(
                             surface = a2uiSurface,
                             compactOverlayMode = false,
                             onUserAction = { userAction ->
-                                when (userAction.name) {
-                                    "open_citation", "open_url" -> {
-                                        val rawUrl = userAction.context["url"]?.toString()?.trim().orEmpty()
-                                        if (rawUrl.startsWith("https://", ignoreCase = true)) {
-                                            runCatching {
-                                                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(rawUrl)).apply {
-                                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                if (MobileUseAgentEngine.isSupportedA2uiSecretaryAction(userAction.name)) {
+                                    onA2uiSecretaryAction(
+                                        userAction.name,
+                                        A2uiJsonCodec.mapToJsonObject(userAction.context)
+                                    )
+                                } else {
+                                    when (userAction.name) {
+                                        "open_citation", "open_url" -> {
+                                            val rawUrl = userAction.context["url"]?.toString()?.trim().orEmpty()
+                                            if (rawUrl.startsWith("https://", ignoreCase = true)) {
+                                                runCatching {
+                                                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(rawUrl)).apply {
+                                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                                    }
+                                                    context.startActivity(intent)
                                                 }
-                                                context.startActivity(intent)
                                             }
                                         }
-                                    }
-                                    "speak_board", "speak" -> {
-                                        val spoken = userAction.context["text"]?.toString()?.trim().orEmpty()
-                                        if (spoken.isNotBlank()) {
-                                            LiveVoiceSessionManager.speakAgentResponse(spoken)
+                                        "speak_board", "speak" -> {
+                                            val spoken = userAction.context["text"]?.toString()?.trim().orEmpty()
+                                            if (spoken.isNotBlank()) {
+                                                LiveVoiceSessionManager.speakAgentResponse(spoken)
+                                            }
                                         }
-                                    }
-                                    else -> {
-                                        onSendChatMessage(userAction.toHumanPromptSummary())
+                                        else -> {
+                                            onSendChatMessage(userAction.toHumanPromptSummary())
+                                        }
                                     }
                                 }
                             },
@@ -1728,6 +1856,22 @@ fun CommandCenterScreen(
                 onTriggerCloudSyncNow = onTriggerCloudSyncNow
             )
         }
+        if (showSecretarySettingsSheet) {
+            ProactiveSecretarySettingsSheet(
+                settings = secretarySettings,
+                pendingCount = pendingSecretaryProposals.size,
+                onDismiss = { showSecretarySettingsSheet = false },
+                onUpdateSettings = onUpdateSecretarySettings,
+                onTogglePackageMute = onToggleSecretaryPackageMute,
+                onScanNow = onScanProactiveSecretary,
+                privacyProof = privacyProof,
+                stormShieldConfig = stormShieldConfig,
+                onToggleStormShield = onToggleStormShield,
+                onPlaySpokenDailyBrief = onPlaySpokenDailyBrief,
+                onExportPortabilityMarkdown = onExportPortabilityMarkdown
+            )
+        }
+
         if (showOnboardingWizard) {
             val runtimeEngine = remember(context) {
                 com.hanson.mobileuse.agent.HansonRuntimeHolder.getAgentEngine(context)

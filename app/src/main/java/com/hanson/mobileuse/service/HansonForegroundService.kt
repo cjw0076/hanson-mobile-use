@@ -21,7 +21,16 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.hanson.mobileuse.accessibility.HansonAccessibilityService
+import com.hanson.mobileuse.agent.ActionTransactionLedger
+import com.hanson.mobileuse.agent.CommitmentDebtTrackerEngine
+import com.hanson.mobileuse.agent.HansonRuntimeHolder
+import com.hanson.mobileuse.agent.LifestyleBeatScheduler
+import com.hanson.mobileuse.agent.PrivacyAndQuotaProofLedger
+import com.hanson.mobileuse.agent.ProactiveSecretaryEngine
+import com.hanson.mobileuse.agent.RelationshipCareCadenceEngine
+import com.hanson.mobileuse.agent.RoomUrgencyCalibrationStore
 import com.hanson.mobileuse.notification.HansonNotificationListenerService
+import com.hanson.mobileuse.notification.ProactiveSecretaryNotifier
 import com.hanson.mobileuse.notification.RemoteInputSessionCache
 import com.hanson.mobileuse.oscli.HansonOsCliMain
 import com.hanson.mobileuse.ui.MainActivity
@@ -51,6 +60,7 @@ class HansonForegroundService : Service() {
         const val NOTIFICATION_ID = 10042
         const val ACTION_STOP_AGENT = "com.hanson.mobileuse.ACTION_STOP_AGENT"
         private const val WATCHDOG_INTERVAL_MS = 60_000L
+        private const val SECRETARY_SCAN_INTERVAL_MS = 15L * 60_000L
         private val A11Y_SELF_HEAL_BACKOFF_MS = longArrayOf(5_000L, 30_000L, 120_000L, 300_000L)
 
         private val _isRunning = MutableStateFlow(false)
@@ -149,17 +159,73 @@ class HansonForegroundService : Service() {
     private val serviceJob = SupervisorJob()
     private val serviceScope = CoroutineScope(Dispatchers.IO + serviceJob)
     private var a11yWatchdogJob: Job? = null
+    @Volatile
+    private var lastSecretaryScanMs: Long = 0L
 
     private val watchdogRunnable = object : Runnable {
         override fun run() {
             HansonNotificationListenerService.ensureRebound(packageName = packageName)
             RemoteInputSessionCache.evictExpired()
+            val nowMs = System.currentTimeMillis()
+            val shouldRunPeriodicScan = (nowMs - lastSecretaryScanMs >= SECRETARY_SCAN_INTERVAL_MS)
+            if (shouldRunPeriodicScan) {
+                lastSecretaryScanMs = nowMs
+            }
+            serviceScope.launch {
+                var needsWidgetRefresh = false
+                if (shouldRunPeriodicScan) {
+                    runCatching {
+                        ProactiveSecretaryEngine.scanProactiveContext(applicationContext)
+                        needsWidgetRefresh = true
+                    }.onFailure { err ->
+                        Log.w(TAG, "Periodic proactive secretary scan error: ${err.message}")
+                    }
+                }
+                runCatching {
+                    LifestyleBeatScheduler.ensureInitialized(applicationContext)
+                    val dueBeats = LifestyleBeatScheduler.findDueBeats(
+                        nowMs = nowMs,
+                        settings = ProactiveSecretaryEngine.settings.value
+                    )
+                    if (dueBeats.isNotEmpty()) {
+                        dueBeats.forEach { beat ->
+                            LifestyleBeatScheduler.markBeatExecuted(beat.id, nowMs)
+                            runCatching {
+                                ProactiveSecretaryEngine.scanProactiveContext(applicationContext)
+                            }
+                            if (beat.spokenBriefEnabled && !ProactiveSecretaryEngine.isInQuietHours(nowMs)) {
+                                runCatching {
+                                    HansonRuntimeHolder.getAgentEngine(applicationContext).playSpokenDailyBrief()
+                                }
+                            }
+                        }
+                        needsWidgetRefresh = true
+                    }
+                }.onFailure { err ->
+                    Log.w(TAG, "Lifestyle beat scheduler tick error: ${err.message}")
+                }
+                if (needsWidgetRefresh) {
+                    HansonSecretaryWidgetProvider.requestRefresh(applicationContext)
+                }
+            }
             handler.postDelayed(this, WATCHDOG_INTERVAL_MS)
         }
     }
 
     override fun onCreate() {
         super.onCreate()
+        runCatching {
+            ProactiveSecretaryEngine.ensureInitialized(applicationContext)
+            ProactiveSecretaryNotifier.registerHook(applicationContext)
+            LifestyleBeatScheduler.ensureInitialized(applicationContext)
+            LifestyleBeatScheduler.seedDefaultBeatsIfEmpty()
+            PrivacyAndQuotaProofLedger.ensureInitialized(applicationContext)
+            RoomUrgencyCalibrationStore.ensureInitialized(applicationContext)
+            CommitmentDebtTrackerEngine.ensureInitialized(applicationContext)
+            RelationshipCareCadenceEngine.ensureInitialized(applicationContext)
+            ActionTransactionLedger.ensureInitialized(applicationContext)
+            HansonSecretaryWidgetProvider.requestRefresh(applicationContext)
+        }
         createChannel()
         val notification = buildNotification("Artemis Bridge (:18888) · Screen-Off Reply 대기 중")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {

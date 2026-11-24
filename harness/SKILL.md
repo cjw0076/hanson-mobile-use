@@ -49,6 +49,34 @@ PY
 - **Persistent Agent Helpers**:
   - Reusable app-specific functions saved in `~/.hanson-mobile-use/agent-workspace/agent_helpers.py` are auto-imported into every script.
 
+## Proactive Chief-of-Staff Secretary (`:18888/secretary/*` & Sync Bridge)
+
+Manage on-device proactive proposals (multi-turn KakaoTalk/Slack/Email/SMS/Reservation/Delivery/Finance-Advisory) from flat Python scripts, CLI subcommands, or the PC/Cloud API Sync Bridge — all with `X-Artemis-Token` authentication and zero external pip dependencies.
+
+### Flat Script Helpers (`HansonPhone` & pre-imported namespace)
+- `secretary_proposals(status="PENDING", limit=20)` — fetches pending or historical proposals (`GET /secretary/proposals`) with calendar-conflict flags and unread room counts.
+- `secretary_scan(include_weather=False, lat=None, lon=None)` — triggers an on-device calendar conflict, unread follow-up, and optional opt-in Open-Meteo weather scan (`POST /secretary/scan`).
+- `secretary_act(proposal_id, action="approve", reply_text="", snooze_minutes=60)` — executes a user-confirmed action (`approve`, `dismiss`, `snooze`, `reply`, `open_map`, `a2ui`) via `POST /secretary/act`.
+- `secretary_push_signal(package_name, sender, text, app_label="", room="", can_quick_reply=False, timestamp_ms=None)` — injects a sanitized external signal into `POST /secretary/ingest`.
+
+### CLI Subcommands & PC/Cloud Sync Bridge (`harness/hanson_secretary_sync.py`)
+```bash
+# Inspect pending proposals or trigger a scan directly from CLI
+python -B harness/hanson_harness.py secretary list --status PENDING --limit 20
+python -B harness/hanson_harness.py secretary scan --weather --lat 37.5665 --lon 126.9780
+python -B harness/hanson_harness.py secretary act <proposal_id> --action approve
+python -B harness/hanson_harness.py secretary push --package com.Slack --sender "지민" --room "#ops" --text "오늘 6시까지 회신 부탁"
+
+# Pull ICS calendar conflicts, GitHub PR reviews, Open-Meteo umbrella checks, or Slack/Gmail/Notion/Linear/Jira JSON exports
+python -B harness/hanson_secretary_sync.py \
+  --ics ./work.ics \
+  --github \
+  --weather --lat 37.5665 --lon 126.9780 --location-label "서울 강남" \
+  --from-json ./inbox.json \
+  --dry-run
+```
+- **Security Hygiene**: `hanson_secretary_sync.py` strips API keys (`AIza...`, `sk-...`, `ghp_...`, `xoxb-...`), OTPs, door PINs, card numbers, and Korean RRNs, blocks pure OTPs and English/Korean prompt-injection payloads BEFORE anything reaches `:18888`, and refuses non-loopback plaintext `http://` targets.
+
 ## Safety Rules
 1. Always run `preflight()` before unattended multi-step runs (blocks banking, wallets, password managers, and surfaces indirect prompt-injection warnings).
 2. Never attempt to enter PINs, passwords, CVVs, or 2FA codes; the harness automatically refuses locked devices (`isKeyguardShowing=true`).

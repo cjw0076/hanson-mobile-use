@@ -83,6 +83,10 @@ data class AtomicSnapshot(
         return sb.toString()
     }
 
+    fun elementsJson(): JSONArray = JSONArray().apply {
+        indexedElements.forEach { put(it.toJson()) }
+    }
+
     fun toJson(includeFullTree: Boolean = false): JSONObject = JSONObject().apply {
         put("timestamp", timestampMs)
         put("screenWidth", screenWidth)
@@ -91,9 +95,7 @@ data class AtomicSnapshot(
         put("activeWindowTitle", activeWindowTitle)
         put("windowCount", windowCount)
         put("elementCount", indexedElements.size)
-        val elArr = JSONArray()
-        indexedElements.forEach { elArr.put(it.toJson()) }
-        put("elements", elArr)
+        put("elements", elementsJson())
         if (includeFullTree) {
             val winArr = JSONArray()
             rootNodes.forEach { winArr.put(it.toJson(screenWidth, screenHeight)) }
@@ -219,14 +221,39 @@ object HierarchyDumper {
         }
     }
 
+    /**
+     * Pure JVM-safe check for whether a view's raw screen bounds lie completely outside
+     * the visible viewport `[0..screenW, 0..screenH]` (or have empty/inverted geometry).
+     */
+    fun isBoundsOffscreen(
+        left: Int,
+        top: Int,
+        right: Int,
+        bottom: Int,
+        screenW: Int,
+        screenH: Int
+    ): Boolean {
+        if (screenW <= 0 || screenH <= 0) return false
+        if (right <= left || bottom <= top) return true
+        return right <= 0 || bottom <= 0 || left >= screenW || top >= screenH
+    }
+
+    @JvmOverloads
     fun captureAtomicSnapshot(
         service: AccessibilityService,
         includeScreenshot: Boolean = true,
         filterInvisible: Boolean = true,
-        jpegQuality: Int = 78
+        jpegQuality: Int = 78,
+        clearCacheBeforeCapture: Boolean = true
     ): AtomicSnapshot = runBlocking {
         perceptionMutex.withLock {
-            captureAtomicSnapshotInternal(service, includeScreenshot, filterInvisible, jpegQuality)
+            captureAtomicSnapshotInternal(
+                service = service,
+                includeScreenshot = includeScreenshot,
+                filterInvisible = filterInvisible,
+                jpegQuality = jpegQuality,
+                clearCacheBeforeCapture = clearCacheBeforeCapture
+            )
         }
     }
 
@@ -234,17 +261,28 @@ object HierarchyDumper {
         service: AccessibilityService,
         includeScreenshot: Boolean = true,
         filterInvisible: Boolean = true,
-        jpegQuality: Int = 78
+        jpegQuality: Int = 78,
+        clearCacheBeforeCapture: Boolean = true
     ): AtomicSnapshot = perceptionMutex.withLock {
-        captureAtomicSnapshotInternal(service, includeScreenshot, filterInvisible, jpegQuality)
+        captureAtomicSnapshotInternal(
+            service = service,
+            includeScreenshot = includeScreenshot,
+            filterInvisible = filterInvisible,
+            jpegQuality = jpegQuality,
+            clearCacheBeforeCapture = clearCacheBeforeCapture
+        )
     }
 
     private fun captureAtomicSnapshotInternal(
         service: AccessibilityService,
         includeScreenshot: Boolean = true,
         filterInvisible: Boolean = true,
-        jpegQuality: Int = 78
+        jpegQuality: Int = 78,
+        clearCacheBeforeCapture: Boolean = true
     ): AtomicSnapshot {
+        if (clearCacheBeforeCapture) {
+            A11yReadGate.clearAccessibilityCache(service)
+        }
         val (screenW, screenH) = getScreenDimensions(service)
         val screenBounds = Rect(0, 0, screenW, screenH)
 
@@ -538,15 +576,30 @@ object HierarchyDumper {
         if (node == null) return null
         if (depth > MAX_RECURSION_DEPTH) return null
         if (collectedNodeCounter.get() >= MAX_COLLECTED_NODES) return null
-        if (filterInvisible && !node.isVisibleToUser) return null
+        val isHidden = !node.isVisibleToUser
+        if (filterInvisible && isHidden) return null
 
         val rawBounds = Rect()
         node.getBoundsInScreen(rawBounds)
 
+        val isOffscreen = isBoundsOffscreen(
+            left = rawBounds.left,
+            top = rawBounds.top,
+            right = rawBounds.right,
+            bottom = rawBounds.bottom,
+            screenW = screenW,
+            screenH = screenH
+        )
+
         val visibleBounds = Rect(rawBounds)
-        if (!visibleBounds.intersect(clipBounds)) {
+        val intersectsClip = visibleBounds.intersect(clipBounds)
+        if (!intersectsClip) {
             if (filterInvisible) return null
-            visibleBounds.setEmpty()
+            if (!isOffscreen) {
+                visibleBounds.setEmpty()
+            } else {
+                visibleBounds.set(rawBounds)
+            }
         }
 
         if (filterInvisible && occludedRegion != null && isRectFullyOccluded(occludedRegion, visibleBounds)) {
@@ -599,9 +652,18 @@ object HierarchyDumper {
         )
 
         val centerOccluded = occludedRegion != null &&
+            !isOffscreen &&
             isPointOccluded(occludedRegion, candidate.centerX, candidate.centerY)
 
-        val assignedIndex = if (!centerOccluded && candidate.isInteractiveOrInformative()) {
+        val shouldIndex = if (filterInvisible) {
+            !centerOccluded && candidate.isInteractiveOrInformative()
+        } else {
+            !centerOccluded &&
+                candidate.hasInteractiveOrInformativeSemantics() &&
+                (visibleBounds.width() > 2 && visibleBounds.height() > 2)
+        }
+
+        val assignedIndex = if (shouldIndex) {
             val idx = indexCounter.getAndIncrement()
             val (normX, normY) = CoordinateNormalizer.pixelToNormalized(
                 candidate.centerX,
@@ -635,7 +697,9 @@ object HierarchyDumper {
                     focused = candidate.isFocused,
                     enabled = candidate.isEnabled,
                     windowType = windowType,
-                    windowLayer = windowLayer
+                    windowLayer = windowLayer,
+                    offscreen = isOffscreen,
+                    hidden = isHidden
                 )
             )
             idx

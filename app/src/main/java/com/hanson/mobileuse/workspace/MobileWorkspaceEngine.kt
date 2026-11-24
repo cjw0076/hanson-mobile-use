@@ -7,11 +7,29 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.io.DataInputStream
+import java.io.DataOutputStream
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileNotFoundException
+import java.io.FileOutputStream
+import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
+import java.nio.file.Files
+import java.security.SecureRandom
+import java.util.Arrays
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicInteger
+import javax.crypto.AEADBadTagException
+import javax.crypto.Cipher
+import javax.crypto.SecretKeyFactory
+import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.PBEKeySpec
+import javax.crypto.spec.SecretKeySpec
 
 data class WorkspaceFileEntry(
     val relativePath: String,
@@ -34,6 +52,17 @@ data class WorkspaceCheckpoint(
     val label: String,
     val createdAtMs: Long,
     val fileCount: Int
+)
+
+/**
+ * Summary returned by [MobileWorkspaceEngine.exportEncryptedBackup] and
+ * [MobileWorkspaceEngine.importEncryptedBackup] for `.hansonbackup` v1 containers.
+ */
+data class EncryptedBackupResult(
+    val fileCount: Int,
+    val totalPlaintextBytes: Long,
+    val chunkCount: Int,
+    val containerVersion: Int = 1
 )
 
 data class WorkspaceUiState(
@@ -287,7 +316,18 @@ class MobileWorkspaceEngine {
         private const val MAX_DIFF_HISTORY = 50
         private const val MAX_SEARCH_RESULTS = 200
         private const val MAX_SEARCH_FILE_BYTES = 2 * 1024 * 1024L
+        private const val MAX_REPOMAP_FILE_BYTES = 512 * 1024L
         private const val MAX_EXEC_OUTPUT_CHARS = 4_000
+
+        /** `.hansonbackup` v1 container constants (PBKDF2WithHmacSHA256 + 1 MiB AES-256-GCM chunks). */
+        val BACKUP_MAGIC: ByteArray = "HSNBKP01".toByteArray(StandardCharsets.US_ASCII)
+        const val BACKUP_CONTAINER_VERSION: Int = 1
+        const val BACKUP_CHUNK_SIZE_BYTES: Int = 1024 * 1024
+        const val BACKUP_PBKDF2_ITERATIONS: Int = 120_000
+        private const val BACKUP_SALT_BYTES: Int = 16
+        private const val BACKUP_NONCE_BYTES: Int = 12
+        private const val BACKUP_GCM_TAG_BITS: Int = 128
+        private const val BACKUP_MAX_ARCHIVE_BYTES: Long = 128L * 1024L * 1024L
 
         private val IGNORED_DIRS = setOf(CHECKPOINTS_DIR, ".git", ".gradle", "build")
         private val SHELL_METACHAR_REGEX = Regex("[;&|`$()><\\n\\r\\u0000\\\\]")
@@ -295,12 +335,131 @@ class MobileWorkspaceEngine {
         private val ALLOWED_COMMANDS = setOf(
             "ls", "cat", "wc", "grep", "tree", "pwd", "diff", "echo", "status"
         )
+
+        private val KT_SYMBOL_REGEX = Regex(
+            """^\s*(?:(?:public|private|internal|protected|open|final|abstract|sealed|data|enum|annotation|value|inline|inner|override|suspend|operator|infix|tailrec|external|actual|expect|const)\s+)*(class|object|interface|typealias|fun)\s+([A-Za-z_][A-Za-z0-9_<>]*(?:\([^)]*\))?(?:\s*:\s*[A-Za-z0-9_<>?.,\s]+?)?)(?=\s*[{=]|$)"""
+        )
+        private val JAVA_TYPE_REGEX = Regex(
+            """^\s*(?:(?:public|private|protected|abstract|final|static|sealed|non-sealed)\s+)*(class|interface|enum|record)\s+([A-Za-z_][A-Za-z0-9_<>]*)"""
+        )
+        private val JAVA_METHOD_REGEX = Regex(
+            """^\s*(?:public|private|protected)\s+(?:static\s+)?(?:final\s+)?(?:synchronized\s+)?[A-Za-z0-9_<>?\[\],\s]+\s+([A-Za-z_][A-Za-z0-9_]*\s*\([^;{}]*\))\s*(?:throws\s+[A-Za-z0-9_.,\s]+)?\{"""
+        )
+        private val PY_SYMBOL_REGEX = Regex(
+            """^\s*(?:async\s+)?(class|def)\s+([A-Za-z_][A-Za-z0-9_]*(?:\([^)]*\))?)"""
+        )
+        private val SWIFT_SYMBOL_REGEX = Regex(
+            """^\s*(?:(?:public|private|fileprivate|internal|open|final|static|class|override|mutating|async)\s+)*(class|struct|enum|protocol|actor|extension|func)\s+([A-Za-z_][A-Za-z0-9_<>]*(?:\([^)]*\))?)"""
+        )
+        private val TS_JS_SYMBOL_REGEX = Regex(
+            """^\s*(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:abstract\s+)?(?:async\s+)?(class|interface|type|enum|function)\s+([A-Za-z_$][A-Za-z0-9_$<>]*(?:\([^)]*\))?)"""
+        )
+        private val TS_JS_ARROW_REGEX = Regex(
+            """^\s*(?:export\s+)?const\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:async\s+)?\([^)]*\)\s*(?::[^=]+)?=>"""
+        )
+
+        /**
+         * Estimates token count with CJK/Hangul awareness (~4 ASCII chars/token, ~1.5 non-ASCII chars/token).
+         */
+        fun estimateTokens(text: String): Int {
+            if (text.isEmpty()) return 0
+            var ascii = 0
+            var nonAscii = 0
+            for (ch in text) {
+                if (ch.code <= 0x7F) ascii++ else nonAscii++
+            }
+            val est = (ascii / 4.0) + (nonAscii / 1.5)
+            return kotlin.math.ceil(est).toInt().coerceAtLeast(1)
+        }
+
+        /**
+         * 80% context-ceiling auto-compaction absorbed from `Sanuu7/AndroidHarness` (`AutoCompaction.kt`).
+         * Preserves the head anchor message, the most recent tail messages, and a concise summary
+         * digest of compacted middle messages whenever total estimated tokens exceed `maxTokenBudget * thresholdRatio`.
+         */
+        fun autoCompactContext(
+            messages: List<String>,
+            maxTokenBudget: Int,
+            thresholdRatio: Double = 0.80
+        ): Pair<List<String>, Boolean> {
+            if (messages.size <= 2) return messages to false
+            val safeBudget = maxTokenBudget.coerceAtLeast(32)
+            val safeRatio = thresholdRatio.coerceIn(0.10, 0.99)
+            val thresholdTokens = (safeBudget * safeRatio).toInt().coerceAtLeast(16)
+
+            val totalTokens = messages.sumOf { estimateTokens(it) }
+            if (totalTokens <= thresholdTokens) {
+                return messages to false
+            }
+
+            val headBudget = (thresholdTokens * 0.25).toInt().coerceAtLeast(12)
+            val rawHead = messages.first()
+            val head = trimToTokenLimit(rawHead, headBudget)
+            val headTokens = estimateTokens(head)
+
+            val tailBudget = (thresholdTokens * 0.50).toInt().coerceAtLeast(16)
+            val keptTailReversed = mutableListOf<String>()
+            var tailTokens = 0
+            var tailStartIndex = messages.size
+
+            for (idx in messages.lastIndex downTo 2) {
+                val msg = messages[idx]
+                val tok = estimateTokens(msg)
+                if (keptTailReversed.isEmpty()) {
+                    val trimmedLast = trimToTokenLimit(msg, tailBudget)
+                    keptTailReversed.add(trimmedLast)
+                    tailTokens += estimateTokens(trimmedLast)
+                    tailStartIndex = idx
+                } else if (tailTokens + tok <= tailBudget) {
+                    keptTailReversed.add(msg)
+                    tailTokens += tok
+                    tailStartIndex = idx
+                } else {
+                    break
+                }
+            }
+
+            val dropped = messages.subList(1, tailStartIndex.coerceAtLeast(2))
+            val remainingDigestBudget = (thresholdTokens - headTokens - tailTokens).coerceAtLeast(16)
+            val digest = buildCompactionDigest(dropped, remainingDigestBudget)
+
+            val compacted = ArrayList<String>(2 + keptTailReversed.size)
+            compacted.add(head)
+            compacted.add(digest)
+            compacted.addAll(keptTailReversed.asReversed())
+            return compacted to true
+        }
+
+        private fun trimToTokenLimit(text: String, maxTokens: Int): String {
+            if (estimateTokens(text) <= maxTokens) return text
+            val approxChars = (maxTokens * 3).coerceAtLeast(12)
+            if (text.length <= approxChars) return text
+            return text.take(approxChars).trimEnd() + " …"
+        }
+
+        private fun buildCompactionDigest(dropped: List<String>, maxTokens: Int): String {
+            val header = "[Compacted Context Digest: ${dropped.size} earlier turns summarized]"
+            val sb = StringBuilder(header)
+            val perItemChars = ((maxTokens * 3) / dropped.size.coerceAtLeast(1)).coerceIn(24, 140)
+            for ((i, msg) in dropped.withIndex()) {
+                val oneLine = msg.replace(Regex("\\s+"), " ").trim()
+                val snippet = if (oneLine.length > perItemChars) oneLine.take(perItemChars) + "…" else oneLine
+                val candidate = "\n- #${i + 1}: $snippet"
+                if (estimateTokens(sb.toString() + candidate) > maxTokens && i > 0) {
+                    sb.append("\n- ... (+${dropped.size - i} more turns)")
+                    break
+                }
+                sb.append(candidate)
+            }
+            return sb.toString()
+        }
     }
 
     val workspaceRoot: File
     private val rootCanonical: File
     private val lock = Any()
     private val checkpointSequence = AtomicInteger(0)
+    private val filePreEditBaselines = LinkedHashMap<String, String?>()
     private val _state: MutableStateFlow<WorkspaceUiState>
     val state: StateFlow<WorkspaceUiState>
 
@@ -624,18 +783,21 @@ class MobileWorkspaceEngine {
         filesSnapshotDir.mkdirs()
 
         val currentEntries = collectFileEntriesLocked(rootCanonical, maxDepth = 12)
+        var copiedCount = 0
         for (entry in currentEntries) {
             val src = File(rootCanonical, entry.relativePath)
+            if (isSymbolicLinkSafe(src) || !src.isFile) continue
             val dst = File(filesSnapshotDir, entry.relativePath)
             dst.parentFile?.mkdirs()
             src.copyTo(dst, overwrite = true)
+            copiedCount++
         }
 
         val checkpoint = WorkspaceCheckpoint(
             id = id,
             label = cleanLabel,
             createdAtMs = now,
-            fileCount = currentEntries.size
+            fileCount = copiedCount
         )
         val metaJson = JSONObject().apply {
             put("id", checkpoint.id)
@@ -645,8 +807,471 @@ class MobileWorkspaceEngine {
         }
         File(cpRoot, "meta.json").writeText(metaJson.toString(2), StandardCharsets.UTF_8)
 
+        filePreEditBaselines.clear()
         refreshIndexLocked()
         checkpoint
+    }
+
+    /**
+     * Per-file undo absorbed from `techjarves/Mobile-Harness` (`WorkspaceCheckpoints.kt`).
+     * Restores ONLY [relativePath] to its baseline from the latest (or specified) checkpoint, or
+     * from its pre-edit session baseline when no checkpoint exists. Deletes newly created files
+     * that were not present in the baseline.
+     */
+    fun undoFileChange(relativePath: String, checkpointId: String? = null): Boolean {
+        val target = resolveSafePath(relativePath)
+        val normalizedPath = toRelativePath(target)
+        return synchronized(lock) {
+            val checkpointDir = resolveCheckpointDirLocked(checkpointId)
+            if (checkpointDir != null) {
+                val filesDir = File(checkpointDir, "files")
+                val snapFile = File(filesDir, normalizedPath)
+                val snapCanonical = runCatching { snapFile.canonicalFile }.getOrNull()
+                val filesDirCanonical = runCatching { filesDir.canonicalFile }.getOrNull()
+                val snapSafe = snapCanonical != null &&
+                    filesDirCanonical != null &&
+                    snapCanonical.toPath().startsWith(filesDirCanonical.toPath()) &&
+                    !isSymbolicLinkSafe(snapFile)
+
+                if (snapSafe && snapFile.isFile) {
+                    val sameBytes = target.isFile &&
+                        !isSymbolicLinkSafe(target) &&
+                        target.readBytes().contentEquals(snapFile.readBytes())
+                    if (sameBytes) {
+                        return@synchronized false
+                    }
+                    target.parentFile?.mkdirs()
+                    snapFile.copyTo(target, overwrite = true)
+                    filePreEditBaselines.remove(normalizedPath)
+                    clearDiffsForPathLocked(normalizedPath)
+                    refreshSelectedContentIfMatchesLocked(normalizedPath, target)
+                    refreshIndexLocked()
+                    return@synchronized true
+                } else {
+                    if (target.isFile && !isSymbolicLinkSafe(target)) {
+                        target.delete()
+                        pruneEmptyParents(target.parentFile)
+                        filePreEditBaselines.remove(normalizedPath)
+                        clearDiffsForPathLocked(normalizedPath)
+                        refreshSelectedContentIfMatchesLocked(normalizedPath, target)
+                        refreshIndexLocked()
+                        return@synchronized true
+                    }
+                    return@synchronized false
+                }
+            }
+
+            if (!filePreEditBaselines.containsKey(normalizedPath)) {
+                return@synchronized false
+            }
+            val baseline = filePreEditBaselines.remove(normalizedPath)
+            if (baseline == null) {
+                if (target.isFile && !isSymbolicLinkSafe(target)) {
+                    target.delete()
+                    pruneEmptyParents(target.parentFile)
+                }
+            } else {
+                target.parentFile?.mkdirs()
+                target.writeText(baseline, StandardCharsets.UTF_8)
+            }
+            clearDiffsForPathLocked(normalizedPath)
+            refreshSelectedContentIfMatchesLocked(normalizedPath, target)
+            refreshIndexLocked()
+            true
+        }
+    }
+
+    /**
+     * Per-file keep/accept absorbed from `techjarves/Mobile-Harness` (`WorkspaceCheckpoints.kt`).
+     * Promotes the current state of [relativePath] into the latest checkpoint baseline and clears
+     * its pending unreviewed diff records.
+     */
+    fun acceptFileChange(relativePath: String, checkpointId: String? = null): Boolean {
+        val target = resolveSafePath(relativePath)
+        val normalizedPath = toRelativePath(target)
+        return synchronized(lock) {
+            var updated = false
+            val checkpointDir = resolveCheckpointDirLocked(checkpointId)
+            if (checkpointDir != null) {
+                val filesDir = File(checkpointDir, "files")
+                val snapFile = File(filesDir, normalizedPath)
+                val snapCanonical = runCatching { snapFile.canonicalFile }.getOrNull()
+                val filesDirCanonical = runCatching { filesDir.canonicalFile }.getOrNull()
+                val snapSafe = snapCanonical != null &&
+                    filesDirCanonical != null &&
+                    snapCanonical.toPath().startsWith(filesDirCanonical.toPath())
+
+                if (snapSafe) {
+                    if (target.isFile && !isSymbolicLinkSafe(target)) {
+                        snapFile.parentFile?.mkdirs()
+                        target.copyTo(snapFile, overwrite = true)
+                        updated = true
+                    } else if (snapFile.isFile) {
+                        snapFile.delete()
+                        updated = true
+                    }
+                    val metaFile = File(checkpointDir, "meta.json")
+                    if (metaFile.isFile) {
+                        runCatching {
+                            val meta = JSONObject(metaFile.readText(StandardCharsets.UTF_8))
+                            meta.put("fileCount", collectRawFiles(filesDir).size)
+                            metaFile.writeText(meta.toString(2), StandardCharsets.UTF_8)
+                        }
+                    }
+                }
+            }
+
+            if (filePreEditBaselines.remove(normalizedPath) != null) {
+                updated = true
+            }
+            val hadDiffs = _state.value.diffs.any { it.relativePath == normalizedPath }
+            if (hadDiffs) {
+                clearDiffsForPathLocked(normalizedPath)
+                updated = true
+            }
+            if (target.isFile && !isSymbolicLinkSafe(target)) {
+                updated = true
+            }
+            if (updated) {
+                refreshIndexLocked()
+            }
+            updated
+        }
+    }
+
+    /**
+     * 3-tier token-budgeted Repository Map generator absorbed from `Sanuu7/AndroidHarness`
+     * (`RepoMapGenerator.kt`). Extracts top-level symbols across Kotlin, Java, Python, Swift,
+     * and TypeScript/JavaScript files and degrades gracefully across:
+     * - Tier 1: Full symbol signatures per file
+     * - Tier 2: Compact single-line symbol names per file
+     * - Tier 3: Token-bounded file directory outline
+     */
+    fun generateRepoMap(maxTokens: Int = 1500): String = synchronized(lock) {
+        val budget = maxTokens.coerceAtLeast(32)
+        val entries = collectFileEntriesLocked(rootCanonical, maxDepth = 10)
+        if (entries.isEmpty()) {
+            return@synchronized "# Repo Map [tier=1, budget=${budget}tok]\n(workspace is empty)"
+        }
+
+        val extracted = entries.map { entry ->
+            val file = File(rootCanonical, entry.relativePath)
+            val symbols = if (file.isFile && !isSymbolicLinkSafe(file) &&
+                file.length() <= MAX_REPOMAP_FILE_BYTES && !isLikelyBinary(file)
+            ) {
+                extractTopLevelSymbols(entry.relativePath, file)
+            } else {
+                emptyList()
+            }
+            entry to symbols
+        }
+
+        // Tier 1: full symbol signatures
+        val tier1 = buildString {
+            appendLine("# Repo Map [tier=1, budget=${budget}tok, files=${entries.size}]")
+            for ((entry, symbols) in extracted) {
+                appendLine(entry.relativePath)
+                if (symbols.isEmpty()) {
+                    appendLine("  (${entry.lineCount} lines)")
+                } else {
+                    for (sym in symbols.take(40)) {
+                        appendLine("  - $sym")
+                    }
+                }
+            }
+        }.trimEnd()
+        if (estimateTokens(tier1) <= budget) {
+            return@synchronized tier1
+        }
+
+        // Tier 2: compact one-line symbol names per file
+        val tier2 = buildString {
+            appendLine("# Repo Map [tier=2, budget=${budget}tok, files=${entries.size}]")
+            for ((entry, symbols) in extracted) {
+                if (symbols.isEmpty()) {
+                    appendLine("${entry.relativePath} (${entry.lineCount}L)")
+                } else {
+                    val compactNames = symbols.take(12).map { compactSymbolName(it) }
+                    appendLine("${entry.relativePath}: ${compactNames.joinToString(", ")}")
+                }
+            }
+        }.trimEnd()
+        if (estimateTokens(tier2) <= budget) {
+            return@synchronized tier2
+        }
+
+        // Tier 3: bounded file outline within maxTokens
+        val out = StringBuilder()
+        out.append("# Repo Map [tier=3, budget=${budget}tok, files=${entries.size}]")
+        var included = 0
+        for ((entry, _) in extracted) {
+            val line = "\n${entry.relativePath} (${entry.lineCount}L)"
+            val footerReserve = "\n... (+${entries.size - included} more files)"
+            if (estimateTokens(out.toString() + line + footerReserve) > budget) {
+                if (included < entries.size) {
+                    out.append("\n... (+${entries.size - included} more files)")
+                }
+                break
+            }
+            out.append(line)
+            included++
+        }
+        out.toString()
+    }
+
+    /**
+     * Convenience instance delegator to [MobileWorkspaceEngine.autoCompactContext].
+     */
+    fun autoCompactContext(
+        messages: List<String>,
+        maxTokenBudget: Int,
+        thresholdRatio: Double = 0.80
+    ): Pair<List<String>, Boolean> = Companion.autoCompactContext(
+        messages = messages,
+        maxTokenBudget = maxTokenBudget,
+        thresholdRatio = thresholdRatio
+    )
+
+    /**
+     * Exports all regular non-symlink workspace files into a `.hansonbackup` v1 encrypted container
+     * (`techjarves/Mobile-Harness` `BackupCrypto.kt` pattern):
+     * - Key derivation: PBKDF2WithHmacSHA256 (120,000 iterations, random 16-byte salt, 256-bit key)
+     * - Encryption: Segmented 1 MiB AES-256-GCM chunks with unique per-chunk nonces and header+index AAD
+     * - Passphrase & derived key buffers are explicitly zero-wiped inside `finally`.
+     */
+    fun exportEncryptedBackup(
+        passphraseChars: CharArray,
+        destFile: File,
+        wipePassphrase: Boolean = true
+    ): EncryptedBackupResult {
+        if (passphraseChars.isEmpty()) {
+            throw IllegalArgumentException("Backup passphrase must not be empty.")
+        }
+        val localPass = passphraseChars.copyOf()
+        var pbeSpec: PBEKeySpec? = null
+        var keyBytes: ByteArray? = null
+        try {
+            val archiveBytesAndCount = synchronized(lock) { buildWorkspaceArchiveBytesLocked() }
+            val archiveBytes = archiveBytesAndCount.first
+            val fileCount = archiveBytesAndCount.second
+
+            val rng = SecureRandom()
+            val salt = ByteArray(BACKUP_SALT_BYTES).also { rng.nextBytes(it) }
+            val baseNonce = ByteArray(BACKUP_NONCE_BYTES).also { rng.nextBytes(it) }
+
+            pbeSpec = PBEKeySpec(localPass, salt, BACKUP_PBKDF2_ITERATIONS, 256)
+            val skf = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
+            keyBytes = skf.generateSecret(pbeSpec).encoded
+            val secretKey = SecretKeySpec(keyBytes, "AES")
+
+            val headerBytes = buildBackupHeaderBytes(
+                version = BACKUP_CONTAINER_VERSION,
+                iterations = BACKUP_PBKDF2_ITERATIONS,
+                chunkSize = BACKUP_CHUNK_SIZE_BYTES,
+                salt = salt,
+                baseNonce = baseNonce
+            )
+
+            destFile.parentFile?.mkdirs()
+            val tmpFile = File(destFile.parentFile, "${destFile.name}.tmp.${System.nanoTime()}")
+            var chunkCount = 0
+            try {
+                DataOutputStream(BufferedOutputStream(FileOutputStream(tmpFile))).use { out ->
+                    out.write(headerBytes)
+                    val totalLen = archiveBytes.size
+                    var offset = 0
+                    while (true) {
+                        val remaining = totalLen - offset
+                        val sliceLen = minOf(BACKUP_CHUNK_SIZE_BYTES, remaining)
+                        val isFinal = (offset + sliceLen) >= totalLen
+                        val iv = deriveChunkNonce(baseNonce, chunkCount)
+                        val aad = buildChunkAad(headerBytes, chunkCount, isFinal)
+
+                        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+                        cipher.init(Cipher.ENCRYPT_MODE, secretKey, GCMParameterSpec(BACKUP_GCM_TAG_BITS, iv))
+                        cipher.updateAAD(aad)
+                        val ciphertext = cipher.doFinal(archiveBytes, offset, sliceLen)
+
+                        out.writeInt(ciphertext.size)
+                        out.writeByte(if (isFinal) 1 else 0)
+                        out.write(ciphertext)
+
+                        chunkCount++
+                        offset += sliceLen
+                        if (isFinal) break
+                    }
+                    out.flush()
+                }
+                if (destFile.exists() && !destFile.delete()) {
+                    // Fallback overwrite if platform prevents delete before rename
+                    tmpFile.copyTo(destFile, overwrite = true)
+                    tmpFile.delete()
+                } else if (!tmpFile.renameTo(destFile)) {
+                    tmpFile.copyTo(destFile, overwrite = true)
+                    tmpFile.delete()
+                }
+            } catch (t: Throwable) {
+                tmpFile.delete()
+                throw t
+            }
+
+            return EncryptedBackupResult(
+                fileCount = fileCount,
+                totalPlaintextBytes = archiveBytes.size.toLong(),
+                chunkCount = chunkCount,
+                containerVersion = BACKUP_CONTAINER_VERSION
+            )
+        } finally {
+            pbeSpec?.clearPassword()
+            Arrays.fill(localPass, '\u0000')
+            keyBytes?.let { Arrays.fill(it, 0.toByte()) }
+            if (wipePassphrase) {
+                Arrays.fill(passphraseChars, '\u0000')
+            }
+        }
+    }
+
+    /**
+     * Decrypts, authenticates, and restores a `.hansonbackup` v1 container into this workspace.
+     * Validates every chunk's AES-256-GCM tag and container framing BEFORE mutating any file;
+     * wrong passphrases or tampered containers fail closed with [SecurityException].
+     */
+    fun importEncryptedBackup(
+        passphraseChars: CharArray,
+        srcFile: File,
+        wipePassphrase: Boolean = true
+    ): EncryptedBackupResult {
+        if (passphraseChars.isEmpty()) {
+            throw IllegalArgumentException("Backup passphrase must not be empty.")
+        }
+        if (!srcFile.isFile) {
+            throw FileNotFoundException("Encrypted backup file not found: ${srcFile.path}")
+        }
+
+        val localPass = passphraseChars.copyOf()
+        var pbeSpec: PBEKeySpec? = null
+        var keyBytes: ByteArray? = null
+        try {
+            val decryptedStream = ByteArrayOutputStream()
+            var chunkCount = 0
+            val containerVersion: Int
+
+            DataInputStream(BufferedInputStream(FileInputStream(srcFile))).use { input ->
+                val magic = ByteArray(BACKUP_MAGIC.size)
+                input.readFully(magic)
+                if (!magic.contentEquals(BACKUP_MAGIC)) {
+                    throw SecurityException("Invalid backup container header (expected .hansonbackup v1).")
+                }
+                containerVersion = input.readUnsignedShort()
+                if (containerVersion != BACKUP_CONTAINER_VERSION) {
+                    throw SecurityException("Unsupported .hansonbackup container version: $containerVersion")
+                }
+                val iterations = input.readInt()
+                val chunkSize = input.readInt()
+                if (iterations !in 10_000..1_000_000) {
+                    throw SecurityException("Invalid PBKDF2 iteration count in backup header: $iterations")
+                }
+                if (chunkSize !in 4_096..(4 * 1024 * 1024)) {
+                    throw SecurityException("Invalid chunk size in backup header: $chunkSize")
+                }
+                val salt = ByteArray(BACKUP_SALT_BYTES).also { input.readFully(it) }
+                val baseNonce = ByteArray(BACKUP_NONCE_BYTES).also { input.readFully(it) }
+
+                val headerBytes = buildBackupHeaderBytes(
+                    version = containerVersion,
+                    iterations = iterations,
+                    chunkSize = chunkSize,
+                    salt = salt,
+                    baseNonce = baseNonce
+                )
+
+                pbeSpec = PBEKeySpec(localPass, salt, iterations, 256)
+                val skf = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
+                keyBytes = skf.generateSecret(pbeSpec).encoded
+                val secretKey = SecretKeySpec(keyBytes, "AES")
+
+                val maxCipherChunkBytes = chunkSize + 32
+                var totalPlain = 0L
+                var sawFinal = false
+
+                while (!sawFinal) {
+                    val cipherLen = input.readInt()
+                    if (cipherLen < 16 || cipherLen > maxCipherChunkBytes) {
+                        throw SecurityException("Corrupted backup chunk length: $cipherLen")
+                    }
+                    val finalFlagByte = input.readUnsignedByte()
+                    if (finalFlagByte != 0 && finalFlagByte != 1) {
+                        throw SecurityException("Corrupted backup chunk final flag: $finalFlagByte")
+                    }
+                    val isFinal = finalFlagByte == 1
+                    val ciphertext = ByteArray(cipherLen).also { input.readFully(it) }
+
+                    val iv = deriveChunkNonce(baseNonce, chunkCount)
+                    val aad = buildChunkAad(headerBytes, chunkCount, isFinal)
+
+                    val plainChunk = try {
+                        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+                        cipher.init(Cipher.DECRYPT_MODE, secretKey, GCMParameterSpec(BACKUP_GCM_TAG_BITS, iv))
+                        cipher.updateAAD(aad)
+                        cipher.doFinal(ciphertext)
+                    } catch (e: AEADBadTagException) {
+                        throw SecurityException(
+                            "Encrypted backup authentication failed: wrong passphrase or tampered container.",
+                            e
+                        )
+                    } catch (e: Exception) {
+                        throw SecurityException("Encrypted backup decryption failed: ${e.message}", e)
+                    }
+
+                    totalPlain += plainChunk.size
+                    if (totalPlain > BACKUP_MAX_ARCHIVE_BYTES) {
+                        throw SecurityException("Decrypted backup exceeds maximum allowed archive size.")
+                    }
+                    decryptedStream.write(plainChunk)
+                    chunkCount++
+                    sawFinal = isFinal
+                }
+
+                // Refuse trailing unauthenticated garbage after the final chunk
+                if (input.read() != -1) {
+                    throw SecurityException("Unexpected trailing bytes after final authenticated backup chunk.")
+                }
+            }
+
+            val archiveBytes = decryptedStream.toByteArray()
+            val restoredFiles = parseAndValidateArchiveEntries(archiveBytes)
+
+            synchronized(lock) {
+                for ((relPath, contentBytes) in restoredFiles) {
+                    val target = resolveSafePath(relPath)
+                    if (isSymbolicLinkSafe(target)) {
+                        throw SecurityException("Refused restoring over symbolic link: $relPath")
+                    }
+                    target.parentFile?.mkdirs()
+                    target.writeBytes(contentBytes)
+                }
+                filePreEditBaselines.clear()
+                refreshIndexLocked()
+            }
+
+            return EncryptedBackupResult(
+                fileCount = restoredFiles.size,
+                totalPlaintextBytes = archiveBytes.size.toLong(),
+                chunkCount = chunkCount,
+                containerVersion = containerVersion
+            )
+        } catch (se: SecurityException) {
+            throw se
+        } catch (eof: java.io.EOFException) {
+            throw SecurityException("Truncated or corrupted encrypted backup container.", eof)
+        } finally {
+            pbeSpec?.clearPassword()
+            Arrays.fill(localPass, '\u0000')
+            keyBytes?.let { Arrays.fill(it, 0.toByte()) }
+            if (wipePassphrase) {
+                Arrays.fill(passphraseChars, '\u0000')
+            }
+        }
     }
 
     fun restoreCheckpoint(checkpointId: String): Boolean = synchronized(lock) {
@@ -670,6 +1295,9 @@ class MobileWorkspaceEngine {
         for (relPath in allPaths) {
             val liveFile = resolveSafePath(relPath)
             val snapFile = snapshotFiles[relPath]
+            if (isSymbolicLinkSafe(liveFile) || (snapFile != null && isSymbolicLinkSafe(snapFile))) {
+                continue
+            }
             val oldText = if (liveFile.isFile) liveFile.readText(StandardCharsets.UTF_8) else ""
 
             if (snapFile != null) {
@@ -745,7 +1373,11 @@ class MobileWorkspaceEngine {
 
     private fun writeFileLocked(normalizedPath: String, content: String): WorkspaceDiffRecord {
         val target = resolveSafePath(normalizedPath)
-        val oldContent = if (target.isFile) target.readText(StandardCharsets.UTF_8) else ""
+        val existedBefore = target.isFile && !isSymbolicLinkSafe(target)
+        val oldContent = if (existedBefore) target.readText(StandardCharsets.UTF_8) else ""
+        if (!filePreEditBaselines.containsKey(normalizedPath)) {
+            filePreEditBaselines[normalizedPath] = if (existedBefore) oldContent else null
+        }
         target.parentFile?.mkdirs()
         target.writeText(content, StandardCharsets.UTF_8)
 
@@ -846,8 +1478,10 @@ class MobileWorkspaceEngine {
     private fun collectFileEntriesLocked(baseDir: File, maxDepth: Int): List<WorkspaceFileEntry> {
         val results = mutableListOf<WorkspaceFileEntry>()
         fun walk(dir: File, depth: Int) {
+            if (isSymbolicLinkSafe(dir)) return
             val children = dir.listFiles()?.sortedBy { it.name.lowercase(Locale.ROOT) } ?: return
             for (child in children) {
+                if (isSymbolicLinkSafe(child)) continue
                 if (child.isDirectory) {
                     if (child.name in IGNORED_DIRS) continue
                     if (depth < maxDepth) {
@@ -879,8 +1513,10 @@ class MobileWorkspaceEngine {
     private fun collectRawFiles(baseDir: File): List<File> {
         val files = mutableListOf<File>()
         fun walk(dir: File) {
+            if (isSymbolicLinkSafe(dir)) return
             val children = dir.listFiles() ?: return
             for (child in children) {
+                if (isSymbolicLinkSafe(child)) continue
                 if (child.isDirectory) {
                     walk(child)
                 } else if (child.isFile) {
@@ -988,8 +1624,9 @@ class MobileWorkspaceEngine {
         val sb = StringBuilder()
         sb.append(if (base == rootCanonical) "." else toRelativePath(base))
         fun render(dir: File, prefix: String) {
+            if (isSymbolicLinkSafe(dir)) return
             val children = dir.listFiles()
-                ?.filterNot { it.isDirectory && it.name in IGNORED_DIRS }
+                ?.filterNot { isSymbolicLinkSafe(it) || (it.isDirectory && it.name in IGNORED_DIRS) }
                 ?.sortedWith(compareBy<File> { !it.isDirectory }.thenBy { it.name.lowercase(Locale.ROOT) })
                 ?: return
             children.forEachIndexed { idx, child ->
@@ -1180,5 +1817,195 @@ class MobileWorkspaceEngine {
                 break
             }
         }
+    }
+
+    private fun isSymbolicLinkSafe(file: File): Boolean =
+        runCatching { Files.isSymbolicLink(file.toPath()) }.getOrDefault(false)
+
+    private fun resolveCheckpointDirLocked(checkpointId: String?): File? {
+        val id = if (checkpointId != null) {
+            if (!CHECKPOINT_ID_REGEX.matches(checkpointId)) return null
+            checkpointId
+        } else {
+            loadCheckpointsLocked().firstOrNull()?.id ?: return null
+        }
+        val dir = File(rootCanonical, "$CHECKPOINTS_DIR/$id")
+        return if (dir.isDirectory && File(dir, "files").isDirectory) dir else null
+    }
+
+    private fun clearDiffsForPathLocked(normalizedPath: String) {
+        _state.update { current ->
+            current.copy(diffs = current.diffs.filterNot { it.relativePath == normalizedPath })
+        }
+    }
+
+    private fun refreshSelectedContentIfMatchesLocked(normalizedPath: String, file: File) {
+        if (_state.value.selectedFilePath == normalizedPath) {
+            val content = if (file.isFile && !isSymbolicLinkSafe(file)) {
+                file.readText(StandardCharsets.UTF_8)
+            } else {
+                ""
+            }
+            _state.update { it.copy(selectedFileContent = content) }
+        }
+    }
+
+    private fun extractTopLevelSymbols(relativePath: String, file: File): List<String> {
+        val ext = relativePath.substringAfterLast('.', "").lowercase(Locale.ROOT)
+        val lines = runCatching { file.readLines(StandardCharsets.UTF_8) }.getOrDefault(emptyList())
+        if (lines.isEmpty()) return emptyList()
+        val symbols = mutableListOf<String>()
+
+        for (rawLine in lines) {
+            if (symbols.size >= 60) break
+            val trimmed = rawLine.trim()
+            if (trimmed.isEmpty() || trimmed.startsWith("//") || trimmed.startsWith("#") || trimmed.startsWith("*")) {
+                continue
+            }
+            when (ext) {
+                "kt", "kts" -> {
+                    val m = KT_SYMBOL_REGEX.find(rawLine)
+                    if (m != null) {
+                        val kind = m.groupValues[1]
+                        val sig = m.groupValues[2].trim().trimEnd('{', '=').trim()
+                        if (sig.isNotEmpty()) symbols.add("$kind $sig")
+                    }
+                }
+                "java" -> {
+                    val tm = JAVA_TYPE_REGEX.find(rawLine)
+                    if (tm != null) {
+                        symbols.add("${tm.groupValues[1]} ${tm.groupValues[2]}")
+                    } else {
+                        val mm = JAVA_METHOD_REGEX.find(rawLine)
+                        if (mm != null) {
+                            val sig = mm.groupValues[1].trim()
+                            if (!sig.startsWith("if") && !sig.startsWith("for") &&
+                                !sig.startsWith("while") && !sig.startsWith("switch")
+                            ) {
+                                symbols.add("fun $sig")
+                            }
+                        }
+                    }
+                }
+                "py" -> {
+                    val m = PY_SYMBOL_REGEX.find(rawLine)
+                    if (m != null) {
+                        symbols.add("${m.groupValues[1]} ${m.groupValues[2].trim()}")
+                    }
+                }
+                "swift" -> {
+                    val m = SWIFT_SYMBOL_REGEX.find(rawLine)
+                    if (m != null) {
+                        symbols.add("${m.groupValues[1]} ${m.groupValues[2].trim()}")
+                    }
+                }
+                "ts", "tsx", "js", "jsx", "mjs" -> {
+                    val m = TS_JS_SYMBOL_REGEX.find(rawLine)
+                    if (m != null) {
+                        symbols.add("${m.groupValues[1]} ${m.groupValues[2].trim()}")
+                    } else {
+                        val am = TS_JS_ARROW_REGEX.find(rawLine)
+                        if (am != null) {
+                            symbols.add("function ${am.groupValues[1]}")
+                        }
+                    }
+                }
+            }
+        }
+        return symbols.distinct()
+    }
+
+    private fun compactSymbolName(symbolSignature: String): String {
+        val beforeParen = symbolSignature.substringBefore('(').substringBefore(':').trim()
+        return beforeParen.take(48)
+    }
+
+    private fun buildWorkspaceArchiveBytesLocked(): Pair<ByteArray, Int> {
+        val entries = collectFileEntriesLocked(rootCanonical, maxDepth = 16)
+        val regularFiles = entries.mapNotNull { entry ->
+            val f = File(rootCanonical, entry.relativePath)
+            if (f.isFile && !isSymbolicLinkSafe(f)) entry.relativePath to f else null
+        }
+        val baos = ByteArrayOutputStream()
+        DataOutputStream(baos).use { dos ->
+            dos.writeInt(regularFiles.size)
+            for ((relPath, file) in regularFiles) {
+                val pathBytes = relPath.toByteArray(StandardCharsets.UTF_8)
+                val fileBytes = file.readBytes()
+                dos.writeInt(pathBytes.size)
+                dos.write(pathBytes)
+                dos.writeLong(fileBytes.size.toLong())
+                dos.write(fileBytes)
+            }
+            dos.flush()
+        }
+        return baos.toByteArray() to regularFiles.size
+    }
+
+    private fun parseAndValidateArchiveEntries(archiveBytes: ByteArray): List<Pair<String, ByteArray>> {
+        val out = mutableListOf<Pair<String, ByteArray>>()
+        DataInputStream(ByteArrayInputStream(archiveBytes)).use { dis ->
+            val fileCount = dis.readInt()
+            if (fileCount < 0 || fileCount > 50_000) {
+                throw SecurityException("Corrupted archive file count: $fileCount")
+            }
+            for (i in 0 until fileCount) {
+                val pathLen = dis.readInt()
+                if (pathLen <= 0 || pathLen > 4096) {
+                    throw SecurityException("Corrupted archive entry path length: $pathLen")
+                }
+                val pathBytes = ByteArray(pathLen).also { dis.readFully(it) }
+                val relPath = String(pathBytes, StandardCharsets.UTF_8)
+                val firstSegment = relPath.replace('\\', '/').substringBefore('/')
+                if (firstSegment in IGNORED_DIRS) {
+                    throw SecurityException("Refused restoring forbidden workspace directory entry: $relPath")
+                }
+                // Validate sandbox containment strictly before returning
+                resolveSafePath(relPath)
+
+                val contentLen = dis.readLong()
+                if (contentLen < 0L || contentLen > BACKUP_MAX_ARCHIVE_BYTES) {
+                    throw SecurityException("Corrupted archive file size for $relPath: $contentLen")
+                }
+                val contentBytes = ByteArray(contentLen.toInt()).also { dis.readFully(it) }
+                out.add(relPath to contentBytes)
+            }
+        }
+        return out
+    }
+
+    private fun buildBackupHeaderBytes(
+        version: Int,
+        iterations: Int,
+        chunkSize: Int,
+        salt: ByteArray,
+        baseNonce: ByteArray
+    ): ByteArray {
+        val buf = ByteBuffer.allocate(BACKUP_MAGIC.size + 2 + 4 + 4 + salt.size + baseNonce.size)
+        buf.put(BACKUP_MAGIC)
+        buf.putShort(version.toShort())
+        buf.putInt(iterations)
+        buf.putInt(chunkSize)
+        buf.put(salt)
+        buf.put(baseNonce)
+        return buf.array()
+    }
+
+    private fun deriveChunkNonce(baseNonce: ByteArray, chunkIndex: Int): ByteArray {
+        val iv = baseNonce.copyOf()
+        val idxBytes = ByteBuffer.allocate(4).putInt(chunkIndex).array()
+        val start = iv.size - 4
+        for (i in 0 until 4) {
+            iv[start + i] = (iv[start + i].toInt() xor idxBytes[i].toInt()).toByte()
+        }
+        return iv
+    }
+
+    private fun buildChunkAad(headerBytes: ByteArray, chunkIndex: Int, isFinal: Boolean): ByteArray {
+        val buf = ByteBuffer.allocate(headerBytes.size + 5)
+        buf.put(headerBytes)
+        buf.putInt(chunkIndex)
+        buf.put(if (isFinal) 1.toByte() else 0.toByte())
+        return buf.array()
     }
 }

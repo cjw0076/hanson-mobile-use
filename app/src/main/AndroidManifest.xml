@@ -161,6 +161,26 @@
             </intent-filter>
         </activity>
 
+        <!-- Proactive Chief-of-Staff AI Secretary Lockscreen 1-Tap Action Receiver (Strictly Non-Exported) -->
+        <receiver
+            android:name=".notification.ProactiveSecretaryActionReceiver"
+            android:enabled="true"
+            android:exported="false" />
+
+        <!-- Native Monochrome Home-Screen Secretary Widget (Zero-Dependency AppWidgetProvider) -->
+        <receiver
+            android:name=".service.HansonSecretaryWidgetProvider"
+            android:label="Hanson 선제안 비서"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/hanson_secretary_widget_info" />
+        </receiver>
+
         <!-- Auto-Start on Boot / Package Update -->
         <receiver
             android:name=".service.BootCompletedReceiver"

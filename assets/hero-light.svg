@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="920" height="270" viewBox="0 0 920 270" role="img" aria-labelledby="title description">
   <title id="title">Hanson Mobile-Use</title>
-  <desc id="description">Open-source Mobile Agent Studio v6.6 for Android and iOS, with A2UI native surfaces, Phone Harness CLI, and SSE Co-Draw.</desc>
+  <desc id="description">Open-source Mobile Agent Studio v6.7 for Android and iOS, with Proactive AI Secretary, A2UI v1.0 native surfaces, Progressive Mobile Harness CLI, and SSE Co-Draw.</desc>
   <style>
     svg { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
@@ -70,9 +70,9 @@
   <g>
     <rect class="frame" x="195" y="64" width="376" height="27" rx="13.5"/>
     <circle class="live" cx="211" cy="77.5" r="3.5" fill="#09090B"/>
-    <text class="mono" x="222" y="81" font-size="10.7" font-weight="650" letter-spacing=".28">OPEN-SOURCE MOBILE AGENT STUDIO &#183; v6.6 &#183; ANDROID &amp; iOS</text>
+    <text class="mono" x="222" y="81" font-size="10.7" font-weight="650" letter-spacing=".28">OPEN-SOURCE MOBILE AGENT STUDIO &#183; v6.7 &#183; ANDROID &amp; iOS</text>
     <text x="193" y="136" font-size="38" font-weight="800" letter-spacing="-1.45">HANSON MOBILE-USE</text>
-    <text class="secondary" x="195" y="161" font-size="12.4" font-weight="600">A2UI v0.9/v1.0 Native Surfaces &#183; Phone Harness CLI &#183; SSE Co-Draw</text>
+    <text class="secondary" x="195" y="161" font-size="12.4" font-weight="600">Proactive AI Secretary &#183; A2UI v1.0 &#183; Mobile Harness &#183; SSE Co-Draw</text>
     <g fill="#F4F4F5" stroke="#D4D4D8" stroke-width="1.2">
       <rect x="195" y="181" width="115" height="24" rx="6"/>
       <rect x="317" y="181" width="91" height="24" rx="6"/>

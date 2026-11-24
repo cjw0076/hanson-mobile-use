@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="920" height="356" viewBox="0 0 920 356" role="img" aria-labelledby="architecture-title architecture-desc">
   <title id="architecture-title">Hanson Mobile-Use system architecture</title>
-  <desc id="architecture-desc">The desktop Phone Harness and MCP bridge connect to Hanson Mobile Agent Studio v6.6, which connects in turn to cloud and local models and native Android and iOS controls.</desc>
+  <desc id="architecture-desc">The desktop Progressive Mobile Harness, Secretary Sync, Eval Suite, and MCP bridge connect to Hanson Mobile Agent Studio v6.7, which connects in turn to cloud and local models and native Android and iOS controls.</desc>
   <defs>
     <pattern id="micro-grid" width="12" height="12" patternUnits="userSpaceOnUse">
       <circle cx="2" cy="2" r=".55" fill="#71717A" opacity=".24"/>
@@ -82,14 +82,14 @@
     <rect class="card" width="250" height="78" rx="12"/>
     <path class="node-glyph" transform="translate(224 14)" d="m0 0 3 3-3 3m6 0h4"/>
     <text class="node-title" x="16" y="35">hanson_harness.py &amp; hanson_ios.py</text>
-    <text class="detail" x="16" y="56">Flat CLI &#183; --safe AST Guard &#183; mDNS / WDA</text>
+    <text class="detail" x="16" y="56">App Cards &#183; AST Guard &#183; Local iOS Portal</text>
   </g>
   <g transform="translate(24 221)">
     <rect class="ink" y="3" width="250" height="78" rx="12"/>
     <rect class="card" width="250" height="78" rx="12"/>
     <path class="node-glyph" transform="translate(224 14)" d="M0 2h10M0 6h10m-7-6v6m4-6v6"/>
-    <text class="node-title" x="16" y="35">MCP 6.0.0 &amp; Bridge :18889</text>
-    <text class="detail" x="16" y="56">12 MCP Tools &#183; 45 Bridge &#183; Upstream Tracker</text>
+    <text class="node-title" x="16" y="35">MCP 6.0.0, Sync &amp; Eval Suite</text>
+    <text class="detail" x="16" y="56">12 MCP &#183; 45 Bridge &#183; Secretary Sync &#183; Eval</text>
   </g>
   <g transform="translate(646 110)">
     <rect class="ink" y="3" width="250" height="78" rx="12"/>
@@ -108,23 +108,23 @@
   <g transform="translate(316 90)">
     <rect class="ink" y="3" width="288" height="221" rx="14"/>
     <rect class="card" width="288" height="221" rx="14"/>
-    <text class="hub-title" x="16" y="30">Hanson Mobile Agent Studio v6.6</text>
+    <text class="hub-title" x="16" y="30">Hanson Mobile Agent Studio v6.7</text>
     <path class="node-glyph" d="M264 21h7m-7 4h7m-7 4h7"/>
     <g transform="translate(16 47)">
       <rect class="pill" width="256" height="34" rx="8"/>
-      <text class="feature" x="16" y="21">A2UI v0.9/v1.0 JSONL &#8594; Compose &amp; SwiftUI</text>
+      <text class="feature" x="16" y="21">Proactive Secretary + 6 Life-Care Shields</text>
     </g>
     <g transform="translate(16 89)">
       <rect class="pill" width="256" height="34" rx="8"/>
-      <text class="feature" x="16" y="21">Set-of-Marks + Korean IME (:18888)</text>
+      <text class="feature" x="16" y="21">A11yReadGate + DeepLink (:18888)</text>
     </g>
     <g transform="translate(16 131)">
       <rect class="pill" width="256" height="34" rx="8"/>
-      <text class="feature" x="16" y="21">SSE Dynamic UI + Cross-App Co-Draw</text>
+      <text class="feature" x="16" y="21">A2UI v1.0 + SSE Cross-App Co-Draw</text>
     </g>
     <g transform="translate(16 173)">
       <rect class="pill" width="256" height="34" rx="8"/>
-      <text class="feature" x="16" y="21">VirtualDisplay + AES-256-GCM Blind Vault</text>
+      <text class="feature" x="16" y="21">VirtualDisplay + AES-256-GCM Vault</text>
     </g>
   </g>
   <g aria-hidden="true">

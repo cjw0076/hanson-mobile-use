@@ -20,7 +20,7 @@ import java.util.concurrent.atomic.AtomicInteger
 // Shared Internal File & Security Guard Helpers
 // =============================================================================
 
-private object ConvenienceStorageHelper {
+internal object ConvenienceStorageHelper {
 
     fun writeAtomically(target: File, content: String) {
         val parent = target.parentFile
@@ -54,7 +54,7 @@ private object ConvenienceStorageHelper {
     }
 }
 
-private object ConvenienceSecretGuard {
+internal object ConvenienceSecretGuard {
     private val CARD_16_SEPARATED_REGEX = Regex("(?<!\\d)(?:\\d{4}[-\\s]){3}\\d{4}(?!\\d)")
     private val CARD_16_PLAIN_REGEX = Regex("(?<!\\d)\\d{16}(?!\\d)")
     private val RRN_REGEX = Regex("(?<!\\d)\\d{6}[-\\s]?[1-4]\\d{6}(?!\\d)")
@@ -448,7 +448,8 @@ object ProactiveDailyBriefEngine {
         watcherRules: List<WatcherRule>,
         scratchpadEntries: List<ScratchpadEntry>,
         bubbles: List<HumanMemoryBubble>,
-        pinnedRoutines: List<PersonalRoutine>
+        pinnedRoutines: List<PersonalRoutine>,
+        proactiveProposals: List<ProactiveProposal> = emptyList()
     ): DailyBriefSnapshot {
         val normalizedHour = ((hourOfDay % 24) + 24) % 24
         val headlineKo = when (normalizedHour) {
@@ -466,8 +467,22 @@ object ProactiveDailyBriefEngine {
         val activeWatchers = watcherRules.filter { it.enabled }
         val activeBubbles = bubbles.filter { it.enabled }
         val pinned = pinnedRoutines.filter { it.pinned }
+        val pendingSecretary = proactiveProposals
+            .filter { it.status == ProactiveProposalStatus.PENDING }
+            .sortedWith(
+                compareByDescending<ProactiveProposal> { it.hasCalendarConflict }
+                    .thenByDescending { it.type.priorityWeight }
+                    .thenByDescending { it.updatedAtMs }
+            )
 
         val highlights = mutableListOf<String>()
+        if (pendingSecretary.isNotEmpty()) {
+            val top = pendingSecretary.first()
+            val conflictTag = if (top.hasCalendarConflict) " · ⚠ 일정 충돌" else ""
+            highlights.add(
+                "AI 비서 제안 ${pendingSecretary.size}건 대기 중 · ${top.type.badgeKo}: ${top.titleKo}$conflictTag"
+            )
+        }
         if (sortedNotifications.isNotEmpty()) {
             val latest = sortedNotifications.first()
             highlights.add(
@@ -498,6 +513,9 @@ object ProactiveDailyBriefEngine {
         }
 
         val summaryParts = buildList {
+            if (pendingSecretary.isNotEmpty()) {
+                add("AI 비서 제안 ${pendingSecretary.size}건")
+            }
             if (sortedNotifications.isNotEmpty()) {
                 add("확인할 알림 ${sortedNotifications.size}건")
             }
@@ -522,6 +540,15 @@ object ProactiveDailyBriefEngine {
         }
 
         val actions = mutableListOf<DailyBriefAction>()
+        pendingSecretary.firstOrNull()?.let { topProp ->
+            actions.add(
+                DailyBriefAction(
+                    labelKo = topProp.primaryAction.labelKo.take(22),
+                    goalPrompt = "AI 비서 제안 '${topProp.titleKo}' (${topProp.summaryKo}) 항목을 확인하고 실행 준비해줘",
+                    badgeKo = "AI 비서"
+                )
+            )
+        }
         replyableUnreplied.firstOrNull()?.let { n ->
             actions.add(
                 DailyBriefAction(
@@ -767,8 +794,16 @@ object AppSpecificTipBank {
         val pkgLower = activePackage.trim().lowercase(Locale.ROOT)
         val goalLower = goal.trim().lowercase(Locale.ROOT)
 
+        AppDetailPlaybookRegistry.findByPackage(activePackage)?.let { playbook ->
+            if (playbook.guiGuidanceKo.isNotBlank()) return playbook.guiGuidanceKo
+        }
+
         val pkgTip = matchTipByPackage(pkgLower)
         if (pkgTip.isNotEmpty()) return pkgTip
+
+        AppDetailPlaybookRegistry.findByGoalOrPackage("", goal)?.let { playbook ->
+            if (playbook.guiGuidanceKo.isNotBlank()) return playbook.guiGuidanceKo
+        }
 
         return matchTipByGoal(goalLower)
     }

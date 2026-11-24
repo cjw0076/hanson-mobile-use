@@ -1,0 +1,22 @@
+{
+  "name": "hanson-mobile-use",
+  "version": "6.7.0",
+  "description": "Progressive-disclosure Android & iOS phone control harness, 20-app Korean/global app cards, Proactive Chief-of-Staff Secretary sync bridge, A2UI v1.0, and reproducible mobile eval suite.",
+  "author": {
+    "name": "Hanson Mobile-Use Contributors"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/hanson-mobile-use/hanson-mobile-use",
+  "skills": [
+    "./harness"
+  ],
+  "mcpServers": {
+    "hanson-mobile-use": {
+      "command": "python",
+      "args": [
+        "-B",
+        "./mcp/mobile_use_mcp_server.py"
+      ]
+    }
+  }
+}

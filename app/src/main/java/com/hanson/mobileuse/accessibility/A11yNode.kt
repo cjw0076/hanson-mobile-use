@@ -54,9 +54,7 @@ data class A11yNode(
             else -> shortClassName
         }
 
-    fun isInteractiveOrInformative(): Boolean {
-        if (!isVisibleToUser) return false
-        if (boundsInScreen.width() <= 2 || boundsInScreen.height() <= 2) return false
+    fun hasInteractiveOrInformativeSemantics(): Boolean {
         return isClickable ||
             isLongClickable ||
             isScrollable ||
@@ -66,8 +64,22 @@ data class A11yNode(
             contentDesc.isNotBlank()
     }
 
+    fun isInteractiveOrInformative(): Boolean {
+        if (!isVisibleToUser) return false
+        if (boundsInScreen.width() <= 2 || boundsInScreen.height() <= 2) return false
+        return hasInteractiveOrInformativeSemantics()
+    }
+
     fun toJson(screenWidth: Int = 1080, screenHeight: Int = 2400): JSONObject {
         val norm = CoordinateNormalizer.pixelToNormalized(centerX, centerY, screenWidth, screenHeight)
+        val offscreen = HierarchyDumper.isBoundsOffscreen(
+            left = boundsInScreen.left,
+            top = boundsInScreen.top,
+            right = boundsInScreen.right,
+            bottom = boundsInScreen.bottom,
+            screenW = screenWidth,
+            screenH = screenHeight
+        )
         return JSONObject().apply {
             put("index", index)
             put("class", className)
@@ -88,6 +100,8 @@ data class A11yNode(
             put("checked", isChecked)
             put("selected", isSelected)
             put("visible", isVisibleToUser)
+            put("offscreen", offscreen)
+            put("hidden", !isVisibleToUser)
             put("drawingOrder", drawingOrder)
             put("windowId", windowId)
             put("windowLayer", windowLayer)
@@ -146,7 +160,9 @@ data class IndexedUiElement(
     val focused: Boolean,
     val enabled: Boolean,
     val windowType: String,
-    val windowLayer: Int
+    val windowLayer: Int,
+    val offscreen: Boolean = false,
+    val hidden: Boolean = false
 ) {
     fun toPromptLine(): String {
         val flags = buildList {
@@ -157,6 +173,8 @@ data class IndexedUiElement(
             if (checkable) add(if (checked) "checked" else "unchecked")
             if (focused) add("focused")
             if (!enabled) add("disabled")
+            if (offscreen) add("offscreen")
+            if (hidden) add("hidden")
         }.joinToString(",")
 
         val parts = mutableListOf<String>()
@@ -197,5 +215,7 @@ data class IndexedUiElement(
         put("enabled", enabled)
         put("windowType", windowType)
         put("windowLayer", windowLayer)
+        put("offscreen", offscreen)
+        put("hidden", hidden)
     }
 }

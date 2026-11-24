@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="208" height="46" viewBox="0 0 208 46" role="img" aria-labelledby="button-title">
-  <title id="button-title">Download v6.6 APK</title>
+  <title id="button-title">Download v6.7 APK</title>
   <defs>
     <clipPath id="face-clip">
       <rect x="3" y="3" width="202" height="37" rx="18.5"/>
@@ -38,5 +38,5 @@
   <g transform="translate(35.5 13.5)" fill="none" stroke="#FAFAFA" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
     <path d="M8 1.5v8m-3-3 3 3 3-3M2 11v2a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1v-2"/>
   </g>
-  <text class="copy" x="60.5" y="26.1" fill="#FAFAFA" textLength="112" lengthAdjust="spacing">Download v6.6 APK</text>
+  <text class="copy" x="60.5" y="26.1" fill="#FAFAFA" textLength="112" lengthAdjust="spacing">Download v6.7 APK</text>
 </svg>

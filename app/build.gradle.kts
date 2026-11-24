@@ -42,8 +42,8 @@ android {
         applicationId = "com.hanson.mobileuse"
         minSdk = 31
         targetSdk = 35
-        versionCode = 10
-        versionName = "6.6.0"
+        versionCode = 11
+        versionName = "6.7.0"
 
         buildConfigField("String", "GEMINI_API_KEY", "\"$escapedGeminiApiKey\"")
 

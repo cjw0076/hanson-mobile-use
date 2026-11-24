@@ -3,7 +3,7 @@
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/hero-dark.svg" />
   <source media="(prefers-color-scheme: light)" srcset="assets/hero-light.svg" />
-  <img alt="Hanson Mobile-Use — Open-Source Mobile Agent Studio v6.6 (Android & iOS · A2UI v0.9/v1.0 · Phone Harness)" src="assets/hero-light.svg" width="920" />
+  <img alt="Hanson Mobile-Use — Open-Source Mobile Agent Studio v6.7 (Proactive AI Secretary · Android & iOS · A2UI v1.0 · Mobile Harness)" src="assets/hero-light.svg" width="920" />
 </picture>
 
 <br /><br />
@@ -13,7 +13,7 @@
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="assets/cta-download-dark.svg" />
       <source media="(prefers-color-scheme: light)" srcset="assets/cta-download-light.svg" />
-      <img alt="Download v6.6 APK" src="assets/cta-download-light.svg" height="44" />
+      <img alt="Download v6.7 APK" src="assets/cta-download-light.svg" height="44" />
     </picture>
   </a>&nbsp;
   <a href="docs/studio-preview.html">
@@ -47,8 +47,8 @@
   <a href="mcp/README.md"><img alt="MCP 6.0.0" src="https://img.shields.io/badge/MCP%206.0.0-12%20Tools%20%C2%B7%2045%20Bridge-52525B.svg" /></a>
 </p>
 
-**Open-Source Human-First Mobile Companion, A2UI v0.9/v1.0 Dual-Platform Native Renderer, & Composable Phone Harness**  
-*안드로이드·iOS 양대 플랫폼 A2UI v0.9/v1.0 네이티브 렌더링 · 단일 스크립트 Phone Harness CLI & 백그라운드 `VirtualDisplay` · 앱 내·외부 SSE 실시간 Dynamic UI & 공동 드로잉 · AES-256-GCM Blind Vault · $0 MCP / 멀티 VLM 브리지*
+**Open-Source Proactive Chief-of-Staff AI Secretary, A2UI v0.9/v1.0 Dual-Platform Native Renderer, & SOTA Mobile Harness (`v6.7.0`)**  
+*21개 한국·글로벌 앱 능동형 비서실장 · 6종 화이트스페이스 생활 보호 방패(약속/구독·반품/집중방패/스미싱/안부/원자적 롤백) · 안드로이드·iOS A2UI v1.0 네이티브 · Progressive Mobile Harness CLI & Eval · AES-256-GCM Blind Vault · $0 MCP / 멀티 VLM 브리지*
 
 </div>
 
@@ -86,10 +86,24 @@
 
 ---
 
+<a id="v670-proactive-secretary-sota"></a>
+## What's New in `v6.7.0` — Proactive Chief-of-Staff Secretary, 6 White-Space Shields & `mobile-harness` SOTA
+
+`v6.7.0` unites **on-device Korean/global ambient intelligence**, **frontier lifestyle agent UX** without cloud-VM lock-in or privacy leaks, **6 unbuilt white-space life-care shields**, and **production `mobile-harness` grounding/eval infrastructure**:
+
+| Pillar | Highlights in `v6.7.0` | Docs & Code |
+| :--- | :--- | :--- |
+| **1. Proactive Chief-of-Staff AI Secretary (21 Korean/Global Apps)** | Multi-turn `NotificationThreadBuffer` (12 msgs/room, 30-min rolling window) + `$0` local `KoreanScheduleParser` + `CalendarContract` conflict detection across **21 real Korean & global apps** (KakaoTalk, Slack, Teams, Discord, Telegram, LINE, WhatsApp, SMS, Gmail, Outlook, Naver Mail, Notion, GitHub/Jira/Linear, CatchTable, Korail/SRT, Naver Map, Kakao T, Coupang, Baemin/Coupang Eats, Parcel & Finance Read-Only Advisory). Surfaces 1-tap A2UI proposals in-app, via opt-in overlay, lockscreen notifications, `:18888/secretary/*`, `hanson_secretary_sync.py` (ICS, GitHub PRs, Open-Meteo, MET Norway, PM2.5 Air Quality, RSS Trend Radar, Omnichannel Remote Bridge), and iOS `ProactiveSecretarySwiftCore.swift`. | [`docs/PROACTIVE_SECRETARY_ARCHITECTURE.md`](docs/PROACTIVE_SECRETARY_ARCHITECTURE.md) · [`harness/hanson_secretary_sync.py`](harness/hanson_secretary_sync.py) |
+| **2. 4 Frontier Lifestyle Agents Absorption *(Claude Duet · ChatGPT Dots · Meta Muse · Grok Bot)*** | Zero-token scheduled **Beats + 60s Spoken Morning/Evening Brief** (`LifestyleBeatScheduler`), **Anti-Approval-Fatigue 3-Tier Policy & Batch Digest** (`AUTO_SAFE_LOCAL` / `BATCH_DIGEST` / `HARD_MANUAL_GATE` + per-room urgency calibration), **Privacy & Quota Proof Ledger** (verifiable local `$0` scan, secret/injection blocks, `externalCloudLeaks = 0`, daily VLM cap), **Share-Sheet → A2UI Checklist / Price-Drop Watcher**, **Topic Channels & Hanson Crew**, **Parameterized Teach-a-Task v2**, **Live Call Companion**, and **VirtualDisplay Live Watch & Take Over**. | [`docs/LIFESTYLE_AGENTS_AND_MOBILE_HARNESS_ABSORPTION.md`](docs/LIFESTYLE_AGENTS_AND_MOBILE_HARNESS_ABSORPTION.md) |
+| **3. 6 Unbuilt White-Space Life-Care Features + Cross-Lab Portability** | **Commitment Debt Tracker** (`SELF_COMMITMENT_DEBT`, captures promises *you* made without keylogging), **Free-Trial & Subscription Vampire Defense + 7-Day Return Guard** (`SUBSCRIPTION_TRIAL_DEFENSE`, D-2 cancel alarms, strictly read-only), **Notification Storm Focus Shield + 3-Line Re-Entry Brief** (`FOCUS_REENTRY_DIGEST`, VIP/emergency breakthrough), **Zero-Network Smishing Pre-Tap Shield & Plain-Korean Notice Translator** (`SCAM_PRE_SHIELD`, `PLAIN_NOTICE_TRANSLATION`), **Opt-In VIP Relationship Care** (`RELATIONSHIP_CARE_NUDGE`, never auto-sends), **Atomic Multi-Action Rollback Ledger + `"왜 제안했나요?"` Evidence Card** (`evidence`, `approvalTier`, `topicChannel`), plus open Markdown `CrossLabPortabilityPack`. | [`docs/LIFESTYLE_AGENTS_AND_MOBILE_HARNESS_ABSORPTION.md`](docs/LIFESTYLE_AGENTS_AND_MOBILE_HARNESS_ABSORPTION.md) · [`ios/HansonMobileUseIOS/Sources/HansonMobileUseIOS/ProactiveSecretarySwiftCore.swift`](ios/HansonMobileUseIOS/Sources/HansonMobileUseIOS/ProactiveSecretarySwiftCore.swift) |
+| **4. GitHub `mobile-harness` SOTA Grounding, Decorators & Eval** | **`A11yReadGate`** (2s single-flight timeout + degraded snapshot cache + `clearAccessibilityCache()`), **`DeepLinkInspector`** (`/portal/deep-links` read-only APK manifest scanner), **Progressive-Disclosure Harness** (`harness/AGENTS.md` + **14 shipped Korean/Global App Cards** + git-ignored `harness/local/` overrides + `.claude-plugin/`), typed `Predicate`/`Near`/`parent_of`/`HiddenElementError`/`HansonStepError`, **Local iOS Portal HTTP** (`HansonIosPortalClient` + Korean macOS Mirroring), `LifecycleDecorator` (`LogcatCrashMonitor`/`OnFailureBugreport`/`RollingScreenRecord`/`PerActionGaugeSampler`), `HansonDevicePool`, zero-`/sdcard/` MCP `/dev/tty` dump, and reproducible **`eval/hanson_eval.py`** (AndroidWorld + Korean 20-App Suite + Landmarks + Quarantine Ledger). | [`harness/AGENTS.md`](harness/AGENTS.md) · [`harness/apps/index.md`](harness/apps/index.md) · [`eval/hanson_eval.py`](eval/hanson_eval.py) |
+
+---
+
 <a id="a2ui-architecture"></a>
 ## A2UI v0.9 / v1.0 Cross-Platform Native Surfaces
 
-Hanson Mobile-Use v6.6 implements Google's declarative **[A2UI (Agent-to-User Interface)](https://a2ui.org/)** wire protocol (`v0.9` / `v1.0` primary with `v0.8` backward compatibility) natively on **both Android Jetpack Compose and iOS SwiftUI** — zero WebView bloat, zero chromatic drift, strictly adhering to Hanson's 0%-saturation **Obsidian Paper (`#FAFAFA / #09090B`) & Carbon (`#09090B / #FAFAFA`)** tokens.
+Hanson Mobile-Use v6.7 implements Google's declarative **[A2UI (Agent-to-User Interface)](https://a2ui.org/)** wire protocol (`v0.9` / `v1.0` primary with `v0.8` backward compatibility) natively on **both Android Jetpack Compose and iOS SwiftUI** — zero WebView bloat, zero chromatic drift, strictly adhering to Hanson's 0%-saturation **Obsidian Paper (`#FAFAFA / #09090B`) & Carbon (`#09090B / #FAFAFA`)** tokens.
 
 <div align="center">
   <img src="assets/hanson-a2ui-showcase.png" alt="A2UI v0.9/v1.0 JSONL Stream Splitting into Native Android Jetpack Compose and iOS SwiftUI Surfaces" width="100%" />
@@ -108,7 +122,7 @@ Hanson Mobile-Use v6.6 implements Google's declarative **[A2UI (Agent-to-User In
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/architecture-dark.svg" />
     <source media="(prefers-color-scheme: light)" srcset="assets/architecture-light.svg" />
-    <img alt="Hanson Mobile-Use v6.6 Dual-Platform & A2UI System Architecture" src="assets/architecture-light.svg" width="920" />
+    <img alt="Hanson Mobile-Use v6.7 Dual-Platform, Proactive Secretary & A2UI System Architecture" src="assets/architecture-light.svg" width="920" />
   </picture>
 </div>
 
@@ -134,7 +148,7 @@ flowchart TB
         CLIBRIDGE["laptop-cli-bridge.py (:18889 · 45 Bridge Tools)\n(/decide · /health · /web/research · /workspace/* Sandbox)"]
     end
 
-    subgraph ANDROID["Android Core · Hanson Mobile Agent Studio v6.6 (:18888)"]
+    subgraph ANDROID["Android Core · Hanson Mobile Agent Studio v6.7 (:18888)"]
         A2UI_A["A2uiProtocolEngine + A2uiComposeRenderer\n(v0.9/v1.0 JSONL · RFC 6901 · In-App & Overlay)"]
         SSE_A["SseDynamicUiEngine + CoDrawingCanvasEngine\n(RFC 8895 SSE · Cross-App Overlay · Karaoke TTS)"]
         LOOP["MobileUseAgentEngine + PhoneHarnessAbsorptionEngine\n(Set-of-Marks · Untrusted Screen Isolation · 1-Tap Undo)"]
@@ -158,7 +172,7 @@ flowchart TB
     A2UI_A -.->|"Shared A2UI JSONL Spec"| SWIFT
 ```
 
-Deep dives: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · [`docs/SSE_DYNAMIC_UI_AND_CODRAW_ARCHITECTURE.md`](docs/SSE_DYNAMIC_UI_AND_CODRAW_ARCHITECTURE.md) · [`docs/A2UI_SPEC_INTEGRATION.md`](docs/A2UI_SPEC_INTEGRATION.md) · [`docs/MOBILE_AGENT_REVERSE_ENGINEERING_2026.md`](docs/MOBILE_AGENT_REVERSE_ENGINEERING_2026.md) · [`docs/UPSTREAM_PHONE_HARNESS_TRACKER.md`](docs/UPSTREAM_PHONE_HARNESS_TRACKER.md).
+Deep dives: [`docs/PROACTIVE_SECRETARY_ARCHITECTURE.md`](docs/PROACTIVE_SECRETARY_ARCHITECTURE.md) · [`docs/LIFESTYLE_AGENTS_AND_MOBILE_HARNESS_ABSORPTION.md`](docs/LIFESTYLE_AGENTS_AND_MOBILE_HARNESS_ABSORPTION.md) · [`harness/AGENTS.md`](harness/AGENTS.md) · [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · [`docs/SSE_DYNAMIC_UI_AND_CODRAW_ARCHITECTURE.md`](docs/SSE_DYNAMIC_UI_AND_CODRAW_ARCHITECTURE.md) · [`docs/A2UI_SPEC_INTEGRATION.md`](docs/A2UI_SPEC_INTEGRATION.md) · [`docs/MOBILE_AGENT_REVERSE_ENGINEERING_2026.md`](docs/MOBILE_AGENT_REVERSE_ENGINEERING_2026.md) · [`docs/UPSTREAM_PHONE_HARNESS_TRACKER.md`](docs/UPSTREAM_PHONE_HARNESS_TRACKER.md).
 
 </details>
 
@@ -260,7 +274,7 @@ gemini mcp add android-mobile-use    python /path/to/hanson-mobile-use/mcp/mobil
 
 ### Option C: Standalone Signed Release APK (3-Step Guided Setup) & Laptop Bridge (`:18889`)
 
-1. **Install Release APK**: Download `hanson-mobile-use-v6.6.0-release.apk` from [GitHub Releases](../../releases) (or run `./gradlew assembleDebug`) on Android 8.0–16 (API 26–36). Release builds enforce `BuildConfig.GEMINI_API_KEY = ""`.
+1. **Install Release APK**: Download `hanson-mobile-use-v6.7.0-release.apk` from [GitHub Releases](../../releases) (or run `./gradlew assembleDebug`) on Android 8.0–16 (API 26–36). Release builds enforce `BuildConfig.GEMINI_API_KEY = ""`.
 2. **Finish 3-Step Onboarding (10 Seconds)**: Pick starter preference bubbles → connect a free Google AI Studio key (`AQ.` or `AIza`, encrypted in on-device AES-256-GCM `BlindCredentialVault`), point to local **Ollama / vLLM**, or skip to offline Morph mode → enable Accessibility / Overlay / Notification Reply only when needed.
 3. **Optional Laptop CLI & Sandboxed Workspace Bridge (`:18889`, `6.0.0`, `45 VALID_TOOLS` + `/web/research`)**:
    ```bash
@@ -291,15 +305,20 @@ gemini mcp add android-mobile-use    python /path/to/hanson-mobile-use/mcp/mobil
 - **Hardened Loopback RPC & Bridge (`:18888` / `:18889` / `:18890`)**: Constant-time 256-bit `X-Artemis-Token` auth (`MessageDigest.isEqual`), wildcard CORS & DNS-rebinding rejection, `android:allowBackup="false"`, `usesCleartextTraffic="false"` + loopback-only `network_security_config.xml`, and `0600` shared-secret + `/proc/net/tcp` UID verification on `:18890`.
 - **Prompt-Injection Isolation, AST Guard & Banking Preflight**: `UntrustedScreenDataGuard` wraps third-party UI trees in `<untrusted_screen_data>` with indirect prompt-injection signal detection; `hanson_script_guard.py` (`--safe`) fail-closes unsafe Python scripts via AST classification; `/preflight` blocks Korean & global banking/wallet/password apps.
 - **AES-256-GCM Blind Vault & Non-Bypassable Takeover**: `BlindCredentialVault` isolates secrets in `AndroidKeyStore` (hardware IV + PBKDF2-HMAC-SHA256 `210,000`-iteration JVM fallback) and blocks raw secret reflection; `FinancialAndTakeoverGuard` halts cleanly into `AWAITING_TAKEOVER` on CAPTCHA / Turnstile / 2FA / secure keypads.
-- **Zero-Key Release & Full Verification Suite (`32 suites / 549 Android tests + 16 Python harness tests`, 0 failures)**: Read [`SECURITY.md`](SECURITY.md) before exposing any port beyond `127.0.0.1`.
+- **Zero-Key Release & Full Verification Suite (`36 suites / 594 Android tests + 39 Python tests + 20/20 Eval`, 0 failures)**: Read [`SECURITY.md`](SECURITY.md) before exposing any port beyond `127.0.0.1`.
 
 ```bash
-# Run Android unit & security hardening suites (32 suites / 549 Android tests, including A2uiProtocolEngineTest & PureAchromaticDesignTest)
+# Run Android unit & security hardening suites (36 suites / 594 Android tests)
 ./gradlew testDebugUnitTest assembleDebug
 
-# Run Python harness, iOS driver, AST guard, & upstream tracker unit tests (16 Python harness tests, zero __pycache__)
+# Run all Python harness, iOS portal/mirror, Proactive Secretary sync, & mobile-harness absorption tests (39 Python tests, zero __pycache__)
 python -B harness/test_hanson_harness.py
 python -B harness/test_ios_and_tracker.py
+python -B harness/test_secretary_sync.py
+python -B harness/test_mobile_harness_absorption.py
+
+# Run reproducible Korean 20-App lifestyle benchmark dry-run (20/20 Eval)
+python -B eval/hanson_eval.py --suite korean20 --dry-run
 ```
 
 ---
@@ -308,9 +327,12 @@ python -B harness/test_ios_and_tracker.py
 
 | Resource | Path |
 |---|---|
+| **Proactive Chief-of-Staff Secretary (`v6.7.0`)** | [`docs/PROACTIVE_SECRETARY_ARCHITECTURE.md`](docs/PROACTIVE_SECRETARY_ARCHITECTURE.md) · [`harness/hanson_secretary_sync.py`](harness/hanson_secretary_sync.py) |
+| **Frontier Lifestyle Agents, 6 White-Space Shields & `mobile-harness` SOTA** | [`docs/LIFESTYLE_AGENTS_AND_MOBILE_HARNESS_ABSORPTION.md`](docs/LIFESTYLE_AGENTS_AND_MOBILE_HARNESS_ABSORPTION.md) · [`eval/hanson_eval.py`](eval/hanson_eval.py) |
+| **Progressive-Disclosure Harness & 14 App Cards** | [`harness/AGENTS.md`](harness/AGENTS.md) · [`harness/apps/index.md`](harness/apps/index.md) · [`harness/SKILL.md`](harness/SKILL.md) |
 | **A2UI v0.9/v1.0 Spec Integration** | [`docs/A2UI_SPEC_INTEGRATION.md`](docs/A2UI_SPEC_INTEGRATION.md) |
-| **iOS Companion & Mirror Architecture** | [`ios/README.md`](ios/README.md) · [`ios/HansonMobileUseIOS/Package.swift`](ios/HansonMobileUseIOS/Package.swift) |
-| **Composable Phone Harness Skill** | [`harness/SKILL.md`](harness/SKILL.md) · [`harness/hanson_harness.py`](harness/hanson_harness.py) · [`harness/hanson_ios.py`](harness/hanson_ios.py) |
+| **iOS Companion, Local iOS Portal & Mirror Architecture** | [`ios/README.md`](ios/README.md) · [`ios/HansonMobileUseIOS/Package.swift`](ios/HansonMobileUseIOS/Package.swift) |
+| **Composable Phone Harness CLI & Decorators** | [`harness/hanson_harness.py`](harness/hanson_harness.py) · [`harness/hanson_ios.py`](harness/hanson_ios.py) · [`harness/hanson_decorators.py`](harness/hanson_decorators.py) · [`harness/hanson_device_pool.py`](harness/hanson_device_pool.py) |
 | **Upstream `phone-harness` Parity Tracker** | [`docs/UPSTREAM_PHONE_HARNESS_TRACKER.md`](docs/UPSTREAM_PHONE_HARNESS_TRACKER.md) · [`harness/track_upstream_phone_harness.py`](harness/track_upstream_phone_harness.py) |
 | **SSE Dynamic UI & Co-Draw Architecture** | [`docs/SSE_DYNAMIC_UI_AND_CODRAW_ARCHITECTURE.md`](docs/SSE_DYNAMIC_UI_AND_CODRAW_ARCHITECTURE.md) |
 | **Interactive Web Studio Preview** | [`docs/studio-preview.html`](docs/studio-preview.html) |

@@ -40,6 +40,7 @@ A standalone Swift 5.9+ / iOS 17+ / macOS 14+ Swift Package with **zero third-pa
 | [`A2uiSwiftUIRenderer.swift`](HansonMobileUseIOS/Sources/HansonMobileUseIOS/A2uiSwiftUIRenderer.swift) | Native SwiftUI `Basic` catalog renderer (`Column`, `Row`, `Card`, `Box`, `Text`, `Button`, `TextField`, `CheckBox`, `MultipleChoice`, `Slider`, `Divider`, `Icon`, `Image`) strictly in **0%-saturation** Obsidian Paper (`#FAFAFA`/`#09090B`) & Carbon (`#09090B`/`#FAFAFA`) |
 | [`CoDrawingSwiftUICanvas.swift`](HansonMobileUseIOS/Sources/HansonMobileUseIOS/CoDrawingSwiftUICanvas.swift) | Human + AI normalized `0..1` SwiftUI `Canvas` co-drawing (Bezier pen, directional arrow, spotlight ring + step badge, undo/redo, spatial prompt grounding) |
 | [`HansonSseAndAppIntents.swift`](HansonMobileUseIOS/Sources/HansonMobileUseIOS/HansonSseAndAppIntents.swift) | RFC 8895 SSE client (`Last-Event-ID`, HTTPS/loopback-only URL guard), iOS `AppIntents` / Siri / Shortcuts bridge, honest capability matrix, and drop-in `HansonIosCompanionView` |
+| [`ProactiveSecretarySwiftCore.swift`](HansonMobileUseIOS/Sources/HansonMobileUseIOS/ProactiveSecretarySwiftCore.swift) | Proactive Chief-of-Staff proposal wire decoder (`:18888/secretary/*`), A2UI `v1.0` JSONL surface builder, pure 0%-saturation Paper/Carbon `ProactiveSecretaryInboxView`, and `EventKit` calendar conflict bridge with honest iOS sandbox notices |
 
 ### Track C — WDA / XCUITest Developer Automation
 
@@ -61,3 +62,18 @@ Hanson will **never** claim Android-only OS privileges on stock iOS. When an ope
 | System `back()` Button | Yes (`KEYCODE_BACK`) | N/A (iOS has no system Back) | Explicit `UnsupportedIosOperationError` |
 | Foreground/Installed App Inventory (`current_app`, `list_apps`) | Yes (A11y + `pm list`) | **Forbidden by iOS Sandbox** | Explicit `UnsupportedIosOperationError` |
 | Voice / Shortcut / Action Button Triggers | Yes (Tile / Assistant) | **Yes (`AppIntents` / Siri / Shortcuts)** | macOS Shortcuts / CLI |
+
+---
+
+## Proactive Secretary on iOS (Honest Platform Boundary)
+
+Apple strictly **forbids** third-party iOS apps from implementing an Android-style `NotificationListenerService` to intercept notifications from KakaoTalk, Slack, SMS, or banking apps. Hanson never fakes background notification sniffing on stock iOS. Instead, [`ProactiveSecretarySwiftCore.swift`](HansonMobileUseIOS/Sources/HansonMobileUseIOS/ProactiveSecretarySwiftCore.swift) delivers the same **0%-saturation Paper/Carbon Chief-of-Staff Inbox & A2UI `v1.0` proposal cards** through Apple-sanctioned sources:
+
+| Proactive Secretary Capability | Android (`ProactiveSecretaryEngine` + `:18888`) | iOS Companion (`ProactiveSecretarySwiftCore`) |
+| :--- | :--- | :--- |
+| Multi-turn KakaoTalk / SMS / Messenger Notification Listening | **Yes** (`NotificationListenerService` + `NotificationThreadBuffer`, 12 msgs/room) | **Forbidden by iOS Sandbox** (Apple blocks third-party notification listeners) |
+| Local Calendar Conflict & Overlap Detection | **Yes** (`CalendarContract.Events` + `Reminders`) | **Yes** (Apple `EventKit` via `ProactiveEventKitCalendarBridge`, explicit user permission) |
+| Share Sheet / Siri / Action Button Manual Handoff | Yes (Tile / Share Intent) | **Yes** (iOS Share Sheet + `AppIntents` / Shortcuts) |
+| Work / Cloud Signal Sync (ICS, GitHub PR Reviews, Open-Meteo, Slack/Gmail/Notion/Linear/Jira JSON) | **Yes** (`harness/hanson_secretary_sync.py` -> `:18888/secretary/ingest`) | **Yes** (Mac/Cloud `hanson_secretary_sync.py` -> Companion HTTPS/loopback bridge + RFC 8895 A2UI SSE) |
+| Interactive Proposal Cards & Conflict Badges | In-App Compose + Cross-App Overlay + Lockscreen 1-Tap Notification | **Yes** (`ProactiveSecretaryInboxView` + `ProactiveProposalA2uiBuilder` -> `A2uiSurfaceView`) |
+| Banking / Payment Read-Only Advisory Hardline | **Enforced** (`readOnlyAdvisoryOnly = true`, never clicks banking UIs) | **Enforced** (`isReadOnlyAdvisory`, reminder/note proposals only) |

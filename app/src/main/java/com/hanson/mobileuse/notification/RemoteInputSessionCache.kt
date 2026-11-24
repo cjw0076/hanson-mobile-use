@@ -88,13 +88,80 @@ object RemoteInputSessionCache {
             .take(limit)
     }
 
+    /**
+     * Finds the most recent intercepted notification matching a specific `(pkg, room)` pair.
+     * Matches `roomOrTitle` first, falling back to `sender` when rooms collapse to 1:1 chats.
+     */
+    fun findByRoom(
+        pkg: String,
+        room: String,
+        onlyReplyable: Boolean = false
+    ): InterceptedNotification? {
+        val pkgLower = pkg.trim().lowercase()
+        val roomLower = room.trim().lowercase()
+        if (pkgLower.isEmpty() || roomLower.isEmpty()) return null
+
+        val candidates = sessions.values
+            .filter { item ->
+                item.packageName.trim().lowercase() == pkgLower &&
+                    (!onlyReplyable || item.canQuickReply)
+            }
+            .sortedByDescending { it.timestampMs }
+
+        return candidates.firstOrNull { it.roomOrTitle.trim().lowercase() == roomLower }
+            ?: candidates.firstOrNull { it.sender.trim().lowercase() == roomLower }
+            ?: candidates.firstOrNull { item ->
+                val r = item.roomOrTitle.trim().lowercase()
+                val s = item.sender.trim().lowercase()
+                (r.isNotEmpty() && (r.contains(roomLower) || roomLower.contains(r))) ||
+                    (s.isNotEmpty() && (s.contains(roomLower) || roomLower.contains(s)))
+            }
+    }
+
+    /**
+     * Returns unreplied notifications that have remained unanswered for at least [minAgeMs].
+     */
+    fun listUnrepliedOlderThan(
+        minAgeMs: Long,
+        nowMs: Long = System.currentTimeMillis(),
+        onlyReplyable: Boolean = true
+    ): List<InterceptedNotification> {
+        val thresholdMs = minAgeMs.coerceAtLeast(0L)
+        return sessions.values
+            .filter { item ->
+                (!onlyReplyable || item.canQuickReply) &&
+                    item.repliedText.isNullOrBlank() &&
+                    item.timestampMs > 0L &&
+                    (nowMs - item.timestampMs) >= thresholdMs
+            }
+            .sortedByDescending { it.timestampMs }
+    }
+
     fun markReplied(sessionId: String, replyMessage: String) {
         val existing = sessions[sessionId] ?: return
+        val nowMs = System.currentTimeMillis()
         sessions[sessionId] = existing.copy(
             repliedText = replyMessage,
-            repliedAtMs = System.currentTimeMillis()
+            repliedAtMs = nowMs
         )
         refreshFlow()
+        runCatching {
+            com.hanson.mobileuse.agent.CommitmentDebtTrackerEngine.onSelfMessageObserved(
+                context = null,
+                packageName = existing.packageName,
+                roomOrTitle = existing.roomOrTitle,
+                counterparty = existing.sender,
+                selfText = replyMessage,
+                timestampMs = nowMs
+            )
+        }
+        runCatching {
+            com.hanson.mobileuse.agent.RelationshipCareCadenceEngine.recordContactTouch(
+                contactName = existing.sender,
+                messageText = replyMessage,
+                timestampMs = nowMs
+            )
+        }
     }
 
     fun evictExpired(nowMs: Long = System.currentTimeMillis(), ttlMs: Long = DEFAULT_TTL_MS): Int {

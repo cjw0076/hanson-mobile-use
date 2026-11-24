@@ -1,13 +1,19 @@
 package com.hanson.mobileuse.agent
 
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.util.Log
 import com.hanson.mobileuse.accessibility.AtomicSnapshot
 import com.hanson.mobileuse.accessibility.HansonAccessibilityService
 import com.hanson.mobileuse.accessibility.HierarchyDumper
 import com.hanson.mobileuse.notification.InterceptedNotification
+import com.hanson.mobileuse.notification.NotificationStormShieldEngine
+import com.hanson.mobileuse.notification.ProactiveSecretaryNotifier
+import com.hanson.mobileuse.notification.RemoteInputSessionCache
 import com.hanson.mobileuse.service.FloatingHudService
 import com.hanson.mobileuse.service.HansonForegroundService
+import com.hanson.mobileuse.service.HansonSecretaryWidgetProvider
 import com.hanson.mobileuse.ui.components.CanvasErrorTelemetry
 import com.hanson.mobileuse.ui.components.GenerativeUiStateHolder
 import com.hanson.mobileuse.ui.theme.ObsidianColors
@@ -106,6 +112,24 @@ class MobileUseAgentEngine @JvmOverloads constructor(
             "^(?:응|어|네|예|확인|완료|했어|끝|재개|진행|진행해|ok|yes|done|resume)$",
             RegexOption.IGNORE_CASE
         )
+
+        private val SUPPORTED_A2UI_ACTION_PREFIXES = listOf(
+            "secretary.",
+            "commitment.",
+            "defense.",
+            "shield.",
+            "care.",
+            "tx.",
+            "evidence.",
+            "share.",
+            "demo.",
+            "call."
+        )
+
+        fun isSupportedA2uiSecretaryAction(actionName: String): Boolean {
+            val normalized = actionName.trim().lowercase(Locale.ROOT)
+            return SUPPORTED_A2UI_ACTION_PREFIXES.any { normalized.startsWith(it) }
+        }
     }
 
     private val prefs = context.getSharedPreferences(CONFIG_PREFS, Context.MODE_PRIVATE)
@@ -209,6 +233,11 @@ class MobileUseAgentEngine @JvmOverloads constructor(
     @Volatile
     private var pendingPlanGoal: String? = null
 
+    @Volatile
+    private var activeCrewAssignment: HansonCrewAssignment? = null
+    private val _activeCrewRole = MutableStateFlow<HansonCrewRole?>(null)
+    val activeCrewRole: StateFlow<HansonCrewRole?> = _activeCrewRole.asStateFlow()
+
     init {
         HansonForegroundService.onEmergencyStopRequested = { stopRun("네, 작업을 바로 멈췄어요.") }
         FloatingHudService.onStopClicked = { stopRun("네, 작업을 멈췄어요. 다음엔 어떻게 할까요?") }
@@ -227,6 +256,1065 @@ class MobileUseAgentEngine @JvmOverloads constructor(
         GenerativeUiStateHolder.addErrorListener { telemetry ->
             onCanvasExecutionError(telemetry.rawJson.ifBlank { telemetry.toJsonString() })
         }
+        runCatching {
+            val appCtx = runCatching { context.applicationContext }.getOrNull() ?: context
+            ProactiveSecretaryEngine.ensureInitialized(appCtx)
+            ProactiveSecretaryNotifier.registerHook(appCtx)
+            LifestyleBeatScheduler.ensureInitialized(appCtx)
+            LifestyleBeatScheduler.seedDefaultBeatsIfEmpty()
+            RoomUrgencyCalibrationStore.ensureInitialized(appCtx)
+            PrivacyAndQuotaProofLedger.ensureInitialized(appCtx)
+            CommitmentDebtTrackerEngine.ensureInitialized(appCtx)
+            RelationshipCareCadenceEngine.ensureInitialized(appCtx)
+            ActionTransactionLedger.ensureInitialized(appCtx)
+        }
+    }
+
+    /**
+     * Executes a human-approved Proactive Chief-of-Staff AI Secretary proposal action.
+     * Enforces strict banking read-only advisory boundaries (never auto-clicks financial apps),
+     * routes real OS tool actions via [toolHarness], updates proposal lifecycle state, cleans up
+     * A2UI surface + lockscreen notification, and records an [ActionReceipt] + concise Korean chat confirmation.
+     */
+    fun executeProactiveProposal(
+        proposalId: String,
+        actionKey: String = "approve",
+        replyText: String = "",
+        snoozeMinutes: Long = 60L
+    ): Pair<Boolean, String> {
+        val appCtx = runCatching { context.applicationContext }.getOrNull() ?: context
+        runCatching { ProactiveSecretaryEngine.ensureInitialized(appCtx) }
+
+        val cleanId = proposalId.trim()
+        if (cleanId.isEmpty()) {
+            return false to "제안 ID가 비어 있어요."
+        }
+        val proposal = ProactiveSecretaryEngine.getProposal(cleanId)
+            ?: return false to "해당 선제안 항목을 찾을 수 없어요: $cleanId"
+
+        fun cleanupProposalSurfaces() {
+            runCatching {
+                A2uiSurfaceRegistry.deleteSurface(ProactiveProposalToA2uiBridge.surfaceIdFor(proposal))
+            }
+            runCatching {
+                ProactiveSecretaryNotifier.cancelNotification(appCtx, proposal.id)
+            }
+            runCatching {
+                HansonSecretaryWidgetProvider.requestRefresh(appCtx)
+            }
+        }
+
+        val normalizedKey = actionKey.trim().lowercase(Locale.ROOT).ifBlank { "approve" }
+        when (normalizedKey) {
+            "dismiss" -> {
+                ProactiveSecretaryEngine.dismissProposal(proposal.id)
+                cleanupProposalSurfaces()
+                return true to "'${proposal.titleKo}' 제안을 무시했어요."
+            }
+
+            "snooze" -> {
+                val mins = snoozeMinutes.coerceIn(1L, 24L * 60L)
+                ProactiveSecretaryEngine.snoozeProposal(proposal.id, snoozeMinutes = mins)
+                cleanupProposalSurfaces()
+                return true to "'${proposal.titleKo}' 제안을 ${mins}분 뒤로 미뤘어요."
+            }
+
+            "a2ui" -> {
+                val surfaceId = ProactiveProposalToA2uiBridge.publishToA2uiRegistry(proposal)
+                if (ProactiveSecretaryEngine.settings.value.floatingA2uiOverlayEnabled) {
+                    runCatching {
+                        com.hanson.mobileuse.service.DynamicCanvasOverlayService.startIfPermitted(
+                            appCtx,
+                            initialDrawMode = false
+                        )
+                    }
+                }
+                return true to "'${proposal.titleKo}' 제안을 A2UI 카드($surfaceId)로 펼쳤어요."
+            }
+        }
+
+        val resolvedAction: ProposalAction = when (normalizedKey) {
+            "approve" -> proposal.primaryAction
+            "reply" -> {
+                proposal.secondaryActions.firstOrNull { it.kind == ProposalActionKind.SEND_QUICK_REPLY }
+                    ?: proposal.primaryAction.takeIf { it.kind == ProposalActionKind.SEND_QUICK_REPLY }
+                    ?: ProposalAction(
+                        key = "reply",
+                        labelKo = "빠른 답장",
+                        kind = ProposalActionKind.SEND_QUICK_REPLY
+                    )
+            }
+            "open_map" -> {
+                proposal.secondaryActions.firstOrNull { it.kind == ProposalActionKind.OPEN_MAP }
+                    ?: proposal.primaryAction.takeIf { it.kind == ProposalActionKind.OPEN_MAP }
+                    ?: ProposalAction(
+                        key = "open_map",
+                        labelKo = "지도 열기",
+                        kind = ProposalActionKind.OPEN_MAP
+                    )
+            }
+            else -> {
+                proposal.primaryAction.takeIf { it.key.equals(actionKey.trim(), ignoreCase = true) }
+                    ?: proposal.secondaryActions.firstOrNull { it.key.equals(actionKey.trim(), ignoreCase = true) }
+                    ?: return false to "지원하지 않는 비서 액션입니다: $actionKey"
+            }
+        }
+
+        if (resolvedAction.kind == ProposalActionKind.DISMISS) {
+            ProactiveSecretaryEngine.dismissProposal(proposal.id)
+            cleanupProposalSurfaces()
+            return true to "'${proposal.titleKo}' 제안을 닫았어요."
+        }
+        if (resolvedAction.kind == ProposalActionKind.SNOOZE) {
+            val mins = (resolvedAction.payload["minutes"]?.toLongOrNull() ?: snoozeMinutes).coerceIn(1L, 24L * 60L)
+            ProactiveSecretaryEngine.snoozeProposal(proposal.id, snoozeMinutes = mins)
+            cleanupProposalSurfaces()
+            return true to "'${proposal.titleKo}' 제안을 ${mins}분 뒤로 미뤘어요."
+        }
+
+        // Strict Banking Read-Only Hardline: NEVER auto-click or launch autonomous GUI runs for finance apps.
+        val isReadOnlyFinance = proposal.readOnlyAdvisory ||
+            AppDetailPlaybookRegistry.isFinanceReadOnlyPackage(proposal.packageName)
+        val effectiveKind = if (isReadOnlyFinance &&
+            (resolvedAction.kind == ProposalActionKind.RUN_AGENT_GOAL ||
+                resolvedAction.kind == ProposalActionKind.SEND_QUICK_REPLY)
+        ) {
+            ProposalActionKind.SAVE_NOTE
+        } else {
+            resolvedAction.kind
+        }
+
+        val outcome: ToolExecutionOutcome = when (effectiveKind) {
+            ProposalActionKind.ADD_CALENDAR -> {
+                val calTitle = resolvedAction.payload["title"]?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: proposal.titleKo
+                val startMs = resolvedAction.payload["start_time_ms"]?.toLongOrNull() ?: proposal.startTimeMs
+                val endMs = resolvedAction.payload["end_time_ms"]?.toLongOrNull() ?: proposal.endTimeMs
+                val loc = resolvedAction.payload["location"]?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: proposal.location
+                val reminderMin = resolvedAction.payload["reminder_minutes"]?.toIntOrNull() ?: 30
+                val desc = resolvedAction.payload["description"]?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: proposal.detailKo.ifBlank { proposal.summaryKo }
+                val args = JSONObject().apply {
+                    put("action", "add")
+                    put("title", calTitle)
+                    if (startMs != null && startMs > 0L) put("start_time_ms", startMs)
+                    if (endMs != null && endMs > 0L) put("end_time_ms", endMs)
+                    if (loc.isNotBlank()) put("location", loc)
+                    put("reminder_minutes", reminderMin)
+                    put("description", desc)
+                }
+                toolHarness.execute("manage_calendar", args, null)
+            }
+
+            ProposalActionKind.SET_ALARM -> {
+                val payloadHour = resolvedAction.payload["hour"]?.toIntOrNull()
+                val payloadMinute = resolvedAction.payload["minute"]?.toIntOrNull()
+                val (hour, minute) = if (payloadHour != null && payloadMinute != null) {
+                    payloadHour.coerceIn(0, 23) to payloadMinute.coerceIn(0, 59)
+                } else if (proposal.startTimeMs != null) {
+                    val targetMs = (proposal.startTimeMs - 15L * 60_000L)
+                        .coerceAtLeast(System.currentTimeMillis() + 60_000L)
+                    val zdt = java.time.Instant.ofEpochMilli(targetMs)
+                        .atZone(KoreanScheduleParser.DEFAULT_ZONE)
+                    zdt.hour to zdt.minute
+                } else {
+                    8 to 0
+                }
+                val label = resolvedAction.payload["label"]?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: proposal.titleKo
+                val args = JSONObject().apply {
+                    put("hour", hour)
+                    put("minute", minute)
+                    put("label", label)
+                }
+                toolHarness.execute("set_alarm", args, null)
+            }
+
+            ProposalActionKind.SEND_QUICK_REPLY -> {
+                val finalReply = replyText.trim()
+                    .ifBlank { resolvedAction.payload["replyText"]?.trim().orEmpty() }
+                    .ifBlank { proposal.quickReplyDrafts.firstOrNull()?.trim().orEmpty() }
+                if (finalReply.isEmpty()) {
+                    return false to "전송할 빠른 답장 문구가 비어 있어요."
+                }
+                val sessionIdCandidate = resolvedAction.payload["sessionId"]?.trim().orEmpty()
+                val targetRoom = resolvedAction.payload["roomOrTitle"]?.trim()
+                    ?.takeIf { it.isNotEmpty() }
+                    ?: proposal.roomOrTitle.ifBlank { proposal.sender }
+                val targetKey = when {
+                    sessionIdCandidate.isNotEmpty() && RemoteInputSessionCache.get(sessionIdCandidate) != null ->
+                        sessionIdCandidate
+                    else -> RemoteInputSessionCache.findByRoom(
+                        pkg = proposal.packageName,
+                        room = targetRoom,
+                        onlyReplyable = true
+                    )?.sessionId ?: targetRoom
+                }
+                val args = JSONObject().apply {
+                    put("target", targetKey)
+                    put("message", finalReply)
+                }
+                toolHarness.execute("reply_notification", args, null)
+            }
+
+            ProposalActionKind.SAVE_NOTE -> {
+                val noteKey = resolvedAction.payload["key"]?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: "비서_${proposal.type.badgeKo}_${proposal.titleKo.take(18)}"
+                val noteContent = resolvedAction.payload["content"]?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: buildString {
+                        append(proposal.titleKo)
+                        if (proposal.summaryKo.isNotBlank()) append(" — ").append(proposal.summaryKo)
+                        if (proposal.detailKo.isNotBlank()) append("\n").append(proposal.detailKo)
+                    }
+                runCatching { resolvedScratchpad.put(noteKey, noteContent) }
+                val args = JSONObject().apply {
+                    put("key", noteKey)
+                    put("content", noteContent)
+                }
+                toolHarness.execute("save_note", args, null)
+            }
+
+            ProposalActionKind.OPEN_MAP -> {
+                val place = resolvedAction.payload["location"]?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: proposal.location.ifBlank { proposal.roomOrTitle }
+                if (place.isBlank()) {
+                    return false to "지도에서 열 위치 정보가 없어요."
+                }
+                val deepLink = resolvedAction.payload["deepLink"]?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: AppDetailPlaybookRegistry.buildDeepLinkForPlace(place)
+                val primaryMapOutcome = toolHarness.execute(
+                    "open_link",
+                    JSONObject().put("url", deepLink),
+                    null
+                )
+                if (primaryMapOutcome.succeeded) {
+                    primaryMapOutcome
+                } else {
+                    val webFallback = AppDetailPlaybookRegistry.buildWebFallbackMapUrl(place)
+                    toolHarness.execute("open_link", JSONObject().put("url", webFallback), null)
+                }
+            }
+
+            ProposalActionKind.OPEN_LINK -> {
+                val url = (resolvedAction.payload["url"]?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: proposal.meetingUrl).trim()
+                if (!url.startsWith("https://", ignoreCase = true)) {
+                    return false to "보안상 https:// 링크만 열 수 있어요."
+                }
+                toolHarness.execute("open_link", JSONObject().put("url", url), null)
+            }
+
+            ProposalActionKind.START_DND -> {
+                val args = JSONObject().apply {
+                    put("setting", "dnd")
+                    put("value", "on")
+                }
+                toolHarness.execute("control_device_setting", args, null)
+            }
+
+            ProposalActionKind.RUN_AGENT_GOAL -> {
+                val goal = resolvedAction.payload["goal"]?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: "${proposal.titleKo} (${proposal.summaryKo}) 항목을 진행해줘"
+                startRun(goal)
+                ToolExecutionOutcome(
+                    succeeded = true,
+                    outputText = "AI 에이전트 실행을 시작했어요: $goal",
+                    receipt = ActionReceipt(
+                        toolName = "proactive_secretary",
+                        summaryKo = "선제안 에이전트 실행: ${proposal.titleKo.take(32)}",
+                        detailKo = goal.take(120),
+                        undoHintKo = "상단 '중지' 버튼으로 언제든 실행을 멈출 수 있어요."
+                    )
+                )
+            }
+
+            ProposalActionKind.DISMISS, ProposalActionKind.SNOOZE -> {
+                ToolExecutionOutcome(true, "처리 완료")
+            }
+        }
+
+        if (outcome.succeeded) {
+            ProactiveSecretaryEngine.markExecuted(proposal.id)
+            cleanupProposalSurfaces()
+            val executedToolName = when (effectiveKind) {
+                ProposalActionKind.ADD_CALENDAR -> "manage_calendar"
+                ProposalActionKind.SET_ALARM -> "set_alarm"
+                ProposalActionKind.SEND_QUICK_REPLY -> "reply_notification"
+                ProposalActionKind.SAVE_NOTE -> "save_note"
+                ProposalActionKind.OPEN_MAP, ProposalActionKind.OPEN_LINK -> "open_link"
+                ProposalActionKind.START_DND -> "control_device_setting"
+                ProposalActionKind.RUN_AGENT_GOAL -> "start_run"
+                ProposalActionKind.DISMISS, ProposalActionKind.SNOOZE -> "proactive_secretary"
+            }
+            val savedNoteKey = resolvedAction.payload["key"]?.trim()?.takeIf { it.isNotEmpty() }
+                ?: "비서_${proposal.type.badgeKo}_${proposal.titleKo.take(18)}"
+            val undoCommand = when (effectiveKind) {
+                ProposalActionKind.SAVE_NOTE -> "remove_note:$savedNoteKey"
+                ProposalActionKind.START_DND -> "dnd_off"
+                ProposalActionKind.ADD_CALENDAR -> "delete_calendar:${resolvedAction.payload["title"] ?: proposal.titleKo}"
+                else -> ""
+            }
+            val txNow = System.currentTimeMillis()
+            runCatching {
+                ActionTransactionLedger.ensureInitialized(appCtx)
+                ActionTransactionLedger.recordVerifiedTransaction(
+                    txId = "tx_${proposal.id}_${txNow}",
+                    proposalId = proposal.id,
+                    summaryKo = "[선제안 비서] ${proposal.titleKo}",
+                    steps = listOf(
+                        TransactionStepRecord(
+                            stepId = "step_${proposal.id}_${effectiveKind.name.lowercase(Locale.ROOT)}",
+                            toolName = executedToolName,
+                            targetResourceId = if (effectiveKind == ProposalActionKind.SAVE_NOTE) savedNoteKey else proposal.id,
+                            reversibility = AtomicRollbackAndExplainEngine.classifyReversibility(proposal),
+                            undoCommand = undoCommand,
+                            readbackVerified = true,
+                            readbackDetailKo = outcome.outputText.take(140),
+                            executedAtMs = txNow
+                        )
+                    ),
+                    nowMs = txNow
+                )
+            }
+            runCatching { HansonSecretaryWidgetProvider.requestRefresh(appCtx) }
+            val receiptToRecord = outcome.receipt ?: ActionReceipt(
+                toolName = "proactive_secretary",
+                summaryKo = "[선제안 비서] ${proposal.titleKo.take(36)}",
+                detailKo = outcome.outputText.take(140),
+                undoHintKo = "관련 앱에서 방금 실행한 작업을 확인하거나 변경할 수 있어요."
+            )
+            runCatching { recordReceipt(receiptToRecord) }
+            runCatching {
+                appendChatMessage(
+                    LiveChatMessage(
+                        sender = ChatSender.AGENT,
+                        text = "선제안 비서 작업을 완료했어요: ${proposal.titleKo}\n${outcome.outputText}",
+                        subtitle = "${proposal.type.badgeKo} · ${proposal.sourceApp}",
+                        toolBadge = "SECRETARY",
+                        succeeded = true
+                    )
+                )
+            }
+        }
+
+        return outcome.succeeded to outcome.outputText
+    }
+
+    /**
+     * Rolls back the specified or most recent verified Proactive Secretary transaction in
+     * reverse order via [ActionTransactionLedger], honestly reporting irreversible external sends.
+     */
+    fun rollbackLastSecretaryTransaction(txId: String = ""): String {
+        val appCtx = runCatching { context.applicationContext }.getOrNull() ?: context
+        runCatching { ActionTransactionLedger.ensureInitialized(appCtx) }
+
+        val targetTxId = txId.trim().ifBlank {
+            ActionTransactionLedger.listTransactions()
+                .lastOrNull { it.status == "VERIFIED_DONE" || it.status == "UNVERIFIED_PARTIAL" }
+                ?.txId
+                .orEmpty()
+        }
+        if (targetTxId.isEmpty()) {
+            return "되돌릴 최근 선제안 비서 실행 기록이 없어요."
+        }
+
+        val report = ActionTransactionLedger.rollbackTransaction(
+            txId = targetTxId,
+            executor = { step ->
+                when {
+                    step.undoCommand.startsWith("remove_note:") -> {
+                        val key = step.undoCommand.removePrefix("remove_note:").trim()
+                        if (key.isNotEmpty()) {
+                            resolvedScratchpad.remove(key)
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    step.undoCommand == "dnd_off" -> {
+                        toolHarness.execute(
+                            "control_device_setting",
+                            JSONObject().put("setting", "dnd").put("value", "off"),
+                            null
+                        ).succeeded
+                    }
+                    step.undoCommand.startsWith("delete_calendar:") -> {
+                        val title = step.undoCommand.removePrefix("delete_calendar:").trim()
+                        toolHarness.execute(
+                            "manage_calendar",
+                            JSONObject().put("action", "delete").put("title", title),
+                            null
+                        ).succeeded
+                    }
+                    else -> executeOneTapUndo()
+                }
+            }
+        ) ?: return "해당 실행 트랜잭션(${targetTxId})을 찾을 수 없어요."
+
+        runCatching {
+            appendChatMessage(
+                LiveChatMessage(
+                    sender = ChatSender.AGENT,
+                    text = "실행 되돌리기 결과 (${report.txId}): ${report.summaryKo}",
+                    subtitle = "Atomic Rollback Ledger",
+                    toolBadge = "ROLLBACK",
+                    succeeded = report.failedStepIds.isEmpty()
+                )
+            )
+        }
+        runCatching { HansonSecretaryWidgetProvider.requestRefresh(appCtx) }
+        return report.summaryKo
+    }
+
+    /**
+     * Builds and speaks a clean 60-second TTS-safe Korean daily briefing via [LifestyleBeatScheduler].
+     */
+    fun playSpokenDailyBrief(forceSpeak: Boolean = false): String {
+        val appCtx = runCatching { context.applicationContext }.getOrNull() ?: context
+        runCatching { ProactiveSecretaryEngine.ensureInitialized(appCtx) }
+        val hour = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)
+        val proposals = ProactiveSecretaryEngine.proposals.value
+        val brief = ProactiveDailyBriefEngine.buildBrief(
+            hourOfDay = hour,
+            notifications = RemoteInputSessionCache.listRecent(limit = 15),
+            watcherRules = resolvedWatcherEngine.listRules(),
+            scratchpadEntries = resolvedScratchpad.listEntries(),
+            bubbles = resolvedMemoryBubbles.bubbles.value,
+            pinnedRoutines = resolvedPersonalRoutines.routines.value,
+            proactiveProposals = proposals
+        )
+        val script = LifestyleBeatScheduler.buildSpokenDailyBriefScript(
+            brief = brief,
+            proposals = proposals,
+            hourOfDay = hour
+        )
+        if (forceSpeak) {
+            runCatching { LiveVoiceSessionManager.speakAgentResponse(script) }
+        } else {
+            speakIfEnabled(script)
+        }
+        return script
+    }
+
+    /**
+     * Exports a zero-secret, `AGENTS.md`-compatible portable personal context pack via [CrossLabPortabilityPack].
+     */
+    fun exportCrossLabPortabilityMarkdown(): String {
+        val appCtx = runCatching { context.applicationContext }.getOrNull() ?: context
+        runCatching {
+            LifestyleBeatScheduler.ensureInitialized(appCtx)
+            RelationshipCareCadenceEngine.ensureInitialized(appCtx)
+        }
+        return CrossLabPortabilityPack.exportMarkdown(
+            bubbles = resolvedMemoryBubbles.bubbles.value,
+            routines = resolvedPersonalRoutines.routines.value,
+            vipContacts = RelationshipCareCadenceEngine.listVips(),
+            beats = LifestyleBeatScheduler.beats.value
+        )
+    }
+
+    private fun launchSafeDialer(rawPhoneOrUri: String): Boolean {
+        val appCtx = runCatching { context.applicationContext }.getOrNull() ?: context
+        val trimmed = rawPhoneOrUri.trim()
+        val rawDigits = trimmed.removePrefix("tel:").filter { it.isDigit() || it == '+' || it == '-' }
+        val dialUri = if (rawDigits.isNotBlank()) {
+            Uri.parse("tel:${Uri.encode(rawDigits)}")
+        } else {
+            Uri.parse("tel:")
+        }
+        return runCatching {
+            val intent = Intent(Intent.ACTION_DIAL, dialUri).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            appCtx.startActivity(intent)
+            true
+        }.getOrDefault(false)
+    }
+
+    private fun extractStringListFromContext(contextJson: JSONObject?, key: String): List<String> {
+        if (contextJson == null) return emptyList()
+        val arr = contextJson.optJSONArray(key)
+        if (arr != null) {
+            return buildList {
+                for (i in 0 until arr.length()) {
+                    val v = arr.optString(i, "").trim()
+                    if (v.isNotEmpty()) add(v)
+                }
+            }
+        }
+        val raw = contextJson.optString(key, "").trim()
+        if (raw.isEmpty()) return emptyList()
+        return raw.split(",", ";", "\n").map { it.trim() }.filter { it.isNotEmpty() }
+    }
+
+    /**
+     * Dispatches Google A2UI `secretary.*`, `commitment.*`, `defense.*`, `shield.*`, `care.*`,
+     * `tx.*`, `evidence.*`, `share.*`, `demo.*`, and `call.*` button events emitted from in-app
+     * [CommandCenterScreen] or cross-app [com.hanson.mobileuse.service.DynamicCanvasOverlayService].
+     */
+    fun handleA2uiSecretaryAction(actionName: String, contextJson: JSONObject?): Boolean {
+        val normalized = actionName.trim().lowercase(Locale.ROOT)
+        if (!isSupportedA2uiSecretaryAction(normalized)) return false
+        val appCtx = runCatching { context.applicationContext }.getOrNull() ?: context
+        val proposalId = contextJson?.optString("proposalId", "")?.trim()
+            ?.ifBlank { contextJson.optString("proposal_id", "").trim() }
+            .orEmpty()
+        val surfaceId = contextJson?.optString("surfaceId", "")?.trim().orEmpty()
+
+        return runCatching {
+            when (normalized) {
+                ProactiveProposalToA2uiBridge.ACTION_APPROVE -> {
+                    if (proposalId.isEmpty()) return false
+                    val key = contextJson?.optString("actionKey", "approve")?.trim()
+                        ?.ifBlank { "approve" } ?: "approve"
+                    executeProactiveProposal(proposalId = proposalId, actionKey = key).first
+                }
+
+                ProactiveProposalToA2uiBridge.ACTION_DISMISS -> {
+                    if (proposalId.isEmpty()) return false
+                    val ok = executeProactiveProposal(proposalId = proposalId, actionKey = "dismiss").first
+                    HansonSecretaryWidgetProvider.requestRefresh(appCtx)
+                    ok
+                }
+
+                ProactiveProposalToA2uiBridge.ACTION_SNOOZE -> {
+                    if (proposalId.isEmpty()) return false
+                    val mins = contextJson?.optLong("snoozeMinutes", 30L)
+                        ?.takeIf { it > 0L }
+                        ?: contextJson?.optLong("snooze_minutes", 30L)?.takeIf { it > 0L }
+                        ?: 30L
+                    val ok = executeProactiveProposal(
+                        proposalId = proposalId,
+                        actionKey = "snooze",
+                        snoozeMinutes = mins
+                    ).first
+                    HansonSecretaryWidgetProvider.requestRefresh(appCtx)
+                    ok
+                }
+
+                ProactiveProposalToA2uiBridge.ACTION_REPLY -> {
+                    if (proposalId.isEmpty()) return false
+                    val text = contextJson?.optString("replyText", "")?.trim()
+                        ?.ifBlank { contextJson.optString("reply_text", "").trim() }
+                        .orEmpty()
+                    executeProactiveProposal(
+                        proposalId = proposalId,
+                        actionKey = "reply",
+                        replyText = text
+                    ).first
+                }
+
+                ProactiveProposalToA2uiBridge.ACTION_OPEN_MAP -> {
+                    if (proposalId.isNotEmpty()) {
+                        executeProactiveProposal(proposalId = proposalId, actionKey = "open_map").first
+                    } else {
+                        val loc = contextJson?.optString("location", "")?.trim().orEmpty()
+                        val url = contextJson?.optString("deepLink", "")?.trim()
+                            ?.ifBlank { AppDetailPlaybookRegistry.buildDeepLinkForPlace(loc) }
+                            .orEmpty()
+                        if (url.isBlank()) false
+                        else {
+                            val first = toolHarness.execute("open_link", JSONObject().put("url", url), null)
+                            if (first.succeeded) true
+                            else if (loc.isNotBlank()) {
+                                toolHarness.execute(
+                                    "open_link",
+                                    JSONObject().put("url", AppDetailPlaybookRegistry.buildWebFallbackMapUrl(loc)),
+                                    null
+                                ).succeeded
+                            } else false
+                        }
+                    }
+                }
+
+                BatchDigestA2uiBuilder.ACTION_BATCH_APPROVE_SAFE -> {
+                    val requestedIds = extractStringListFromContext(contextJson, "proposalIds")
+                        .ifEmpty { ProactiveSecretaryEngine.listPendingProposals().map { it.id } }
+                    val safeApproved = ProactiveSecretaryEngine.batchApproveSafe(requestedIds)
+                    var executedCount = 0
+                    safeApproved.forEach { prop ->
+                        val (ok, _) = executeProactiveProposal(prop.id, "approve")
+                        if (ok) executedCount++
+                    }
+                    if (surfaceId.isNotBlank()) A2uiSurfaceRegistry.deleteSurface(surfaceId)
+                    A2uiSurfaceRegistry.deleteSurface("secretary_batch_digest")
+                    HansonSecretaryWidgetProvider.requestRefresh(appCtx)
+                    appendChatMessage(
+                        LiveChatMessage(
+                            sender = ChatSender.AGENT,
+                            text = "안전한 선제안 ${executedCount}건을 일괄 승인·실행했어요. (금융·충돌·외부답장은 직접 확인을 위해 유지됩니다.)",
+                            subtitle = "Batch Digest Approval",
+                            toolBadge = "BATCH",
+                            succeeded = true
+                        )
+                    )
+                    executedCount > 0 || safeApproved.isEmpty()
+                }
+
+                BatchDigestA2uiBuilder.ACTION_BATCH_DISMISS_ALL -> {
+                    val requestedIds = extractStringListFromContext(contextJson, "proposalIds")
+                        .ifEmpty { ProactiveSecretaryEngine.listPendingProposals().map { it.id } }
+                    val dismissed = ProactiveSecretaryEngine.batchDismiss(requestedIds)
+                    dismissed.forEach { prop ->
+                        runCatching { A2uiSurfaceRegistry.deleteSurface(ProactiveProposalToA2uiBridge.surfaceIdFor(prop)) }
+                        runCatching { ProactiveSecretaryNotifier.cancelNotification(appCtx, prop.id) }
+                    }
+                    if (surfaceId.isNotBlank()) A2uiSurfaceRegistry.deleteSurface(surfaceId)
+                    A2uiSurfaceRegistry.deleteSurface("secretary_batch_digest")
+                    HansonSecretaryWidgetProvider.requestRefresh(appCtx)
+                    true
+                }
+
+                CommitmentDebtTrackerEngine.ACTION_MARK_DONE -> {
+                    val targetId = proposalId.ifBlank { contextJson?.optString("commitmentId", "")?.trim().orEmpty() }
+                    CommitmentDebtTrackerEngine.ensureInitialized(appCtx)
+                    val updated = if (targetId.isNotEmpty()) CommitmentDebtTrackerEngine.markDone(targetId) else null
+                    if (proposalId.isNotEmpty()) {
+                        ProactiveSecretaryEngine.markExecuted(proposalId)
+                        runCatching { ProactiveSecretaryNotifier.cancelNotification(appCtx, proposalId) }
+                    }
+                    if (surfaceId.isNotBlank()) A2uiSurfaceRegistry.deleteSurface(surfaceId)
+                    if (targetId.isNotEmpty()) A2uiSurfaceRegistry.deleteSurface("commitment_${targetId}")
+                    HansonSecretaryWidgetProvider.requestRefresh(appCtx)
+                    appendChatMessage(
+                        LiveChatMessage(
+                            sender = ChatSender.AGENT,
+                            text = "내가 한 약속 항목을 완료 처리했어요${updated?.let { ": ${it.promiseText}" }.orEmpty()}.",
+                            subtitle = "Commitment Tracker",
+                            toolBadge = "COMMITMENT",
+                            succeeded = true
+                        )
+                    )
+                    true
+                }
+
+                CommitmentDebtTrackerEngine.ACTION_DRAFT_UPDATE -> {
+                    val draft = contextJson?.optString("draft", "")?.trim()
+                        ?.ifBlank { "조금 늦어지고 있어요. 정리되는 대로 바로 보내드릴게요!" }
+                        ?: "조금 늦어지고 있어요. 정리되는 대로 바로 보내드릴게요!"
+                    runCatching { resolvedScratchpad.put("약속_안내초안", draft) }
+                    appendChatMessage(
+                        LiveChatMessage(
+                            sender = ChatSender.AGENT,
+                            text = "약속 진행 안내 초안을 메모에 준비했어요:\n\"${draft}\"",
+                            subtitle = "Commitment Draft",
+                            toolBadge = "COMMITMENT",
+                            succeeded = true
+                        )
+                    )
+                    true
+                }
+
+                CommitmentDebtTrackerEngine.ACTION_RESCHEDULE -> {
+                    val targetId = proposalId.ifBlank { contextJson?.optString("commitmentId", "")?.trim().orEmpty() }
+                    CommitmentDebtTrackerEngine.ensureInitialized(appCtx)
+                    if (targetId.isNotEmpty()) CommitmentDebtTrackerEngine.rescheduleTomorrow(targetId)
+                    if (proposalId.isNotEmpty()) {
+                        ProactiveSecretaryEngine.snoozeProposal(proposalId, snoozeMinutes = 24L * 60L)
+                        runCatching { ProactiveSecretaryNotifier.cancelNotification(appCtx, proposalId) }
+                    }
+                    if (surfaceId.isNotBlank()) A2uiSurfaceRegistry.deleteSurface(surfaceId)
+                    HansonSecretaryWidgetProvider.requestRefresh(appCtx)
+                    appendChatMessage(
+                        LiveChatMessage(
+                            sender = ChatSender.AGENT,
+                            text = "약속 리마인더를 내일로 미뤘어요.",
+                            subtitle = "Commitment Rescheduled",
+                            toolBadge = "COMMITMENT",
+                            succeeded = true
+                        )
+                    )
+                    true
+                }
+
+                SubscriptionAndExpiryDefenseEngine.ACTION_SCHEDULE_D2_ALARM -> {
+                    val alarmTimeMs = contextJson?.optLong("alarmTimeMs", 0L)
+                        ?.takeIf { it > 0L }
+                        ?: ProactiveSecretaryEngine.getProposal(proposalId)?.startTimeMs
+                        ?: (System.currentTimeMillis() + 60 * 60_000L)
+                    val zdt = java.time.Instant.ofEpochMilli(alarmTimeMs).atZone(KoreanScheduleParser.DEFAULT_ZONE)
+                    val label = contextJson?.optString("label", "")?.trim()
+                        ?.ifBlank { ProactiveSecretaryEngine.getProposal(proposalId)?.titleKo ?: "구독·반품 D-2 확인" }
+                        ?: "구독·반품 D-2 확인"
+                    val outcome = toolHarness.execute(
+                        "set_alarm",
+                        JSONObject().put("hour", zdt.hour).put("minute", zdt.minute).put("label", label),
+                        null
+                    )
+                    if (proposalId.isNotEmpty() && outcome.succeeded) {
+                        ProactiveSecretaryEngine.markExecuted(proposalId)
+                        runCatching { ProactiveSecretaryNotifier.cancelNotification(appCtx, proposalId) }
+                    }
+                    HansonSecretaryWidgetProvider.requestRefresh(appCtx)
+                    appendChatMessage(
+                        LiveChatMessage(
+                            sender = ChatSender.AGENT,
+                            text = "구독·반품 D-2 방어 알람을 설정했어요 (${label}).\n${outcome.outputText}",
+                            subtitle = "Subscription Defense",
+                            toolBadge = "DEFENSE",
+                            succeeded = outcome.succeeded
+                        )
+                    )
+                    outcome.succeeded
+                }
+
+                SubscriptionAndExpiryDefenseEngine.ACTION_OPEN_SUBS -> {
+                    val url = contextJson?.optString("url", "")?.trim()
+                        ?.ifBlank { SubscriptionAndExpiryDefenseEngine.PLAY_STORE_SUBSCRIPTIONS_URL }
+                        ?: SubscriptionAndExpiryDefenseEngine.PLAY_STORE_SUBSCRIPTIONS_URL
+                    if (!url.startsWith("https://", ignoreCase = true)) return false
+                    toolHarness.execute("open_link", JSONObject().put("url", url), null).succeeded
+                }
+
+                SubscriptionAndExpiryDefenseEngine.ACTION_DRAFT_REFUND -> {
+                    val draft = contextJson?.optString("draft", "")?.trim()
+                        ?.ifBlank { "구독 해지 및 반품·환불 요청 초안입니다. 결제 내역 확인 후 처리 부탁드립니다." }
+                        ?: "구독 해지 및 반품·환불 요청 초안입니다."
+                    runCatching { resolvedScratchpad.put("구독_환불요청_초안", draft) }
+                    appendChatMessage(
+                        LiveChatMessage(
+                            sender = ChatSender.AGENT,
+                            text = "해지·환불 요청 초안을 메모에 저장했어요:\n${draft}",
+                            subtitle = "Subscription Defense Draft",
+                            toolBadge = "DEFENSE",
+                            succeeded = true
+                        )
+                    )
+                    true
+                }
+
+                NotificationStormShieldEngine.ACTION_ACK_ALL -> {
+                    val sid = contextJson?.optString("sessionId", "")?.trim().orEmpty()
+                    if (proposalId.isNotEmpty()) ProactiveSecretaryEngine.markExecuted(proposalId)
+                    if (sid.isNotEmpty()) A2uiSurfaceRegistry.deleteSurface("focus_reentry_${sid}")
+                    if (surfaceId.isNotBlank()) A2uiSurfaceRegistry.deleteSurface(surfaceId)
+                    HansonSecretaryWidgetProvider.requestRefresh(appCtx)
+                    true
+                }
+
+                NotificationStormShieldEngine.ACTION_EXTEND_30M -> {
+                    val mins = contextJson?.optLong("minutes", 30L)?.coerceIn(5L, 240L) ?: 30L
+                    NotificationStormShieldEngine.startFocusBlock()
+                    NotificationStormShieldEngine.updateConfig { cur ->
+                        cur.copy(snoozeDurationMs = mins * 60_000L)
+                    }
+                    appendChatMessage(
+                        LiveChatMessage(
+                            sender = ChatSender.AGENT,
+                            text = "알림 폭풍 집중 방패를 ${mins}분 더 연장했어요. VIP·긴급 메시지만 통과합니다.",
+                            subtitle = "Focus Storm Shield",
+                            toolBadge = "SHIELD",
+                            succeeded = true
+                        )
+                    )
+                    true
+                }
+
+                NotificationStormShieldEngine.ACTION_ADD_VIP -> {
+                    val vipTarget = contextJson?.optString("room", "")?.trim()
+                        ?.ifBlank { contextJson.optString("name", "").trim() }
+                        .orEmpty()
+                    if (vipTarget.isEmpty()) return false
+                    NotificationStormShieldEngine.addVip(vipTarget)
+                    appendChatMessage(
+                        LiveChatMessage(
+                            sender = ChatSender.AGENT,
+                            text = "'${vipTarget}' 대상을 집중 방패 VIP 예외 목록에 추가했어요.",
+                            subtitle = "Focus Storm Shield VIP",
+                            toolBadge = "SHIELD",
+                            succeeded = true
+                        )
+                    )
+                    true
+                }
+
+                SmishingAndPlainKoreanEngine.ACTION_DIAL_REAL_PERSON -> {
+                    val senderLabel = contextJson?.optString("sender", "")?.trim().orEmpty()
+                    appendChatMessage(
+                        LiveChatMessage(
+                            sender = ChatSender.AGENT,
+                            text = "의심 링크를 누르지 않고 연락처에서 직접 통화로 확인하실 수 있도록 전화 앱을 열어요${if (senderLabel.isNotBlank()) " (${senderLabel})" else ""}.",
+                            subtitle = "Scam Pre-Shield",
+                            toolBadge = "SHIELD",
+                            succeeded = true
+                        )
+                    )
+                    launchSafeDialer("")
+                }
+
+                SmishingAndPlainKoreanEngine.ACTION_BOHONARA_GUIDE -> {
+                    val guideText = "스미싱 의심 시 링크·첨부파일을 절대 열지 마세요. 보호나라(KISA) 및 공식 신고 안내 절차에 따라 공식 채널에서 문자 진위를 확인하고, 금융 피해가 우려되면 거래 은행 공식 고객센터에 직접 문의하세요."
+                    runCatching { resolvedScratchpad.put("스미싱_공식신고_안내", guideText) }
+                    appendChatMessage(
+                        LiveChatMessage(
+                            sender = ChatSender.AGENT,
+                            text = guideText,
+                            subtitle = "보호나라(KISA) 및 공식 신고 안내",
+                            toolBadge = "SHIELD",
+                            succeeded = true
+                        )
+                    )
+                    true
+                }
+
+                SmishingAndPlainKoreanEngine.ACTION_DISMISS_SAFE -> {
+                    if (proposalId.isNotEmpty()) {
+                        ProactiveSecretaryEngine.dismissProposal(proposalId)
+                        runCatching { ProactiveSecretaryNotifier.cancelNotification(appCtx, proposalId) }
+                        A2uiSurfaceRegistry.deleteSurface("scam_shield_${proposalId}")
+                    }
+                    if (surfaceId.isNotBlank()) A2uiSurfaceRegistry.deleteSurface(surfaceId)
+                    HansonSecretaryWidgetProvider.requestRefresh(appCtx)
+                    true
+                }
+
+                RelationshipCareCadenceEngine.ACTION_OPEN_CHAT -> {
+                    val pkg = contextJson?.optString("packageName", "")?.trim()
+                        ?.ifBlank { "com.kakao.talk" } ?: "com.kakao.talk"
+                    toolHarness.execute(
+                        "manage_app",
+                        JSONObject().put("action", "launch").put("app_name", pkg),
+                        null
+                    ).succeeded
+                }
+
+                RelationshipCareCadenceEngine.ACTION_OPEN_DIALER -> {
+                    val phone = contextJson?.optString("phoneNumber", "")?.trim().orEmpty()
+                    launchSafeDialer(phone)
+                }
+
+                RelationshipCareCadenceEngine.ACTION_SNOOZE_WEEKEND -> {
+                    val vipKey = contextJson?.optString("vipId", "")?.trim()
+                        ?.ifBlank { contextJson.optString("name", "").trim() }
+                        .orEmpty()
+                    RelationshipCareCadenceEngine.ensureInitialized(appCtx)
+                    if (vipKey.isNotEmpty()) RelationshipCareCadenceEngine.snoozeUntilWeekend(vipKey)
+                    if (proposalId.isNotEmpty()) {
+                        ProactiveSecretaryEngine.snoozeProposal(proposalId, snoozeMinutes = 24L * 60L)
+                        runCatching { ProactiveSecretaryNotifier.cancelNotification(appCtx, proposalId) }
+                    }
+                    if (surfaceId.isNotBlank()) A2uiSurfaceRegistry.deleteSurface(surfaceId)
+                    HansonSecretaryWidgetProvider.requestRefresh(appCtx)
+                    appendChatMessage(
+                        LiveChatMessage(
+                            sender = ChatSender.AGENT,
+                            text = "소중한 분 안부 리마인더를 주말로 미뤘어요.",
+                            subtitle = "Relationship Care Cadence",
+                            toolBadge = "CARE",
+                            succeeded = true
+                        )
+                    )
+                    true
+                }
+
+                AtomicRollbackAndExplainEngine.ACTION_ROLLBACK_BUNDLE -> {
+                    val txId = contextJson?.optString("txId", "")?.trim().orEmpty()
+                    rollbackLastSecretaryTransaction(txId)
+                    true
+                }
+
+                AtomicRollbackAndExplainEngine.ACTION_MUTE_TYPE -> {
+                    val roomKey = contextJson?.optString("roomKey", "")?.trim().orEmpty()
+                    val pkg = contextJson?.optString("packageName", "")?.trim().orEmpty()
+                    when {
+                        roomKey.isNotEmpty() -> {
+                            ProactiveSecretaryEngine.reduceRoomFrequency(roomKey)
+                            appendChatMessage(
+                                LiveChatMessage(
+                                    sender = ChatSender.AGENT,
+                                    text = "'${roomKey}' 대화방의 선제안 알림 빈도를 낮췄어요.",
+                                    subtitle = "Room Urgency Calibration",
+                                    toolBadge = "SECRETARY",
+                                    succeeded = true
+                                )
+                            )
+                        }
+                        pkg.isNotEmpty() -> {
+                            ProactiveSecretaryEngine.togglePackageMute(pkg, true)
+                            appendChatMessage(
+                                LiveChatMessage(
+                                    sender = ChatSender.AGENT,
+                                    text = "선택한 앱(${pkg})의 선제안 감지를 음소거했어요.",
+                                    subtitle = "Secretary Settings",
+                                    toolBadge = "SECRETARY",
+                                    succeeded = true
+                                )
+                            )
+                        }
+                    }
+                    true
+                }
+
+                ShareToChecklistEngine.ACTION_SAVE_CHECKLIST -> {
+                    val title = contextJson?.optString("title", "")?.trim()?.ifBlank { "공유 체크리스트" } ?: "공유 체크리스트"
+                    val items = extractStringListFromContext(contextJson, "items")
+                    val content = buildString {
+                        appendLine(title)
+                        if (items.isNotEmpty()) {
+                            items.forEachIndexed { i, item -> appendLine("${i + 1}. $item") }
+                        } else {
+                            appendLine(contextJson?.optString("summary", "")?.trim().orEmpty())
+                        }
+                    }.trim()
+                    val noteKey = "공유체크리스트_${title.take(18)}"
+                    runCatching { resolvedScratchpad.put(noteKey, content) }
+                    toolHarness.execute("save_note", JSONObject().put("key", noteKey).put("content", content), null)
+                    if (surfaceId.isNotBlank()) A2uiSurfaceRegistry.deleteSurface(surfaceId)
+                    appendChatMessage(
+                        LiveChatMessage(
+                            sender = ChatSender.AGENT,
+                            text = "공유된 내용으로 체크리스트를 노트에 저장했어요: ${title}",
+                            subtitle = "Share-to-Checklist",
+                            toolBadge = "SHARE",
+                            succeeded = true
+                        )
+                    )
+                    true
+                }
+
+                ShareToChecklistEngine.ACTION_ADD_WATCHER -> {
+                    val title = contextJson?.optString("title", "")?.trim()?.ifBlank { "공유 링크 변동 감시" } ?: "공유 링크 변동 감시"
+                    val target = contextJson?.optString("target", "")?.trim()
+                        ?.ifBlank { contextJson.optString("url", "").trim() }
+                        ?.ifBlank { "공유 콘텐츠" } ?: "공유 콘텐츠"
+                    val keywords = extractStringListFromContext(contextJson, "keywords")
+                        .ifEmpty { listOf("가격", "할인", "재입고", "예약") }
+                    resolvedWatcherEngine.addRule(
+                        title = title,
+                        targetAppOrUrl = target,
+                        matchKeywords = keywords,
+                        mode = WatcherActionMode.NOTIFY_ONLY
+                    )
+                    if (surfaceId.isNotBlank()) A2uiSurfaceRegistry.deleteSurface(surfaceId)
+                    appendChatMessage(
+                        LiveChatMessage(
+                            sender = ChatSender.AGENT,
+                            text = "공유 항목을 백그라운드 감시 규칙에 등록했어요: ${title}",
+                            subtitle = "Proactive Watcher",
+                            toolBadge = "WATCHER",
+                            succeeded = true
+                        )
+                    )
+                    true
+                }
+
+                ShareToChecklistEngine.ACTION_DISMISS_CHECKLIST -> {
+                    if (surfaceId.isNotBlank()) A2uiSurfaceRegistry.deleteSurface(surfaceId)
+                    true
+                }
+
+                UserDemonstrationRecorder.ACTION_RUN_TEMPLATE -> {
+                    val templateId = contextJson?.optString("templateId", "")?.trim().orEmpty()
+                    val pkg = contextJson?.optString("packageName", "")?.trim().orEmpty()
+                    val paramsObj = contextJson?.optJSONObject("params")
+                    val paramPairs = mutableListOf<String>()
+                    paramsObj?.keys()?.forEach { k ->
+                        val v = paramsObj.optString(k, "").trim()
+                        if (v.isNotEmpty()) paramPairs.add("${k}=${v}")
+                    }
+                    val matchingRoutine = resolvedPersonalRoutines.routines.value.firstOrNull {
+                        it.id == templateId || (pkg.isNotBlank() && it.goalPrompt.contains(pkg, ignoreCase = true))
+                    }
+                    val goal = buildString {
+                        if (matchingRoutine != null) {
+                            append(matchingRoutine.goalPrompt)
+                        } else {
+                            append("${pkg.ifBlank { "현재 앱" }} 시연 루틴(${templateId.ifBlank { "template" }}) 실행해줘")
+                        }
+                        if (paramPairs.isNotEmpty()) {
+                            append(" · 입력값: ")
+                            append(paramPairs.joinToString(", "))
+                        }
+                    }
+                    if (surfaceId.isNotBlank()) A2uiSurfaceRegistry.deleteSurface(surfaceId)
+                    startRun(goal)
+                    true
+                }
+
+                LiveCallCompanionEngine.ACTION_DIAL -> {
+                    val dialUri = contextJson?.optString("dialUri", "")?.trim()
+                        ?.ifBlank { contextJson.optString("phoneNumber", "").trim() }
+                        .orEmpty()
+                    launchSafeDialer(dialUri)
+                }
+
+                LiveCallCompanionEngine.ACTION_SAVE_POST_CALL -> {
+                    val memo = contextJson?.optString("memo", "")?.trim()
+                        ?.ifBlank { contextJson.optString("postCallMemo", "").trim() }
+                        .orEmpty()
+                    val callee = contextJson?.optString("calleeLabel", "")?.trim()?.ifBlank { "통화 상대" } ?: "통화 상대"
+                    if (memo.isNotBlank()) {
+                        runCatching { resolvedScratchpad.put("통화메모_${callee.take(16)}", memo) }
+                        ProactiveSecretaryEngine.ingestExternalSignal(
+                            context = appCtx,
+                            packageName = "com.hanson.callcompanion",
+                            sender = callee,
+                            text = memo,
+                            appLabel = "전화 비서",
+                            roomOrTitle = "${callee} 통화 메모",
+                            canQuickReply = false
+                        )
+                        HansonSecretaryWidgetProvider.requestRefresh(appCtx)
+                        appendChatMessage(
+                            LiveChatMessage(
+                                sender = ChatSender.AGENT,
+                                text = "통화 후 메모를 저장하고 후속 일정·할일을 추출했어요.",
+                                subtitle = "Live Call Companion",
+                                toolBadge = "CALL",
+                                succeeded = true
+                            )
+                        )
+                    } else {
+                        appendChatMessage(
+                            LiveChatMessage(
+                                sender = ChatSender.AGENT,
+                                text = "통화 후 확정된 시간·장소·주의사항을 한 줄로 입력해 주시면 바로 캘린더 제안으로 정리해 드릴게요.",
+                                subtitle = "Live Call Companion",
+                                toolBadge = "CALL",
+                                succeeded = true
+                            )
+                        )
+                    }
+                    true
+                }
+
+                else -> false
+            }
+        }.getOrDefault(false)
+    }
+
+    /**
+     * Runs a proactive Chief-of-Staff context sweep (unanswered replyable messages + upcoming
+     * calendar prep briefs), optionally enriching with zero-key Open-Meteo weather when requested
+     * or opted in via `SecretarySettings.weatherPrepEnabled`.
+     */
+    fun runProactiveSecretaryScan(
+        includeWeather: Boolean = false,
+        lat: Double? = null,
+        lon: Double? = null
+    ): List<ProactiveProposal> {
+        val appCtx = runCatching { context.applicationContext }.getOrNull() ?: context
+        runCatching { ProactiveSecretaryEngine.ensureInitialized(appCtx) }
+
+        val settings = ProactiveSecretaryEngine.settings.value
+        val shouldFetchCustomWeather = includeWeather ||
+            (settings.weatherPrepEnabled && lat != null && lon != null)
+        val weatherBrief = if (shouldFetchCustomWeather) {
+            runCatching {
+                if (lat != null && lon != null) {
+                    ProactiveContextApiConnector.fetchOpenMeteoWeatherBrief(lat = lat, lon = lon)
+                } else {
+                    ProactiveContextApiConnector.fetchOpenMeteoWeatherBrief()
+                }
+            }.getOrNull()
+        } else {
+            null
+        }
+        return ProactiveSecretaryEngine.scanProactiveContext(
+            context = appCtx,
+            weatherBriefOverride = weatherBrief
+        )
     }
 
     /**
@@ -921,11 +2009,22 @@ class MobileUseAgentEngine @JvmOverloads constructor(
         if (bubblesBlock.isNotBlank()) {
             appendLine(bubblesBlock)
         }
+        val activePkg = snapshot?.activePackage.orEmpty()
         val appTip = snapshot?.let {
             AppSpecificTipBank.getTipForPackageOrGoal(it.activePackage, pureUserGoal)
         }.orEmpty()
         if (appTip.isNotBlank()) {
             appendLine("[App Tip] $appTip")
+        }
+        val activePlaybook = AppDetailPlaybookRegistry.findByPackage(activePkg)
+        if (activePlaybook != null) {
+            val guidance = activePlaybook.guiGuidanceKo.trim()
+            if (guidance.isNotBlank() && guidance != appTip.trim()) {
+                appendLine("[App Playbook (${activePlaybook.appLabelKo})] $guidance")
+            }
+            if (activePlaybook.readOnlyAdvisoryOnly) {
+                appendLine("[App Playbook Safety (${activePlaybook.appLabelKo})] 읽기 전용 금융·결제 앱: 자동 클릭·송금·결제 실행 금지.")
+            }
         }
         val notetakerBlock = resolvedScratchpad.toPromptBlock(maxChars = 420)
         if (notetakerBlock.isNotBlank()) {
@@ -1210,6 +2309,13 @@ class MobileUseAgentEngine @JvmOverloads constructor(
         cfg: AgentEngineConfig
     ): ToolExecutionOutcome {
         val canonical = canonicalizeToolName(toolName)
+        val crew = activeCrewAssignment
+        if (crew != null && crew.explicitMention && !HansonCrewRouter.isToolAllowed(crew.role, canonical)) {
+            return ToolExecutionOutcome(
+                succeeded = false,
+                outputText = "[Hanson Crew · ${crew.role.labelKo}(${crew.role.mentionKo})] 허용 도구 범위 밖의 동작('${canonical}')은 실행하지 않습니다."
+            )
+        }
         if (canonical == "browser_use") {
             val rawOutcome = universalNexusEngine.executeMobileBrowserUse(
                 args = args,
@@ -2044,13 +3150,25 @@ class MobileUseAgentEngine @JvmOverloads constructor(
             return
         }
 
-        val parsedInput = ComposerCommandParser.parse(trimmedGoal, _workMode.value)
+        // Hanson Crew explicit role routing (@비서 / @리서처 / @예약 / @쇼핑 / @개발)
+        val crewAssignment = HansonCrewRouter.route(trimmedGoal)
+        val effectiveGoalAfterCrew = if (crewAssignment.explicitMention) {
+            activeCrewAssignment = crewAssignment
+            _activeCrewRole.value = crewAssignment.role
+            crewAssignment.cleanedGoal.ifBlank { trimmedGoal }
+        } else {
+            activeCrewAssignment = null
+            _activeCrewRole.value = null
+            trimmedGoal
+        }
+
+        val parsedInput = ComposerCommandParser.parse(effectiveGoalAfterCrew, _workMode.value)
         if (tryHandleStudioSlashCommand(parsedInput)) {
             return
         }
 
         if (parsedInput.slashCommand == null) {
-            val learnedBubble = resolvedMemoryBubbles.extractAndLearnFromUserUtterance(trimmedGoal, resolvedVault)
+            val learnedBubble = resolvedMemoryBubbles.extractAndLearnFromUserUtterance(effectiveGoalAfterCrew, resolvedVault)
             if (learnedBubble != null) {
                 appendChatMessage(
                     LiveChatMessage(
@@ -2075,9 +3193,9 @@ class MobileUseAgentEngine @JvmOverloads constructor(
         }
 
         val baseGoal = if (parsedInput.slashCommand != null || parsedInput.mentions.isNotEmpty()) {
-            parsedInput.cleanPrompt.ifBlank { trimmedGoal }
+            parsedInput.cleanPrompt.ifBlank { effectiveGoalAfterCrew }
         } else {
-            trimmedGoal
+            effectiveGoalAfterCrew
         }
 
         if (effectiveWorkMode == AgentWorkMode.PLAN) {
@@ -2085,13 +3203,22 @@ class MobileUseAgentEngine @JvmOverloads constructor(
             return
         }
 
-        // P0-4: Keep pureUserGoal strictly clean; place @mention attachments into separate systemContext!
-        val attachedMentionContext = if (parsedInput.mentions.isNotEmpty()) {
+        // P0-4: Keep pureUserGoal strictly clean; place @mention attachments & Crew directive into separate systemContext!
+        val mentionCtx = if (parsedInput.mentions.isNotEmpty()) {
             buildAttachedContextForMentions(parsedInput)
         } else {
             ""
         }
-        syncSessionStoreStatus(statusBadge = "RUNNING", previewLine = baseGoal.take(80), hasPendingApproval = false)
+        val attachedMentionContext = listOfNotNull(
+            crewAssignment.takeIf { it.explicitMention }?.systemDirectiveKo,
+            mentionCtx.takeIf { it.isNotBlank() }
+        ).joinToString("\n")
+        val statusPreview = if (crewAssignment.explicitMention) {
+            "[${crewAssignment.role.mentionKo}] ${baseGoal.take(70)}"
+        } else {
+            baseGoal.take(80)
+        }
+        syncSessionStoreStatus(statusBadge = "RUNNING", previewLine = statusPreview, hasPendingApproval = false)
 
         // Explicit BACKGROUND dispatch: force all sub-goals into the non-blocking Background Lane!
         if (effectiveLane == ExecutionLaneMode.BACKGROUND) {

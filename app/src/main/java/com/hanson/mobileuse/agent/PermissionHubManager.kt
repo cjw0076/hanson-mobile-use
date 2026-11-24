@@ -17,6 +17,7 @@ import com.hanson.mobileuse.notification.RemoteInputSessionCache
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.util.Locale
 
 enum class PermissionTier(val titleKo: String, val subtitleKo: String) {
     TIER_1_ACCESSIBILITY(
@@ -102,6 +103,325 @@ data class OneTouchSetupResult(
 )
 
 /**
+ * 3-tier risk classification absorbed from `Sanuu7/AndroidHarness` (`DeviceAccessManager.kt`):
+ * - [READ_ONLY_QUIET]: Passive inspection commands executed quietly without interrupting chat.
+ * - [PER_CHAT_CONSENT]: Mutating UI/app/workspace controls requiring one-time per-chat approval.
+ * - [DESTRUCTIVE_ASK_EVERY_TIME]: Irreversible financial, telephony, uninstall, reset, or shell-risk
+ *   commands that ALWAYS require explicit user confirmation regardless of session consent.
+ */
+enum class PhoneControlTier(
+    val labelKo: String,
+    val descriptionKo: String
+) {
+    READ_ONLY_QUIET(
+        "읽기 전용 (자동 허용)",
+        "화면 조회·앱 목록·파일 읽기 등 상태 변경이 없는 조회 명령"
+    ),
+    PER_CHAT_CONSENT(
+        "채팅 세션 승인",
+        "터치·스와이프·앱 실행·파일 편집 등 세션당 1회 승인이 필요한 제어 명령"
+    ),
+    DESTRUCTIVE_ASK_EVERY_TIME(
+        "매번 확인 필요 (고위험)",
+        "삭제·결제·송금·전화·문자·초기화·권한 변경 등 비가역 고위험 명령"
+    )
+}
+
+/**
+ * Risk-tiered command classifier and prompt gate absorbed from `Sanuu7/AndroidHarness`.
+ */
+object PhoneControlGate {
+
+    private val SHELL_METACHAR_REGEX = Regex("[;&|`$()><\\n\\r\\u0000\\\\]")
+
+    private val DESTRUCTIVE_EXACT_OR_PREFIX: Set<String> = setOf(
+        "rm", "rm -rf", "rmdir", "delete", "delete_file", "uninstall",
+        "pm uninstall", "pm clear", "pm grant", "pm revoke", "pm disable",
+        "wipe", "factory_reset", "reset", "format", "reboot", "shutdown",
+        "settings put", "settings delete", "su", "sudo", "sh", "bash",
+        "call_phone", "make_call", "dial_call", "send_sms", "send_email",
+        "transfer", "wire", "pay", "checkout", "purchase", "buy", "buy_now",
+        "cancel_subscription", "deactivate", "clear_data", "force_stop_all"
+    )
+
+    private val DESTRUCTIVE_SUBSTRINGS: Set<String> = setOf(
+        "rm -", "uninstall", "factory_reset", "factory reset", "wipe_data",
+        "pm clear", "pm uninstall", "pm grant", "pm revoke",
+        "call_phone", "send_sms", "wire_transfer", "bank_transfer",
+        "결제", "송금", "이체", "회원탈퇴", "계정 삭제", "공장 초기화",
+        "초기화", "앱 삭제", "영구 삭제", "전화 발신", "문자 발송"
+    )
+
+    private val READ_ONLY_COMMANDS: Set<String> = setOf(
+        "snapshot", "dump", "dump_xml", "elements", "status", "ping", "health",
+        "get_state", "portal_state", "portal/state", "portal/ping",
+        "list_apps", "list_files", "read_file", "search_files", "grep", "cat",
+        "ls", "tree", "wc", "pwd", "diff", "logcat", "top", "preflight",
+        "screenshot", "get_notifications", "read_notifications", "list_notifications",
+        "discover_deeplinks", "resolve_deeplink", "resolve_deeplink_dry_run",
+        "check_conflicts", "wm size", "wm density", "settings get", "getprop",
+        "whoami", "id", "wait_stable", "wait_for_text", "repo_map"
+    )
+
+    /**
+     * Classifies [command] into one of the three [PhoneControlTier] risk levels.
+     * Fails closed to [PhoneControlTier.DESTRUCTIVE_ASK_EVERY_TIME] on shell metacharacters or
+     * destructive/financial/telephony keywords, and defaults unknown non-empty commands to
+     * [PhoneControlTier.PER_CHAT_CONSENT].
+     */
+    fun classifyCommandTier(command: String): PhoneControlTier {
+        val raw = command.trim()
+        if (raw.isEmpty()) return PhoneControlTier.READ_ONLY_QUIET
+        if (SHELL_METACHAR_REGEX.containsMatchIn(raw)) {
+            return PhoneControlTier.DESTRUCTIVE_ASK_EVERY_TIME
+        }
+
+        val lower = raw.lowercase(Locale.ROOT)
+        val normalized = lower.replace(Regex("\\s+"), " ")
+        val firstToken = normalized.substringBefore(' ').trimStart('/')
+        val firstTwoTokens = normalized.split(' ').take(2).joinToString(" ").trimStart('/')
+
+        if (firstToken in DESTRUCTIVE_EXACT_OR_PREFIX ||
+            firstTwoTokens in DESTRUCTIVE_EXACT_OR_PREFIX ||
+            DESTRUCTIVE_SUBSTRINGS.any { token -> normalized.contains(token) }
+        ) {
+            return PhoneControlTier.DESTRUCTIVE_ASK_EVERY_TIME
+        }
+
+        if (firstToken in READ_ONLY_COMMANDS ||
+            firstTwoTokens in READ_ONLY_COMMANDS ||
+            normalized.trimStart('/') in READ_ONLY_COMMANDS
+        ) {
+            return PhoneControlTier.READ_ONLY_QUIET
+        }
+
+        return PhoneControlTier.PER_CHAT_CONSENT
+    }
+
+    /**
+     * Determines whether executing an action of [tier] requires prompting the user given
+     * [sessionApproved] (whether the user already approved phone control in the current chat).
+     */
+    fun requiresPrompt(tier: PhoneControlTier, sessionApproved: Boolean): Boolean = when (tier) {
+        PhoneControlTier.READ_ONLY_QUIET -> false
+        PhoneControlTier.PER_CHAT_CONSENT -> !sessionApproved
+        PhoneControlTier.DESTRUCTIVE_ASK_EVERY_TIME -> true
+    }
+
+    fun requiresPrompt(command: String, sessionApproved: Boolean): Boolean =
+        requiresPrompt(classifyCommandTier(command), sessionApproved)
+
+    fun explainDecisionKo(command: String, sessionApproved: Boolean): String {
+        val tier = classifyCommandTier(command)
+        val needPrompt = requiresPrompt(tier, sessionApproved)
+        return when {
+            tier == PhoneControlTier.READ_ONLY_QUIET ->
+                "읽기 전용 작업이므로 사용자 확인 없이 조용히 실행할 수 있습니다."
+            tier == PhoneControlTier.DESTRUCTIVE_ASK_EVERY_TIME ->
+                "고위험·비가역 작업(${tier.labelKo})으로 분류되어 매번 사용자 승인이 필요합니다."
+            needPrompt ->
+                "기기 제어 작업(${tier.labelKo})이므로 현재 채팅 세션의 1회 승인이 필요합니다."
+            else ->
+                "현재 채팅 세션에서 기기 제어가 이미 승인되어 즉시 실행할 수 있습니다."
+        }
+    }
+}
+
+enum class WirelessAdbPairPhase(val labelKo: String) {
+    IDLE("대기"),
+    DISCOVERING_MDNS("무선 디버깅 mDNS 탐색 중"),
+    AWAITING_PAIR_CODE("6자리 페어링 코드 입력 대기"),
+    PAIRING("로컬 무선 ADB 페어링 준비 완료"),
+    PAIRED_READY("무선 ADB 연결 준비 완료"),
+    FAILED("입력 검증 실패")
+}
+
+data class WirelessAdbPairValidation(
+    val valid: Boolean,
+    val normalizedHost: String = "",
+    val port: Int = -1,
+    val sanitizedPairingCode: String = "",
+    val errorKo: String = ""
+)
+
+/**
+ * In-app Android 11+ Wireless Debugging self-pairing bootstrap state absorbed from
+ * `Sanuu7/AndroidHarness` (`WirelessAdbManager.kt` + `AdbPairingClient.kt` + `AdbMdns.kt`),
+ * eliminating the external PC cable or third-party Shizuku app requirement.
+ */
+data class WirelessAdbSelfPairState(
+    val phase: WirelessAdbPairPhase = WirelessAdbPairPhase.IDLE,
+    val endpoint: String = "",
+    val serviceType: String = WirelessAdbSelfPairHelper.MDNS_PAIRING_SERVICE_TYPE,
+    val pairingCodeValid: Boolean = false,
+    val endpointValid: Boolean = false,
+    val pairedHostPort: String? = null,
+    val guideStepsKo: List<String> = WirelessAdbSelfPairHelper.DEFAULT_BOOTSTRAP_STEPS_KO,
+    val messageKo: String = ""
+)
+
+/**
+ * Pure JVM-testable validator & bootstrap guide for Android 11+ Wireless ADB self-pairing.
+ * Strictly restricts endpoints to loopback (`127.0.0.0/8`, `localhost`, `[::1]`) or RFC1918
+ * private LAN subnets (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), refusing all
+ * public/routable IPs, arbitrary hostnames, privileged ports (<1024), and shell metacharacters.
+ */
+object WirelessAdbSelfPairHelper {
+
+    const val MDNS_PAIRING_SERVICE_TYPE: String = "_adb-tls-pairing._tcp"
+    const val MDNS_CONNECT_SERVICE_TYPE: String = "_adb-tls-connect._tcp"
+    const val MIN_DYNAMIC_PORT: Int = 1024
+    const val MAX_PORT: Int = 65535
+
+    private val SHELL_METACHAR_OR_SPACE_REGEX = Regex("[;&|`$()><\\n\\r\\u0000\\\\/\\s]")
+    private val SIX_DIGIT_CODE_REGEX = Regex("^\\d{6}$")
+    private val IPV4_REGEX = Regex("^(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})$")
+
+    val DEFAULT_BOOTSTRAP_STEPS_KO: List<String> = listOf(
+        "1. 설정 > 개발자 옵션 > 무선 디버깅을 켠 뒤 '페어링 코드로 기기 페어링'을 눌러 주세요.",
+        "2. 화면을 분할하거나 알림창에서 IP 주소 및 포트(예: 192.168.0.10:37123)와 6자리 코드를 확인하세요.",
+        "3. Hanson 앱에 로컬/LAN 엔드포인트와 6자리 페어링 코드를 입력하면 PC·Shizuku 없이 자체 부트스트랩합니다.",
+        "4. 보안상 공인 IP나 외부 도메인은 자동 차단되며, 기기 내부(127.0.0.1) 및 사설 LAN 대역만 허용됩니다."
+    )
+
+    /**
+     * Validates a 6-digit Android Wireless Debugging pairing code, rejecting shell metacharacters
+     * and non-numeric input.
+     */
+    fun validatePairingCode(pairingCode: String): Pair<Boolean, String> {
+        if (pairingCode.isEmpty() || SHELL_METACHAR_OR_SPACE_REGEX.containsMatchIn(pairingCode.trim())) {
+            return false to "페어링 코드는 공백이나 특수문자 없이 6자리 숫자여야 합니다."
+        }
+        val trimmed = pairingCode.trim()
+        if (!SIX_DIGIT_CODE_REGEX.matches(trimmed)) {
+            return false to "무선 디버깅 페어링 코드는 정확히 6자리 숫자(000000~999999)여야 합니다."
+        }
+        return true to trimmed
+    }
+
+    /**
+     * Checks whether [host] is strictly a loopback or RFC1918 private LAN address without
+     * performing any DNS resolution.
+     */
+    fun isPrivateOrLoopbackHost(host: String): Boolean {
+        val h = host.trim().lowercase(Locale.ROOT)
+        if (h == "localhost" || h == "::1") return true
+
+        val match = IPV4_REGEX.matchEntire(h) ?: return false
+        val o1 = match.groupValues[1].toIntOrNull() ?: return false
+        val o2 = match.groupValues[2].toIntOrNull() ?: return false
+        val o3 = match.groupValues[3].toIntOrNull() ?: return false
+        val o4 = match.groupValues[4].toIntOrNull() ?: return false
+        if (o1 !in 0..255 || o2 !in 0..255 || o3 !in 0..255 || o4 !in 0..255) return false
+
+        // Reject unspecified 0.x.x.x, link-local 169.254.x.x, broadcast 255.255.255.255, etc.
+        if (o1 == 127) return true                              // 127.0.0.0/8 loopback
+        if (o1 == 10) return true                               // 10.0.0.0/8 RFC1918
+        if (o1 == 172 && o2 in 16..31) return true              // 172.16.0.0/12 RFC1918
+        if (o1 == 192 && o2 == 168) return true                 // 192.168.0.0/16 RFC1918
+        return false
+    }
+
+    /**
+     * Validates an mDNS/Wireless Debugging `host:port` endpoint strictly on loopback or RFC1918
+     * private LAN subnets with a non-privileged port (`1024..65535`).
+     */
+    fun validateMdnsEndpoint(hostPort: String): Pair<Boolean, String> {
+        val trimmed = hostPort.trim()
+        if (trimmed.isEmpty()) {
+            return false to "무선 디버깅 엔드포인트(host:port)를 입력해 주세요."
+        }
+        if (SHELL_METACHAR_OR_SPACE_REGEX.containsMatchIn(trimmed)) {
+            return false to "보안 정책: 엔드포인트에 셸 메타문자 또는 공백이 포함되어 차단되었습니다."
+        }
+
+        val host: String
+        val portStr: String
+        if (trimmed.startsWith("[")) {
+            val closeBracket = trimmed.indexOf(']')
+            if (closeBracket <= 1 || closeBracket + 2 > trimmed.length || trimmed[closeBracket + 1] != ':') {
+                return false to "IPv6 엔드포인트 형식이 올바르지 않습니다 (예: [::1]:37123)."
+            }
+            host = trimmed.substring(1, closeBracket)
+            portStr = trimmed.substring(closeBracket + 2)
+        } else {
+            val colonIdx = trimmed.lastIndexOf(':')
+            if (colonIdx <= 0 || colonIdx != trimmed.indexOf(':')) {
+                return false to "엔드포인트는 host:port 형식이어야 합니다 (예: 192.168.0.10:37123)."
+            }
+            host = trimmed.substring(0, colonIdx)
+            portStr = trimmed.substring(colonIdx + 1)
+        }
+
+        if (!isPrivateOrLoopbackHost(host)) {
+            return false to "보안 정책: 공인/외부 IP 및 임의 도메인('$host')은 차단됩니다. 루프백(127.0.0.1) 또는 사설 LAN(RFC1918)만 허용됩니다."
+        }
+
+        val port = portStr.toIntOrNull()
+        if (port == null || port !in MIN_DYNAMIC_PORT..MAX_PORT) {
+            return false to "포트 번호는 $MIN_DYNAMIC_PORT~$MAX_PORT 범위여야 합니다 (입력: '$portStr')."
+        }
+
+        val normalized = if (host.contains(':')) "[$host]:$port" else "$host:$port"
+        return true to normalized
+    }
+
+    fun validatePairingRequest(hostPort: String, pairingCode: String): WirelessAdbPairValidation {
+        val (endpointOk, endpointOut) = validateMdnsEndpoint(hostPort)
+        if (!endpointOk) {
+            return WirelessAdbPairValidation(valid = false, errorKo = endpointOut)
+        }
+        val (codeOk, codeOut) = validatePairingCode(pairingCode)
+        if (!codeOk) {
+            return WirelessAdbPairValidation(valid = false, errorKo = codeOut)
+        }
+        val lastColon = endpointOut.lastIndexOf(':')
+        val hostPart = endpointOut.substring(0, lastColon).removePrefix("[").removeSuffix("]")
+        val portPart = endpointOut.substring(lastColon + 1).toInt()
+        return WirelessAdbPairValidation(
+            valid = true,
+            normalizedHost = hostPart,
+            port = portPart,
+            sanitizedPairingCode = codeOut
+        )
+    }
+
+    fun buildBootstrapState(hostPort: String, pairingCode: String): WirelessAdbSelfPairState {
+        val (endpointOk, endpointMsg) = validateMdnsEndpoint(hostPort)
+        val (codeOk, codeMsg) = validatePairingCode(pairingCode)
+        return when {
+            endpointOk && codeOk -> WirelessAdbSelfPairState(
+                phase = WirelessAdbPairPhase.PAIRING,
+                endpoint = endpointMsg,
+                pairingCodeValid = true,
+                endpointValid = true,
+                pairedHostPort = endpointMsg,
+                messageKo = "로컬 무선 디버깅($endpointMsg) 페어링 파라미터 검증 완료. Android 11+ 무선 디버깅 TLS 페어링을 진행할 수 있습니다."
+            )
+            endpointOk && !codeOk -> WirelessAdbSelfPairState(
+                phase = WirelessAdbPairPhase.AWAITING_PAIR_CODE,
+                endpoint = endpointMsg,
+                pairingCodeValid = false,
+                endpointValid = true,
+                messageKo = codeMsg
+            )
+            else -> WirelessAdbSelfPairState(
+                phase = WirelessAdbPairPhase.FAILED,
+                endpoint = hostPort.trim(),
+                pairingCodeValid = codeOk,
+                endpointValid = false,
+                messageKo = endpointMsg
+            )
+        }
+    }
+
+    fun buildWirelessDebuggingSettingsIntent(): Intent =
+        Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+}
+
+/**
  * Comprehensive Android Permission & Accessibility Control Hub.
  * Tracks OS grant states across all 5 tiers, provides 1-tap deep-link intents to exact
  * system settings pages, and manages EZmap/Hanson tool governance + Unrestricted Mode.
@@ -118,8 +438,43 @@ class PermissionHubManager(private val context: Context) {
     private val _state = MutableStateFlow(PermissionHubState())
     val state: StateFlow<PermissionHubState> = _state.asStateFlow()
 
+    private val _wirelessAdbState = MutableStateFlow(WirelessAdbSelfPairState())
+    val wirelessAdbState: StateFlow<WirelessAdbSelfPairState> = _wirelessAdbState.asStateFlow()
+
     init {
         refreshStatus()
+    }
+
+    /**
+     * Evaluates a device/CLI command through the 3-tier [PhoneControlGate].
+     * Returns `(tier, requiresUserPrompt)`.
+     */
+    fun evaluatePhoneControlGate(
+        command: String,
+        sessionApproved: Boolean
+    ): Pair<PhoneControlTier, Boolean> {
+        val tier = PhoneControlGate.classifyCommandTier(command)
+        return tier to PhoneControlGate.requiresPrompt(tier, sessionApproved)
+    }
+
+    /**
+     * Validates and updates in-app Android 11+ Wireless Debugging self-pairing bootstrap state.
+     */
+    fun prepareWirelessAdbSelfPair(
+        hostPort: String,
+        pairingCode: String
+    ): WirelessAdbSelfPairState {
+        val next = WirelessAdbSelfPairHelper.buildBootstrapState(hostPort, pairingCode)
+        _wirelessAdbState.value = next
+        return next
+    }
+
+    @JvmOverloads
+    fun openWirelessDebuggingSettings(launcherContext: Context = context): Boolean {
+        return runCatching {
+            launcherContext.startActivity(WirelessAdbSelfPairHelper.buildWirelessDebuggingSettingsIntent())
+            true
+        }.getOrDefault(false)
     }
 
     fun isUnrestrictedMode(): Boolean = prefs.getBoolean(KEY_UNRESTRICTED_MODE, true)

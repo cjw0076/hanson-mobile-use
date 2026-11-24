@@ -8,10 +8,21 @@ import com.hanson.mobileuse.agent.A2uiSurfaceRegistry
 import com.hanson.mobileuse.agent.ChatSender
 import com.hanson.mobileuse.agent.CoDrawElement
 import com.hanson.mobileuse.agent.CoDrawingCanvasEngine
+import com.hanson.mobileuse.agent.CommitmentDebtTrackerEngine
+import com.hanson.mobileuse.agent.CrossLabPortabilityPack
 import com.hanson.mobileuse.agent.DynamicSseEnvelope
 import com.hanson.mobileuse.agent.DynamicUiEventBus
 import com.hanson.mobileuse.agent.HansonRuntimeHolder
+import com.hanson.mobileuse.agent.LifestyleBeatScheduler
 import com.hanson.mobileuse.agent.LiveChatMessage
+import com.hanson.mobileuse.agent.PrivacyAndQuotaProofLedger
+import com.hanson.mobileuse.agent.ProactiveProposalStatus
+import com.hanson.mobileuse.agent.ProactiveSecretaryEngine
+import com.hanson.mobileuse.agent.RelationshipCareCadenceEngine
+import com.hanson.mobileuse.notification.NotificationStormShieldEngine
+import com.hanson.mobileuse.notification.NotificationThreadBuffer
+import com.hanson.mobileuse.service.HansonVirtualDisplayManager
+import com.hanson.mobileuse.service.VirtualDisplayMode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -244,6 +255,11 @@ class ArtemisCommandServer(
                             put("a2uiCatalog", A2uiProtocolConstants.BASIC_CATALOG_V1_0)
                             put("crossAppCoDrawing", true)
                             put("pushNotifications", true)
+                            put("proactiveSecretary", true)
+                            put("deepLinkInspector", true)
+                            put("a11yReadGate", true)
+                            put("lifestyleBeats", true)
+                            put("whiteSpaceLifeCare", true)
                             put("stateTransitionHistory", true)
                             put("portalProtocol", "droidrun-portal-v6")
                             put("parallelLanes", JSONArray().put("FG").put("BG").put("AUTO"))
@@ -255,6 +271,10 @@ class ArtemisCommandServer(
                             put("a2a", "/a2a")
                             put("a2uiMessages", "/a2ui/messages")
                             put("a2uiSurfaces", "/a2ui/surfaces")
+                            put("secretaryProposals", "/secretary/proposals")
+                            put("secretaryScan", "/secretary/scan")
+                            put("secretaryIngest", "/secretary/ingest")
+                            put("secretaryAct", "/secretary/act")
                             put("chat", "/chat")
                             put("mcpTools", "/mcp/tools")
                             put("snapshot", "/snapshot")
@@ -270,10 +290,18 @@ class ArtemisCommandServer(
                             put("vdisplayStatus", "/vdisplay/status")
                             put("vdisplaySnapshot", "/vdisplay/snapshot")
                             put("vdisplayStop", "/vdisplay/stop")
+                            put("vdisplayLaunch", "/vdisplay/launch")
+                            put("vdisplayInput", "/vdisplay/input")
+                            put("vdisplayMode", "/vdisplay/mode")
+                            put("vdisplayTakeover", "/vdisplay/takeover")
                             put("portalPing", "/portal/ping")
                             put("portalState", "/portal/state")
                             put("portalBrief", "/portal/brief")
                             put("portalUndo", "/portal/undo")
+                            put("portalDeepLinks", "/portal/deep-links")
+                            put("portalDeepLinkResolve", "/portal/deep-link/resolve")
+                            put("lifestyleStatus", "/lifestyle/status")
+                            put("lifestylePortabilityExport", "/lifestyle/portability/export")
                         }
                     )
                 }
@@ -601,21 +629,16 @@ class ArtemisCommandServer(
                 sendHttpResponse(out, 200, "application/json", resp.toString())
             }
             "/vdisplay/status" -> {
-                val st = com.hanson.mobileuse.service.HansonVirtualDisplayManager.status.value
-                val resp = JSONObject()
-                    .put("status", "ok")
-                    .put("active", st.active)
-                    .put("displayId", st.displayId)
-                    .put("width", st.width)
-                    .put("height", st.height)
-                    .put("dpi", st.dpi)
-                    .put("lastCaptureTimestampMs", st.lastCaptureTimestampMs)
-                onBridgeEvent?.invoke("/vdisplay/status", "200 OK")
+                val uiSnap = HansonVirtualDisplayManager.uiSnapshot.value
+                val resp = uiSnap.toJson().apply {
+                    put("status", "ok")
+                }
+                onBridgeEvent?.invoke("/vdisplay/status", "200 OK (${uiSnap.mode.name})")
                 sendHttpResponse(out, 200, "application/json", resp.toString())
             }
             "/vdisplay/snapshot" -> {
-                val st = com.hanson.mobileuse.service.HansonVirtualDisplayManager.status.value
-                val b64 = com.hanson.mobileuse.service.HansonVirtualDisplayManager.captureBase64Png(service.applicationContext)
+                val st = HansonVirtualDisplayManager.status.value
+                val b64 = HansonVirtualDisplayManager.captureBase64Png(service.applicationContext)
                 val resp = JSONObject()
                     .put("status", if (b64 != null) "ok" else "no_frame")
                     .put("active", st.active)
@@ -625,9 +648,131 @@ class ArtemisCommandServer(
                 sendHttpResponse(out, 200, "application/json", resp.toString())
             }
             "/vdisplay/stop" -> {
-                com.hanson.mobileuse.service.HansonVirtualDisplayManager.stop()
+                HansonVirtualDisplayManager.stop()
                 onBridgeEvent?.invoke("/vdisplay/stop", "200 STOPPED")
                 sendHttpResponse(out, 200, "application/json", """{"status":"ok","active":false}""")
+            }
+            "/vdisplay/launch" -> {
+                if (!"POST".equals(method, ignoreCase = true)) {
+                    sendHttpResponse(out, 405, "application/json", """{"status":"error","error":"Method Not Allowed"}""")
+                    return
+                }
+                val parsed = runCatching { JSONObject(body) }.getOrNull()
+                if (parsed == null) {
+                    sendHttpResponse(out, 400, "application/json", """{"status":"error","error":"Invalid JSON body"}""")
+                    return
+                }
+                val targetPkg = parsed.optString("package", parsed.optString("packageName", "")).trim()
+                if (targetPkg.isEmpty()) {
+                    sendHttpResponse(out, 400, "application/json", """{"status":"error","error":"Missing package"}""")
+                    return
+                }
+                val (ok, msg) = HansonVirtualDisplayManager.launchAppOnVirtualDisplay(
+                    context = service.applicationContext,
+                    packageName = targetPkg
+                )
+                val resp = JSONObject().apply {
+                    put("status", if (ok) "ok" else "failed")
+                    put("success", ok)
+                    put("package", targetPkg)
+                    put("message", msg)
+                    put("vdisplay", HansonVirtualDisplayManager.uiSnapshot.value.toJson())
+                }
+                onBridgeEvent?.invoke("POST /vdisplay/launch", if (ok) "200 OK ($targetPkg)" else "200 DENIED")
+                sendHttpResponse(out, 200, "application/json", resp.toString())
+            }
+            "/vdisplay/input" -> {
+                if (!"POST".equals(method, ignoreCase = true)) {
+                    sendHttpResponse(out, 405, "application/json", """{"status":"error","error":"Method Not Allowed"}""")
+                    return
+                }
+                val parsed = runCatching { JSONObject(body) }.getOrNull()
+                if (parsed == null) {
+                    sendHttpResponse(out, 400, "application/json", """{"status":"error","error":"Invalid JSON body"}""")
+                    return
+                }
+                val action = parsed.optString("action", "").trim()
+                if (action.isEmpty()) {
+                    sendHttpResponse(out, 400, "application/json", """{"status":"error","error":"Missing action"}""")
+                    return
+                }
+                val x = parsed.optInt("x", 0)
+                val y = parsed.optInt("y", 0)
+                val x2 = parsed.optInt("x2", x)
+                val y2 = parsed.optInt("y2", y)
+                val text = parsed.optString("text", "")
+                val (ok, msg) = HansonVirtualDisplayManager.injectDisplayInput(
+                    action = action,
+                    x = x,
+                    y = y,
+                    x2 = x2,
+                    y2 = y2,
+                    text = text
+                )
+                val resp = JSONObject().apply {
+                    put("status", if (ok) "ok" else "failed")
+                    put("success", ok)
+                    put("action", action)
+                    put("message", msg)
+                    put("vdisplay", HansonVirtualDisplayManager.uiSnapshot.value.toJson())
+                }
+                onBridgeEvent?.invoke("POST /vdisplay/input", if (ok) "200 OK ($action)" else "200 FAILED")
+                sendHttpResponse(out, 200, "application/json", resp.toString())
+            }
+            "/vdisplay/mode" -> {
+                if (!"POST".equals(method, ignoreCase = true)) {
+                    sendHttpResponse(out, 405, "application/json", """{"status":"error","error":"Method Not Allowed"}""")
+                    return
+                }
+                val parsed = runCatching { JSONObject(body) }.getOrNull()
+                if (parsed == null) {
+                    sendHttpResponse(out, 400, "application/json", """{"status":"error","error":"Invalid JSON body"}""")
+                    return
+                }
+                val rawMode = parsed.optString("mode", "").trim().uppercase()
+                val targetMode = VirtualDisplayMode.entries.firstOrNull { it.name == rawMode }
+                if (targetMode == null) {
+                    sendHttpResponse(out, 400, "application/json", """{"status":"error","error":"Invalid mode (use FOREGROUND, BACKGROUND, or IDLE)"}""")
+                    return
+                }
+                val snap = HansonVirtualDisplayManager.switchMode(targetMode)
+                val resp = JSONObject().apply {
+                    put("status", "ok")
+                    put("mode", snap.mode.name)
+                    put("vdisplay", snap.toJson())
+                }
+                onBridgeEvent?.invoke("POST /vdisplay/mode", "200 OK (${snap.mode.name})")
+                sendHttpResponse(out, 200, "application/json", resp.toString())
+            }
+            "/vdisplay/takeover" -> {
+                if (!"POST".equals(method, ignoreCase = true)) {
+                    sendHttpResponse(out, 405, "application/json", """{"status":"error","error":"Method Not Allowed"}""")
+                    return
+                }
+                val parsed = runCatching { JSONObject(body) }.getOrNull()
+                if (parsed == null) {
+                    sendHttpResponse(out, 400, "application/json", """{"status":"error","error":"Invalid JSON body"}""")
+                    return
+                }
+                val action = parsed.optString("action", "").trim().lowercase()
+                val reason = parsed.optString("reason", "사용자 직접 조작이 필요합니다.").trim()
+                val snap = when (action) {
+                    "request" -> HansonVirtualDisplayManager.requestUserTakeover(reason)
+                    "return" -> HansonVirtualDisplayManager.returnControlFromUser()
+                    "resume" -> HansonVirtualDisplayManager.resumeAgentAfterTakeover()
+                    else -> {
+                        sendHttpResponse(out, 400, "application/json", """{"status":"error","error":"Invalid takeover action (use request, return, or resume)"}""")
+                        return
+                    }
+                }
+                val resp = JSONObject().apply {
+                    put("status", "ok")
+                    put("action", action)
+                    put("takeoverState", snap.takeoverState.name)
+                    put("vdisplay", snap.toJson())
+                }
+                onBridgeEvent?.invoke("POST /vdisplay/takeover", "200 OK ($action)")
+                sendHttpResponse(out, 200, "application/json", resp.toString())
             }
             "/mcp/tools" -> {
                 val mcpTools: Any = com.hanson.mobileuse.agent.ToolSpecRegistry.toMcpToolsJson()
@@ -769,22 +914,30 @@ class ArtemisCommandServer(
             }
             "/snapshot" -> {
                 val includeScreenshot = queryParams["screenshot"] != "false"
-                val snapshot = HierarchyDumper.captureAtomicSnapshot(
+                val gated = A11yReadGate.captureGated(
                     service = service,
                     includeScreenshot = includeScreenshot,
                     filterInvisible = queryParams["filter"] != "false"
                 )
-                onBridgeEvent?.invoke(path, "200 OK (${snapshot.indexedElements.size} els)")
-                sendHttpResponse(out, 200, "application/json", snapshot.toJson(includeFullTree = true).toString())
+                val elemCount = gated.snapshot?.indexedElements?.size ?: 0
+                onBridgeEvent?.invoke(
+                    path,
+                    if (gated.degraded) "200 DEGRADED ($elemCount els)" else "200 OK ($elemCount els)"
+                )
+                sendHttpResponse(out, 200, "application/json", gated.toJson(includeFullTree = true).toString())
             }
             "/dump", "/elements" -> {
-                val snapshot = HierarchyDumper.captureAtomicSnapshot(
+                val gated = A11yReadGate.captureGated(
                     service = service,
                     includeScreenshot = false,
                     filterInvisible = queryParams["filter"] != "false"
                 )
-                onBridgeEvent?.invoke(path, "200 OK (${snapshot.indexedElements.size} els)")
-                sendHttpResponse(out, 200, "application/json", snapshot.toJson(includeFullTree = path == "/dump").toString())
+                val elemCount = gated.snapshot?.indexedElements?.size ?: 0
+                onBridgeEvent?.invoke(
+                    path,
+                    if (gated.degraded) "200 DEGRADED ($elemCount els)" else "200 OK ($elemCount els)"
+                )
+                sendHttpResponse(out, 200, "application/json", gated.toJson(includeFullTree = path == "/dump").toString())
             }
             "/dump_xml", "/hierarchy.xml" -> {
                 val snapshot = HierarchyDumper.captureAtomicSnapshot(
@@ -816,26 +969,87 @@ class ArtemisCommandServer(
                 sendHttpResponse(out, 200, "application/json", resp.toString())
             }
             "/portal/state" -> {
-                val snapshot = HierarchyDumper.captureAtomicSnapshot(
+                val gated = A11yReadGate.captureGated(
                     service = service,
                     includeScreenshot = queryParams["screenshot"] == "true",
                     filterInvisible = queryParams["filter"] != "false"
                 )
-                val outline = com.hanson.mobileuse.agent.ContextorCompactor.buildCompactOutline(
-                    snapshot = snapshot,
-                    vault = com.hanson.mobileuse.agent.HansonRuntimeHolder.getBlindVault(service.applicationContext)
+                val snapshot = gated.snapshot
+                val outline = if (snapshot != null) {
+                    com.hanson.mobileuse.agent.ContextorCompactor.buildCompactOutline(
+                        snapshot = snapshot,
+                        vault = com.hanson.mobileuse.agent.HansonRuntimeHolder.getBlindVault(service.applicationContext)
+                    )
+                } else {
+                    ""
+                }
+                val resp = JSONObject().apply {
+                    put("status", if (snapshot != null) "ok" else "degraded")
+                    put("portalVersion", "6.0.0")
+                    put("activePackage", snapshot?.activePackage.orEmpty())
+                    put("activeWindowTitle", snapshot?.activeWindowTitle.orEmpty())
+                    put("elementCount", snapshot?.indexedElements?.size ?: 0)
+                    put("compactOutline", outline)
+                    put("elements", snapshot?.toJson(includeFullTree = false)?.optJSONArray("elements") ?: JSONArray())
+                    put("degraded", gated.degraded)
+                    put("degradedReason", gated.degradedReason ?: JSONObject.NULL)
+                    put("snapshotAgeMs", gated.snapshotAgeMs)
+                    put("cacheCleared", gated.cacheCleared)
+                }
+                val elemCount = snapshot?.indexedElements?.size ?: 0
+                onBridgeEvent?.invoke(
+                    path,
+                    if (gated.degraded) "200 DEGRADED ($elemCount els)" else "200 OK ($elemCount els)"
                 )
+                sendHttpResponse(out, 200, "application/json", resp.toString())
+            }
+            "/portal/deep-links" -> {
+                if (!"GET".equals(method, ignoreCase = true)) {
+                    sendHttpResponse(out, 405, "application/json", """{"status":"error","error":"Method Not Allowed"}""")
+                    return
+                }
+                val rawPkg = queryParams["package"]?.let { encoded ->
+                    runCatching { java.net.URLDecoder.decode(encoded, "UTF-8") }.getOrDefault(encoded)
+                }?.trim()?.ifBlank { null }
+                val links = DeepLinkInspector.inspectInstalledDeepLinks(
+                    context = service.applicationContext,
+                    packageFilter = rawPkg
+                )
+                val arr = JSONArray()
+                links.forEach { arr.put(it.toJson()) }
                 val resp = JSONObject().apply {
                     put("status", "ok")
-                    put("portalVersion", "6.0.0")
-                    put("activePackage", snapshot.activePackage)
-                    put("activeWindowTitle", snapshot.activeWindowTitle)
-                    put("elementCount", snapshot.indexedElements.size)
-                    put("compactOutline", outline)
-                    put("elements", snapshot.toJson(includeFullTree = false).optJSONArray("elements") ?: JSONArray())
+                    put("count", links.size)
+                    put("packageFilter", rawPkg ?: JSONObject.NULL)
+                    put("deepLinks", arr)
                 }
-                onBridgeEvent?.invoke(path, "200 OK (${snapshot.indexedElements.size} els)")
+                onBridgeEvent?.invoke("GET /portal/deep-links", "200 OK (${links.size} links)")
                 sendHttpResponse(out, 200, "application/json", resp.toString())
+            }
+            "/portal/deep-link/resolve" -> {
+                if (!"POST".equals(method, ignoreCase = true)) {
+                    sendHttpResponse(out, 405, "application/json", """{"status":"error","error":"Method Not Allowed"}""")
+                    return
+                }
+                val parsed = runCatching { JSONObject(body) }.getOrNull()
+                if (parsed == null) {
+                    sendHttpResponse(out, 400, "application/json", """{"status":"error","error":"Invalid JSON body"}""")
+                    return
+                }
+                val uri = parsed.optString("uri", parsed.optString("url", "")).trim()
+                if (uri.isEmpty()) {
+                    sendHttpResponse(out, 400, "application/json", """{"status":"error","error":"Missing uri"}""")
+                    return
+                }
+                val resolved = DeepLinkInspector.resolveDeepLinkDryRun(
+                    context = service.applicationContext,
+                    uri = uri
+                )
+                if (!resolved.has("status")) {
+                    resolved.put("status", "ok")
+                }
+                onBridgeEvent?.invoke("POST /portal/deep-link/resolve", "200 OK")
+                sendHttpResponse(out, 200, "application/json", resolved.toString())
             }
             "/portal/brief" -> {
                 val engine = HansonRuntimeHolder.getAgentEngine(service.applicationContext)
@@ -851,7 +1065,8 @@ class ArtemisCommandServer(
                     watcherRules = watchers,
                     scratchpadEntries = scratchpadEntries,
                     bubbles = bubbles,
-                    pinnedRoutines = routines
+                    pinnedRoutines = routines,
+                    proactiveProposals = ProactiveSecretaryEngine.listPendingProposals()
                 )
                 val highlightsArr = JSONArray().apply { brief.highlights.forEach { put(it) } }
                 val actionsArr = JSONArray().apply {
@@ -893,6 +1108,215 @@ class ArtemisCommandServer(
                     put("undone", undone)
                 }
                 onBridgeEvent?.invoke(path, if (undone) "200 OK (Portal Undo)" else "200 OK (No Undo)")
+                sendHttpResponse(out, 200, "application/json", resp.toString())
+            }
+            "/secretary/proposals" -> {
+                if (!"GET".equals(method, ignoreCase = true)) {
+                    sendHttpResponse(out, 405, "application/json", """{"status":"error","error":"Method Not Allowed"}""")
+                    return
+                }
+                val appCtx = service.applicationContext
+                runCatching { ProactiveSecretaryEngine.ensureInitialized(appCtx) }
+                val rawStatus = queryParams["status"]?.trim()?.uppercase()?.ifBlank { "PENDING" } ?: "PENDING"
+                val limit = (queryParams["limit"]?.toIntOrNull() ?: 20).coerceIn(1, 200)
+                val filtered = if (rawStatus == "ALL") {
+                    ProactiveSecretaryEngine.listProposals(statusFilter = null)
+                } else {
+                    val statusEnum = ProactiveProposalStatus.fromNameOrDefault(rawStatus, ProactiveProposalStatus.PENDING)
+                    ProactiveSecretaryEngine.listProposals(statusFilter = statusEnum)
+                }.take(limit)
+
+                val arr = JSONArray()
+                filtered.forEach { arr.put(it.toJson()) }
+                val unreadRooms = NotificationThreadBuffer.activeRoomCount()
+                val resp = JSONObject().apply {
+                    put("status", "ok")
+                    put("count", filtered.size)
+                    put("unread_rooms", unreadRooms)
+                    put("proposals", arr)
+                }
+                onBridgeEvent?.invoke("GET /secretary/proposals", "200 OK (${filtered.size} items)")
+                sendHttpResponse(out, 200, "application/json", resp.toString())
+            }
+            "/secretary/scan" -> {
+                if (!"POST".equals(method, ignoreCase = true)) {
+                    sendHttpResponse(out, 405, "application/json", """{"status":"error","error":"Method Not Allowed"}""")
+                    return
+                }
+                val appCtx = service.applicationContext
+                runCatching { ProactiveSecretaryEngine.ensureInitialized(appCtx) }
+                val parsed = runCatching {
+                    if (body.isNotBlank()) JSONObject(body) else JSONObject()
+                }.getOrDefault(JSONObject())
+                val includeWeather = parsed.optBoolean("include_weather", false)
+                val lat = if (parsed.has("lat") && !parsed.isNull("lat")) {
+                    parsed.optDouble("lat").takeIf { !it.isNaN() }
+                } else {
+                    null
+                }
+                val lon = if (parsed.has("lon") && !parsed.isNull("lon")) {
+                    parsed.optDouble("lon").takeIf { !it.isNaN() }
+                } else {
+                    null
+                }
+                val emitted = runCatching {
+                    HansonRuntimeHolder.getAgentEngine(appCtx).runProactiveSecretaryScan(
+                        includeWeather = includeWeather,
+                        lat = lat,
+                        lon = lon
+                    )
+                }.getOrElse {
+                    ProactiveSecretaryEngine.scanProactiveContext(appCtx)
+                }
+                val pending = ProactiveSecretaryEngine.listPendingProposals()
+                val arr = JSONArray()
+                emitted.forEach { arr.put(it.toJson()) }
+                val resp = JSONObject().apply {
+                    put("status", "ok")
+                    put("new_proposals", emitted.size)
+                    put("total_pending", pending.size)
+                    put("proposals", arr)
+                }
+                onBridgeEvent?.invoke("POST /secretary/scan", "200 OK (new=${emitted.size}, pending=${pending.size})")
+                sendHttpResponse(out, 200, "application/json", resp.toString())
+            }
+            "/secretary/ingest" -> {
+                if (!"POST".equals(method, ignoreCase = true)) {
+                    sendHttpResponse(out, 405, "application/json", """{"status":"error","error":"Method Not Allowed"}""")
+                    return
+                }
+                val parsed = runCatching { JSONObject(body) }.getOrNull()
+                if (parsed == null) {
+                    sendHttpResponse(out, 400, "application/json", """{"status":"error","error":"Invalid JSON body"}""")
+                    return
+                }
+                val packageName = parsed.optString("package_name", parsed.optString("packageName", "")).trim()
+                val appLabel = parsed.optString("app_label", parsed.optString("appLabel", "")).trim()
+                val sender = parsed.optString("sender", "").trim()
+                val room = parsed.optString("room", parsed.optString("roomOrTitle", "")).trim()
+                val text = parsed.optString("text", "")
+                val canQuickReply = parsed.optBoolean("can_quick_reply", parsed.optBoolean("canQuickReply", false))
+                val timestampMs = parsed.optLong("timestamp_ms", System.currentTimeMillis())
+                    .takeIf { it > 0L } ?: System.currentTimeMillis()
+                if (packageName.isEmpty()) {
+                    sendHttpResponse(out, 400, "application/json", """{"status":"error","error":"Missing package_name"}""")
+                    return
+                }
+                val appCtx = service.applicationContext
+                runCatching { ProactiveSecretaryEngine.ensureInitialized(appCtx) }
+                val proposal = ProactiveSecretaryEngine.ingestExternalSignal(
+                    context = appCtx,
+                    packageName = packageName,
+                    sender = sender,
+                    text = text,
+                    appLabel = appLabel,
+                    roomOrTitle = room,
+                    canQuickReply = canQuickReply,
+                    timestampMs = timestampMs
+                )
+                val resp = JSONObject().apply {
+                    put("status", "ok")
+                    put("accepted", proposal != null)
+                    put("proposal", proposal?.toJson() ?: JSONObject.NULL)
+                }
+                onBridgeEvent?.invoke("POST /secretary/ingest", if (proposal != null) "200 ACCEPTED" else "200 FILTERED")
+                sendHttpResponse(out, 200, "application/json", resp.toString())
+            }
+            "/secretary/act" -> {
+                if (!"POST".equals(method, ignoreCase = true)) {
+                    sendHttpResponse(out, 405, "application/json", """{"status":"error","error":"Method Not Allowed"}""")
+                    return
+                }
+                val parsed = runCatching { JSONObject(body) }.getOrNull()
+                if (parsed == null) {
+                    sendHttpResponse(out, 400, "application/json", """{"status":"error","error":"Invalid JSON body"}""")
+                    return
+                }
+                val proposalId = parsed.optString("proposal_id", parsed.optString("proposalId", "")).trim()
+                val action = parsed.optString("action", "approve").trim().ifBlank { "approve" }
+                val replyText = parsed.optString("reply_text", parsed.optString("replyText", ""))
+                val snoozeMinutes = parsed.optLong("snooze_minutes", parsed.optLong("snoozeMinutes", 60L))
+                    .coerceIn(1L, 24L * 60L)
+                if (proposalId.isEmpty()) {
+                    sendHttpResponse(out, 400, "application/json", """{"status":"error","error":"Missing proposal_id"}""")
+                    return
+                }
+                val appCtx = service.applicationContext
+                val engine = HansonRuntimeHolder.getAgentEngine(appCtx)
+                val (succeeded, message) = engine.executeProactiveProposal(
+                    proposalId = proposalId,
+                    actionKey = action,
+                    replyText = replyText,
+                    snoozeMinutes = snoozeMinutes
+                )
+                val newStatus = ProactiveSecretaryEngine.getProposal(proposalId)?.status?.name ?: "UNKNOWN"
+                val resp = JSONObject().apply {
+                    put("status", "ok")
+                    put("proposal_id", proposalId)
+                    put("action", action)
+                    put("succeeded", succeeded)
+                    put("message", message)
+                    put("new_status", newStatus)
+                }
+                onBridgeEvent?.invoke("POST /secretary/act", if (succeeded) "200 OK ($action)" else "200 FAILED ($action)")
+                sendHttpResponse(out, 200, "application/json", resp.toString())
+            }
+            "/lifestyle/status" -> {
+                if (!"GET".equals(method, ignoreCase = true)) {
+                    sendHttpResponse(out, 405, "application/json", """{"status":"error","error":"Method Not Allowed"}""")
+                    return
+                }
+                val appCtx = service.applicationContext
+                runCatching {
+                    LifestyleBeatScheduler.ensureInitialized(appCtx)
+                    PrivacyAndQuotaProofLedger.ensureInitialized(appCtx)
+                    CommitmentDebtTrackerEngine.ensureInitialized(appCtx)
+                    RelationshipCareCadenceEngine.ensureInitialized(appCtx)
+                }
+                val stormCfg = NotificationStormShieldEngine.config.value
+                val stormObj = JSONObject().apply {
+                    put("enabled", stormCfg.enabled)
+                    put("focusBlockActive", stormCfg.focusBlockActive)
+                    put("burstThresholdCount", stormCfg.burstThresholdCount)
+                    put("burstWindowMs", stormCfg.burstWindowMs)
+                    put("vipCount", stormCfg.vipNames.size)
+                    put("heldMessageCount", NotificationStormShieldEngine.heldMessageCount())
+                }
+                val resp = JSONObject().apply {
+                    put("status", "ok")
+                    put("privacyLedger", PrivacyAndQuotaProofLedger.toJson())
+                    put("beats", LifestyleBeatScheduler.toStatusJson())
+                    put("vdisplay", HansonVirtualDisplayManager.uiSnapshot.value.toJson())
+                    put("stormShield", stormObj)
+                    put("vipCount", RelationshipCareCadenceEngine.listVips().size)
+                    put("commitmentsCount", CommitmentDebtTrackerEngine.listOpenCommitments().size)
+                }
+                onBridgeEvent?.invoke("GET /lifestyle/status", "200 OK")
+                sendHttpResponse(out, 200, "application/json", resp.toString())
+            }
+            "/lifestyle/portability/export" -> {
+                if (!"POST".equals(method, ignoreCase = true)) {
+                    sendHttpResponse(out, 405, "application/json", """{"status":"error","error":"Method Not Allowed"}""")
+                    return
+                }
+                val appCtx = service.applicationContext
+                runCatching {
+                    LifestyleBeatScheduler.ensureInitialized(appCtx)
+                    RelationshipCareCadenceEngine.ensureInitialized(appCtx)
+                }
+                val engine = HansonRuntimeHolder.getAgentEngine(appCtx)
+                val markdown = CrossLabPortabilityPack.exportMarkdown(
+                    bubbles = engine.resolvedMemoryBubbles.bubbles.value,
+                    routines = engine.resolvedPersonalRoutines.routines.value,
+                    vipContacts = RelationshipCareCadenceEngine.listVips(),
+                    beats = LifestyleBeatScheduler.beats.value
+                )
+                val resp = JSONObject().apply {
+                    put("status", "ok")
+                    put("markdown", markdown)
+                    put("length", markdown.length)
+                }
+                onBridgeEvent?.invoke("POST /lifestyle/portability/export", "200 OK (${markdown.length} chars)")
                 sendHttpResponse(out, 200, "application/json", resp.toString())
             }
             else -> {
